@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from operator import itemgetter
-from typing import Any, cast
+from typing import cast
 
 from src import config
 from src.ats import coords
@@ -43,7 +43,7 @@ from src.rows import BoardCoords, BoardHit, FetchedJob
 from .directory import find_boards
 from .domain import official_domain
 from .identity import foreign_board
-from .probes import probe_company
+from .probes import Slug, probe_company
 from .websearch_board import websearch_board
 
 
@@ -114,7 +114,7 @@ async def validate_board(comp: BoardCoords) -> tuple[int, int] | None:
     return total, await board.local_count(handle, NC_RE) if total else 0
 
 
-async def _url_board(name: str, careers_url: str) -> tuple[str, Any, str] | None:
+async def _url_board(name: str, careers_url: str) -> tuple[str, Slug, str] | None:
     """(ats, handle, careers_url) of the fetchable board `careers_url`
     itself names (`signatures.detect` on the URL), or None; a board that
     is another employer's (`identity.foreign_board`, as in every other
@@ -188,7 +188,7 @@ async def _resolve(name: str, careers_url: str = "", websearch: bool = True
     from .sniffer import sniff_ats
     unread = []
 
-    async def _mk(ats: str, slug: Any, curl: str | None, via: str) -> BoardHit | None:
+    async def _mk(ats: str, slug: Slug, curl: str | None, via: str) -> BoardHit | None:
         counts = await validate_board(coords.columns(ats, slug, curl))
         if counts is None:
             unread.append(ats)

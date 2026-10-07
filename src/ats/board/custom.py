@@ -28,7 +28,7 @@ from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
-                          hashed_cache_path, host_of, json_cache_get,
+                          JSON, hashed_cache_path, host_of, json_cache_get,
                           json_cache_put, links, node_text, parse_markup)
 
 _OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
@@ -232,7 +232,7 @@ async def custom_board_listing_url(page_url: str, html: str | None = None) -> st
     path = hashed_cache_path(cache_dir("board"), page_url)
     cached = await asyncio.to_thread(json_cache_get, path, config.BOARD_DETECT_CACHE_S)
     if cached is not None:
-        return cast(str | None, cached.get("listing"))
+        return cast(str | None, cast(dict[str, JSON], cached).get("listing"))
     tree = (await asyncio.to_thread(parse_markup, html, url=page_url)
             if html is not None else await _page_tree(page_url))
     if tree is None:

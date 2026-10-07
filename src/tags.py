@@ -29,7 +29,7 @@ leaf (it used to be core.tags, which made config depend on core).
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any
+
 
 LOCAL = "local"
 SWEEP = "sweep"
@@ -127,7 +127,7 @@ def join(tags: Iterable[str | None]) -> str | None:
     return ",".join(sorted({canonical(t) for t in tags if t})) or None
 
 
-def has(raw: str | Mapping[str, Any] | None, tag: str) -> bool:
+def has(raw: str | Mapping[str, object] | None, tag: str) -> bool:
     """True if a company's stored `tags` -- the column, or the whole row --
     includes `tag`, legacy names too.
 
@@ -150,6 +150,7 @@ def has(raw: str | Mapping[str, Any] | None, tag: str) -> bool:
     >>> has({"name": "Acme", "tags": "sweep"}, "sweep"), has({}, "sweep")
     (True, False)
     """
-    if isinstance(raw, Mapping):
-        raw = raw.get("tags")
-    return canonical(tag) in parse(raw)
+    col = raw.get("tags") if isinstance(raw, Mapping) else raw
+    if col is not None and not isinstance(col, str):
+        raise TypeError(f"tags must be a str, not {type(col).__name__}")
+    return canonical(tag) in parse(col)

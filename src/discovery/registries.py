@@ -16,7 +16,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import date
 from collections.abc import Mapping
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 from pydantic import BaseModel
 
@@ -175,7 +175,8 @@ async def nih_sbir(state: str) -> list[NamedSource]:
         rows += page
         offset += cfg["page"]
         meta = _Reply.model_validate(data if isinstance(data, Mapping) else {}).meta
-        if not page or offset >= ((meta and meta.total) or 0):
+        total = meta.total if meta else None
+        if not page or offset >= (total or 0):
             break
     return _named(rows, "nih_sbir")
 
@@ -253,7 +254,7 @@ async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str,
             if not (prev := gathered.get(name_key(s.name))) or (s.blurb and not prev.blurb):
                 gathered[name_key(s.name)] = s
     path = cache_dir("registries_done.json")
-    done = set((json_cache_get(path, float("inf")) or {}).get("done", []))
+    done = set((cast(dict[str, list[str]], json_cache_get(path, float("inf"))) or {}).get("done", []))
     todo = [s for s in ranked(gathered.values(), vocab) if name_key(s.name) not in done]
     batch = [name_key(s.name) for s in todo[:limit]]
     counts |= {"new": len(gathered), "batch": len(batch), "queued": 0, "missed": 0}

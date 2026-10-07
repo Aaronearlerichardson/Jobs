@@ -8,7 +8,7 @@ import sqlite3
 from collections.abc import Collection
 from contextlib import aclosing
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from src import config
 from src import store
@@ -33,6 +33,13 @@ if TYPE_CHECKING:
 # the same body can only fail the same way again; only growth changes
 # anything, and growth is free to detect (the row's own description length).
 UNSCORED_RETRY_DAYS = 30
+
+
+class _RescoreRow(TypedDict):
+    job_id: str
+    title: str
+    description: str
+    location: str | None
 
 
 def _unscored_marker(cause: str, desc_len: int, when: datetime) -> str:
@@ -229,11 +236,12 @@ async def rescore_all(max_workers: int = 6, track: str | None = None,
         q = "SELECT job_id, title, description, location FROM jobs"
         if conds:
             q += " WHERE " + " AND ".join(conds)
-        rows = await db.run(lambda conn: [dict(r) for r in conn.execute(q, args).fetchall()])
+        rows = cast(list[_RescoreRow],
+                    await db.run(lambda conn: [dict(r) for r in conn.execute(q, args).fetchall()]))
         print(f"  rescoring {len(rows)} job(s) against the current resume...")
         now = datetime.now()
 
-        async def _one(r: dict[str, Any]) -> tuple[str, FitResult, str]:
+        async def _one(r: _RescoreRow) -> tuple[str, FitResult, str]:
             res = await score_resume_fit(r["title"], r.get("description", ""),
                                          location=r.get("location") or "")
             return r["job_id"], res, r.get("description", "")

@@ -4,12 +4,11 @@ crawl/harvest pass (migration 0007). The judgment lives in src.crawl.health."""
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Iterable, Mapping
 
 from .schema import connect  # noqa: F401  (the doctests open stores)
 
-def record_platform_health(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> None:
+def record_platform_health(conn: sqlite3.Connection, rows: Iterable[Mapping[str, object]]) -> None:
     """Write one pass's per-platform rows (`pass_at, ats, boards, errors, partial, empty, jobs, fill` keys; `fill` already JSON).
 
     >>> conn = connect(":memory:")

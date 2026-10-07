@@ -238,7 +238,6 @@ Decoder = Annotated[Union[Annotated[JsonDecoder, Tag("json")],
 
 class _Pager(_Adaptation):
     ADAPTATIONS: ClassVar[tuple[str, ...]] = ("ceiling",)
-    size: Count = Field(description="Rows asked per page")
     pages: Count = Field(10, description="The most pages a walk reads")
     total: Grammar = Field(None, description="Names the board's total on the first page")
     ceiling: Count | None = Field(None, description="The most rows the server serves: a total "
@@ -248,7 +247,7 @@ class _Pager(_Adaptation):
     @property
     def stride(self) -> int | None:
         """Rows between one page's first row and the next's."""
-        return self.size
+        raise NotImplementedError
 
     def number(self, n: int) -> int:
         """Page `n`'s (from 0) own number."""
@@ -263,18 +262,31 @@ class _Pager(_Adaptation):
         return n * size
 
 
+class _SizedPager(_Pager):
+    """A pager that must say how many rows it asks per page."""
+    size: Count = Field(description="Rows asked per page")
+
+    @property
+    def stride(self) -> int | None:
+        return self.size
+
+
 class OffsetPager(_Pager):
     kind: Literal["offset"] = Field(description='"$offset" steps a page')
-    size: Count | None = Field(  # pyrefly: ignore[bad-override]  # pydantic lets it widen
+    size: Count | None = Field(
         None, description="Rows asked per page; unset, the server sizes its pages and the walk "
                           "learns it (pager.walk)")
     start: Annotated[Int, Field(ge=0)] = Field(0, description="The first row's offset")
+
+    @property
+    def stride(self) -> int | None:
+        return self.size
 
     def offset(self, n: int, size: int) -> int:
         return self.start + n * size
 
 
-class OverlapPager(_Pager):
+class OverlapPager(_SizedPager):
     ADAPTATIONS = ("ceiling", "step")
     kind: Literal["overlap"] = Field(description='"$offset" steps `step` < `size`: pages overlap')
     step: Count = Field(description="Rows each page steps")
@@ -298,10 +310,13 @@ class OverlapPager(_Pager):
 class PagePager(_Pager):
     ADAPTATIONS = ("ceiling", "bare_first")
     kind: Literal["page"] = Field(description='"$page" counts pages')
-    size: Count | None = Field(  # pyrefly: ignore[bad-override]  # pydantic lets it widen
-        None, description="Rows a page holds, when known")
+    size: Count | None = Field(None, description="Rows a page holds, when known")
     start: Annotated[Int, Field(ge=0)] = Field(0, description="The first page's number")
     bare_first: Bool = Field(False, description="The first page's request names no page")
+
+    @property
+    def stride(self) -> int | None:
+        return self.size
 
     def number(self, n: int) -> int:
         return self.start + n
@@ -310,7 +325,7 @@ class PagePager(_Pager):
         return None if n == 0 and self.bare_first else self.start + n
 
 
-class CursorPager(_Pager):
+class CursorPager(_SizedPager):
     kind: Literal["cursor"] = Field(description="Each page names the next, followed verbatim")
     next: Str = Field(description="The path of a page's next-page URL")
     has_next: Str = Field(description="The path of a page's more-to-come flag")

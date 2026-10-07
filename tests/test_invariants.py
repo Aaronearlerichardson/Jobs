@@ -1195,3 +1195,17 @@ def test_the_module_level_guards_can_actually_see_a_violation():
                 "    except ZeroDivisionError:\n        return 0\n"
                 "def caller(x):\n    return _helper(x)\n")
     assert single_use_private_helpers(trees(src_m=compound)) == []
+
+
+def test_src_has_no_any_and_no_type_ignores():
+    """`Any` switches the checker off for whatever touches it: src/ names it nowhere,
+    and silences the checker with no `ignore` comment either."""
+    named = [rel for rel, tree in _parsed() if rel.startswith("src/")
+             for n in ast.walk(tree)
+             if (isinstance(n, ast.Name) and n.id == "Any")
+             or (isinstance(n, ast.Attribute) and n.attr == "Any")
+             or (isinstance(n, ast.alias) and n.name == "Any")]
+    silenced = [rel for rel, src in source_files() if rel.startswith("src/")
+                and re.search(r"#\s*(?:pyrefly|type):\s*ignore", src)]
+    assert not named, f"Any in {sorted(set(named))}"
+    assert not silenced, f"ignore comments in {silenced}"

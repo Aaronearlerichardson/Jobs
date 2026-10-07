@@ -23,7 +23,7 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from src import config, store
 from src.config import RuntimeTrack
@@ -38,16 +38,16 @@ APPLY_BAND = (0.40, 0.70)
 APPLY_BAND_LIMIT = 10
 
 
-def age_tag(row: Mapping[str, Any], today: str | None = None) -> str:
+def age_tag(row: Mapping[str, object], today: str | None = None) -> str:
     """Compact posting-age tag for console/digest rows: 'NEW' the day we
     first see it, else days since posted_at ('6d', '45d!' when stale — a
     45+-day-old posting is often a ghost req). '?' when no date is known.
     Workday dates parsed from 'Posted 30+ Days Ago' are floors, so '30d!'
     there means AT LEAST 30 days."""
     today = today or _today()
-    if (row.get("first_seen") or "")[:10] == today:
+    if _text(row.get("first_seen"))[:10] == today:
         return "NEW"
-    posted = (row.get("posted_at") or "")[:10]
+    posted = _text(row.get("posted_at"))[:10]
     if not posted:
         return "?"
     try:
@@ -56,6 +56,11 @@ def age_tag(row: Mapping[str, Any], today: str | None = None) -> str:
     except ValueError:
         return "?"
     return f"{days}d!" if days >= 45 else f"{days}d"
+
+
+def _text(v: object) -> str:
+    """`v` if it is a string, else ''."""
+    return v if isinstance(v, str) else ""
 
 
 def _today() -> str:
@@ -67,7 +72,7 @@ def _tag(t: RuntimeTrack) -> str:
 
 
 def apply_band_rows(ranked: list[RankedJob] | None, limit: int = APPLY_BAND_LIMIT,
-                    prior: Callable[[Mapping[str, Any]], store.Prior | None] | None = None
+                    prior: Callable[[Mapping[str, object]], store.Prior | None] | None = None
                     ) -> list[RankedJob]:
     """The undecided open local rows scored inside APPLY_BAND, best fit
     first, at most `limit` of them.
@@ -100,7 +105,7 @@ def apply_band_rows(ranked: list[RankedJob] | None, limit: int = APPLY_BAND_LIMI
 
 def new_ranked_rows(ranked: list[RankedJob] | None, t: RuntimeTrack,
                     new_since: str | None = None, by: str = "first_seen",
-                    prior: Callable[[Mapping[str, Any]], store.Prior | None] | None = None
+                    prior: Callable[[Mapping[str, object]], store.Prior | None] | None = None
                     ) -> list[RankedJob]:
     """The ranked rows whose `by` column (default `first_seen`; the harvest
     pass uses `triaged_at`, when a row surfaced) is on or after `new_since`
@@ -175,7 +180,7 @@ def _bold(text: object) -> tuple[str, str]:
     return f"**{text}**", f"<strong>{text}</strong>"
 
 
-def _link(j: Mapping[str, Any]) -> tuple[str, str]:
+def _link(j: Mapping[str, object]) -> tuple[str, str]:
     """The posting's title linked to its URL, plus a "(N similar postings)"
     note when `j` is a ranked_jobs(collapse=True) survivor standing in for
     others (store.ranked_jobs' `dup_count` > 1) — the count includes the row
@@ -198,7 +203,8 @@ def _link(j: Mapping[str, Any]) -> tuple[str, str]:
         to enumerate them.
     """
     title, url = j.get("title"), j.get("url")
-    note = f" ({j['dup_count']} similar postings)" if (j.get("dup_count") or 0) > 1 else ""
+    dups = j.get("dup_count")
+    note = f" ({dups} similar postings)" if isinstance(dups, (int, float)) and dups > 1 else ""
     return f"[{title}]({url}){note}", f"<a href='{url}'>{title}</a>{note}"
 
 
@@ -291,11 +297,11 @@ _FOLLOWUPS = "Follow-ups due"
 _APPLY_BAND = "Apply band"
 
 
-def _repeat_note(j: Mapping[str, Any], prior: Callable[[Mapping[str, Any]], store.Prior | None]) -> str:
+def _repeat_note(j: Mapping[str, object], prior: Callable[[Mapping[str, object]], store.Prior | None]) -> str:
     """The table cell for a ranked row's location, plus a note when the row
     repeats an application of yours."""
     p = prior(j)
-    loc = j.get("location") or ""
+    loc = _text(j.get("location"))
     return f"{loc} (↻ {p.label} {p.when[5:]})" if p else loc
 
 

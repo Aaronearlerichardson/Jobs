@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import (AfterValidator, BeforeValidator, GetCoreSchemaHandler,
                       GetJsonSchemaHandler, ValidationError)
@@ -55,7 +55,7 @@ def blank_is_none(v: object) -> object:
     return (v.strip() or None) if isinstance(v, str) else v
 
 
-def drop_blank(data: Any) -> Any:
+def drop_blank(data: object) -> object:
     """A model's raw input less the values `blank_is_none` makes None, the
     rest stripped: for a `mode="before"` validator where blank means unset.
 
@@ -96,7 +96,7 @@ class OneOf:
     values: tuple[str, ...]
     loose: bool = False
 
-    def __get_pydantic_core_schema__(self, source: Any,
+    def __get_pydantic_core_schema__(self, source: object,
                                      handler: GetCoreSchemaHandler) -> CoreSchema:
         return core_schema.no_info_after_validator_function(self._check, handler(source))
 

@@ -47,7 +47,7 @@ from src.store.companies import BoardPlan
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
 from .resolve.probes import nc_count, probe_company
-from .resolve.sniffer import Detection
+from src.ats.signatures import Detection
 from .resolve.websearch_board import websearch_board
 
 
@@ -240,8 +240,7 @@ async def _websearch_pass(names: list[str], hits: list[BoardHit],
 
     async def _websearch_one(n: str) -> BoardHit:
         w = await websearch_board(n)
-        # TODO(any-zero): websearch_board still returns dict[str, Any]; type it as Detection.
-        return await _hit_from_detection(n, Detection(**w)) if w else {
+        return await _hit_from_detection(n, w) if w else {
             "name": n, "reason": "no-board-found"}
 
     await _resolve_pass(todo, _websearch_one, "[WEBSEARCH]", hits, misses,

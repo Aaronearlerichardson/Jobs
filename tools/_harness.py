@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import io
 import sys
 from collections.abc import Callable, Sequence
 from contextlib import aclosing
@@ -51,10 +52,8 @@ def console_utf8() -> None:
     machine it was written for. Best-effort: a stream that can't be
     reconfigured (a pipe, a captured buffer under pytest) is left alone.
     """
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # pyrefly: ignore[missing-attribute]  # only a TextIOWrapper has it
-    except Exception:
-        pass
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def blame(note: str | None) -> str:

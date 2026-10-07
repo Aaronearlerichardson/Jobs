@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
 from urllib.parse import unquote
 
 from src import config
@@ -108,7 +107,7 @@ async def job_page_meta(url: str) -> tuple[str, str]:
     return await asyncio.to_thread(_page_meta, r, url)
 
 
-def _page_meta(r: Any, url: str) -> tuple[str, str]:
+def _page_meta(r: jsonld.Page, url: str) -> tuple[str, str]:
     """job_page_meta's (title, description) off the fetched page `r`."""
     try:
         html = r.text

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from typing import Any, Protocol
+from typing import Protocol, cast
 
 from src import config
 from src.match.filters import (SHORT_PLACE, SHORT_REMOTE, first_hit,
@@ -35,7 +35,7 @@ from src.rows import FetchedJob
 _WB = [t for t in config.LOCALITY_WORD_TOKENS if t]
 _SUB = [t for t in config.LOCALITY_SUBSTRINGS if t]
 
-# Any configured place token, anywhere in the text. Private: a stored
+# A configured place token, anywhere in the text. Private: a stored
 # LOCATION is judged by NC_RE / is_nc below, which read it one segment at a
 # time; only geo_mode reads free body text with this raw form.
 _NC_TOKEN_RE = re.compile(
@@ -607,11 +607,11 @@ def geo_mode(location: str | None, description: str | None = "") -> str | None:
     return None
 
 
-def geo_label(row: Mapping[str, Any]) -> str:
+def geo_label(row: Mapping[str, object]) -> str:
     """A row's stored geo_mode as printed: "elsewhere" for neither local nor
     remote (None), "?" when the row carries none.
 
     >>> geo_label({"geo_mode": "remote"}), geo_label({"geo_mode": None}), geo_label({})
     ('remote', 'elsewhere', '?')
     """
-    return row.get("geo_mode") or ("elsewhere" if "geo_mode" in row else "?")
+    return cast(str, row.get("geo_mode") or ("elsewhere" if "geo_mode" in row else "?"))

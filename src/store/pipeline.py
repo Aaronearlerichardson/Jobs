@@ -65,7 +65,7 @@ FIT_BANDS = (("low", 0.0, 0.4), ("mid", 0.4, 0.6), ("high", 0.6, 1.01))
 class PipelineFields(BaseModel):
     """The user-editable application-tracking columns, as stored: text
     stripped with a blank as NULL, `referral` as 0/1, `outcome_reason` one
-    of OUTCOME_REASONS. Any other key is refused, so a caller cannot reach
+    of OUTCOME_REASONS. No other key is allowed, so a caller cannot reach
     `disposition` (which has its own validated path) or a scorer-owned
     column through update_pipeline_fields."""
     model_config = ConfigDict(extra="forbid")

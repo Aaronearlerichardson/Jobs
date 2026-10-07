@@ -5,7 +5,7 @@ crawl that pulls the added company's other postings."""
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, NamedTuple, cast
+from typing import NamedTuple, cast
 
 from src import store
 from src import tags
@@ -175,7 +175,7 @@ async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int 
 
 async def add_manual_job(url: str, title: str, company: str, location: str,
                          description: str = "", pull_board: bool = True,
-                         max_workers: int = 6, t: RuntimeTrack | None = None) -> dict[str, Any]:
+                         max_workers: int = 6, t: RuntimeTrack | None = None) -> dict[str, int | bool | str]:
     """Add ONE hand-picked job, register/resolve its COMPANY, and — if that
     company's board resolves — pull its OTHER in-scope jobs too.
 

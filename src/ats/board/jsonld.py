@@ -17,13 +17,19 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Mapping
-from typing import TypedDict, TypeGuard, cast
+from typing import Protocol, TypedDict, TypeGuard, cast
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import JSON, jsonld_scripts, parse_markup, stable_id, text_from_html
 from src.net.util import norm_posted_date as _norm_posted
 from src.rows import FetchedJob
+
+
+class Page(Protocol):
+    """A fetched page: all `_page_meta` and `_page_verdict` read."""
+    @property
+    def text(self) -> str: ...
 
 
 class Posting(TypedDict):

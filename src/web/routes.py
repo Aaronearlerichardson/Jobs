@@ -10,7 +10,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from flask import Response, abort, jsonify, make_response, request, send_file
 from flask.typing import ResponseReturnValue
@@ -141,14 +141,15 @@ def api_run_status() -> ResponseReturnValue:
 #  Jobs / pipeline / companies / stats                                         #
 # --------------------------------------------------------------------------- #
 
-def _geo_tag(r: Mapping[str, Any]) -> str:
+def _geo_tag(r: Mapping[str, object]) -> str:
     """Live geo bucket for a job row: "local" (configured locality),
     "remote", or "relocation" (onsite somewhere the user would have to move
     to). Derived at serve time from the location string — the stored
     geo_mode is stale-by-construction (computed against the locality config
     of whatever process ingested it) and overloaded (NULL/onsite ambiguity),
     so it's only consulted as a secondary remote signal."""
-    loc = r.get("location") or ""
+    loc = r.get("location")
+    loc = loc if isinstance(loc, str) else ""
     if locality.NC_RE.search(loc):
         return "local"
     if (r.get("remote_eligible") or r.get("geo_mode") == "remote"
@@ -159,7 +160,7 @@ def _geo_tag(r: Mapping[str, Any]) -> str:
 
 def _job_json(r: JobRow | RankedJob, today: str, rank: int | None = None,
               remote_floor: float | None = None,
-              prior: store.Prior | None = None) -> dict[str, Any]:
+              prior: store.Prior | None = None) -> dict[str, object]:
     fields = (
         "job_id", "title", "company_name", "url", "location", "geo_mode",
         "resume_fit_score", "combined_score", "mission_tier", "mission_score",
@@ -174,7 +175,7 @@ def _job_json(r: JobRow | RankedJob, today: str, rank: int | None = None,
         # postings)" the way the digest does and let a person open them too.
         "dup_count", "dup_job_ids", "dup_urls",
     )
-    d: dict[str, Any] = {k: r.get(k) for k in fields}
+    d: dict[str, object] = {k: r.get(k) for k in fields}
     d["rank"] = rank
     d["age"] = digest.age_tag(r, today)
     d["verified"] = is_deep_verified(r.get("fit_reason"))
@@ -549,7 +550,7 @@ class _Toml(_Body):
 
 
 class _Updates(_Body):
-    updates: dict[str, Any] = {}
+    updates: dict[str, object] = {}
 
 
 @app.post("/api/config/validate")
@@ -595,7 +596,7 @@ def api_stats() -> ResponseReturnValue:
     today = _today()
     with track_store(t) as conn:
 
-        def one(q: str, args: tuple[Any, ...] = ()) -> Any:
+        def one(q: str, args: tuple[str, ...] = ()) -> object:
             return conn.execute(q, args).fetchone()[0]
 
         stats = {

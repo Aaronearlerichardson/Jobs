@@ -15,7 +15,7 @@ used to reach the roster without ever having been an employer.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from src import store
 from src.ats import coords
@@ -23,7 +23,7 @@ from src.ats.board import board_for
 from src.ats.board.fields import TRANSFORMS
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
-from src.rows import BoardHit, CompanyIn, FetchedJob
+from src.rows import BoardHit, CompanyIn, FetchedJob, Slug
 
 if TYPE_CHECKING:
     import sqlite3
@@ -47,16 +47,18 @@ def _candidate_hit(c: Candidate) -> BoardHit | None:
     that for a real careers page on no known platform).
     """
     # The handle: a string, or the tuple of a multi-column one.
-    slug: Any = (c.slug or "").strip() or None
+    text = (c.slug or "").strip() or None
+    slug: Slug = text
     board = board_for(c.ats)
     if board and board.multi_column:
-        parts = (slug or "").split(board.spec.handle.sep)
+        parts = (text or "").split(board.spec.handle.sep)
         kinds = next((d.transform for d in board.spec.detect if d.transform),
                      (None,) * len(parts))
-        slug = tuple(TRANSFORMS[k](p) if k else p
-                     for p, k in zip(parts, kinds))
-        if len(parts) != len(board.spec.handle.columns) or any(p in (None, "") for p in slug):
+        values = tuple(TRANSFORMS[k](p) if k else p
+                       for p, k in zip(parts, kinds))
+        if len(parts) != len(board.spec.handle.columns) or any(p in (None, "") for p in values):
             return None
+        slug = tuple(p for p in values if p is not None)
     hit: BoardHit = {"name": c.name, "ats": c.ats, "slug": slug,
                      "careers_url": c.careers_url or None,
                      "count": c.job_count, "nc": c.nc}

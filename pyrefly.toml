@@ -3,8 +3,9 @@ project-includes = ["src", "tools"]
 # tools/ are scripts that import `src` and `tools._harness` by package path.
 search-path = ["."]
 python-version = "3.12"
-# Pyrefly queries the `python` on PATH for site-packages; run it from the jobs env
-# (or pass --python-interpreter-path) or third-party imports report missing-import.
+# Site-packages come from the `jobs` conda env, so the LSP and a bare `pyrefly check`
+# see third-party imports without that env on PATH.
+conda-environment = "jobs"
 preset = "legacy"
 ignore-missing-imports = [
     "lxml.*",

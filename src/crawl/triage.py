@@ -375,7 +375,7 @@ async def judge(db: store.Writer, company: CompanyRow, jobs: list[JobRow], track
 
 def summarize(verdicts: dict[str, str]) -> tuple[str, str, list[str]]:
     """(row status, detail string, surfaced track labels) from one row's
-    {track: verdict}. Any DEFER left means the row is still undecided.
+    {track: verdict}. A DEFER left means the row is still undecided.
 
     >>> summarize({"local-tech": "geo", "remote-neural": "title"})
     ('geo', 'local-tech=geo;remote-neural=title', [])

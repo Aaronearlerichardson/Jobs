@@ -26,7 +26,7 @@ import contextvars
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import cast
 
 _log = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class Run:
     """
 
     def __init__(self) -> None:
-        self.state: dict[Callable[[], Any], Any] = {}   # declaration -> this run's value
+        self.state: dict[Callable[[], object], object] = {}   # declaration -> this run's value
         self.exits: list[Callable[[], object]] = []
 
     async def __aenter__(self) -> Run:
@@ -60,7 +60,7 @@ class Run:
             loop.set_exception_handler(_quiet_resets)
         return self
 
-    async def __aexit__(self, *exc: Any) -> None:
+    async def __aexit__(self, *exc: object) -> None:
         """Run every exit hook, the last registered first, past any that
         raises; then raise the first hook's error, unless the block's own
         is already on its way out (the hook's is added to it as a note).
@@ -80,10 +80,11 @@ class Run:
             first = await self._unwind()
         finally:
             RUN.reset(self._token)
-        if first is not None and exc[1] is None:
+        err = exc[1]
+        if first is not None and err is None:
             raise first
-        if first is not None:
-            exc[1].add_note(f"and a run exit hook raised {first!r}")
+        if first is not None and isinstance(err, BaseException):
+            err.add_note(f"and a run exit hook raised {first!r}")
 
     async def _unwind(self) -> Exception | None:
         """Pop and run the exit hooks; the first Exception is returned. A
@@ -103,7 +104,7 @@ class Run:
         return first
 
 
-def _quiet_resets(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+def _quiet_resets(loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:
     """The run loop's exception handler: a ConnectionResetError goes to the
     DEBUG log, anything else to asyncio's own handler.
 

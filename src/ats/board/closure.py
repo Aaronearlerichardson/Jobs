@@ -21,14 +21,14 @@ import functools
 import logging
 import re
 import time
-from typing import Any, cast
+from typing import cast
 
 from src import config, runstate
 from src.net import http
 from src.net.http import HEADERS, HostBreaker, Unreachable
 from src.net.util import clean_url, origin_key
 from .engine import board_for_url
-from .jsonld import extract_jsonld, is_jobposting
+from .jsonld import Page, extract_jsonld, is_jobposting
 
 _log = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ async def probe_job_open(url: str | None, job_id: str | None = None) -> tuple[bo
     return await asyncio.to_thread(_page_verdict, r, url, fallback, closed)
 
 
-def _page_verdict(r: Any, url: str, fallback: str,
+def _page_verdict(r: Page, url: str, fallback: str,
                   closed: str | None = None) -> tuple[bool | None, str]:
     """probe_job_open's verdict on a posting page `r` that answered 200: a
     closed notice (the platform's `closed` pattern, else a generic one),

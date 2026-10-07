@@ -9,8 +9,9 @@ error rather than a silent default.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import (AfterValidator, BaseModel, BeforeValidator,
                       ConfigDict, Field, ValidationError, ValidationInfo,
@@ -40,7 +41,7 @@ def _filled(v: str) -> str:
     return v.strip()
 
 
-def _table_only(v: object) -> dict[Any, Any]:
+def _table_only(v: object) -> dict[str, object]:
     if not isinstance(v, dict):
         raise ValueError("unknown key")
     return v
@@ -70,7 +71,7 @@ Filled = Annotated[str, AfterValidator(_filled)]
 
 # --- [keywords] / [exclude] -------------------------------------------------
 # Both mix fixed keys with per-track sub-tables ([keywords.<track id>]).
-# Any key that is not a declared field must be such a table.
+# A key that is not a declared field must be such a table.
 
 class TrackKeywords(_Table):
     core: list[str] = []
@@ -214,7 +215,7 @@ class Track(Methodology):
 
     @model_validator(mode="before")
     @classmethod
-    def _resolve(cls, data: Any) -> Any:
+    def _resolve(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
         data = {k: v for k, v in data.items()
@@ -493,7 +494,7 @@ class Profile(_Table):
 
     @field_validator("tracks", mode="before")
     @classmethod
-    def _empty_is_builtin(cls, v: Any) -> Any:
+    def _empty_is_builtin(cls, v: object) -> object:
         return v or DEFAULT_TRACKS
 
     @field_validator("keywords", "exclude")
@@ -510,7 +511,7 @@ class Profile(_Table):
         return v
 
 
-def parse(raw: dict[str, Any], source: str | Path = "profile") -> Profile:
+def parse(raw: Mapping[str, object], source: str | Path = "profile") -> Profile:
     """`raw` (a parsed profile.toml) as a validated Profile, or ProfileError
     listing every bad key path (the lines `problems` returns)."""
     try:
@@ -519,7 +520,7 @@ def parse(raw: dict[str, Any], source: str | Path = "profile") -> Profile:
         raise ProfileError(source, error_lines(e)) from None
 
 
-def problems(raw: dict[str, Any]) -> list[str]:
+def problems(raw: Mapping[str, object]) -> list[str]:
     """What is wrong with `raw`, one 'path: problem' line per bad key; []
     when it is a valid profile. A line names the key, never its value: a
     profile holds personal data.

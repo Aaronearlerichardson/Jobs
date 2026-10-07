@@ -59,7 +59,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 from pydantic import ConfigDict, model_validator
 
@@ -84,7 +83,7 @@ class RuntimeTrack(Track):
 
     @model_validator(mode="before")
     @classmethod
-    def _named_by_id(cls, data: Any) -> Any:
+    def _named_by_id(cls, data: object) -> object:
         if not isinstance(data, dict) or not isinstance(tid := data.get("id"), str):
             return data
         return {**data, "label": data.get("label") or tid,
@@ -96,7 +95,7 @@ def _runtime(tid: str, t: Track) -> RuntimeTrack:
     return RuntimeTrack(**t.model_dump(), id=tid, db_path=DATA_DIR / (t.db or f"{tid}.db"))
 
 
-def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, RuntimeTrack]:
+def _build_ui_tracks(raw: Mapping[str, object] | None) -> dict[str, RuntimeTrack]:
     """A [tracks] table (or None -> the built-in pair) as RuntimeTracks,
     validated like a profile's.
 

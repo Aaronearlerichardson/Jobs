@@ -20,7 +20,6 @@ import re
 import tomllib
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 from .paths import APP_HOME, DATA_DIR, SCRIPT_DIR
 from .profile_schema import TrackExclude, TrackKeywords, parse
@@ -52,7 +51,7 @@ PROFILE_EXAMPLE_PATH = (APP_HOME / "profile.example.toml"
                         else SCRIPT_DIR / "profile.example.toml")
 
 
-def _load_profile() -> tuple[dict[str, Any], Path | None]:
+def _load_profile() -> tuple[dict[str, object], Path | None]:
     """(parsed TOML, path) of the first profile that exists (yours, else
     the example), or ({}, None). The two are NOT merged: a key your profile
     leaves out takes the schema default, not the example's value."""
@@ -97,7 +96,7 @@ _SNAPSHOT_LISTS = tuple(dict.fromkeys(
     + _WIDENED_EMPTY))
 
 
-def keyword_snapshot(cfg: Any = None) -> tuple[list[str] | bool, ...]:
+def keyword_snapshot(cfg: ModuleType | None = None) -> tuple[list[str] | bool, ...]:
     """The shared keyword and exclude lists and ACCEPT_REMOTE as they stand
     now.
 
@@ -116,7 +115,7 @@ def keyword_snapshot(cfg: Any = None) -> tuple[list[str] | bool, ...]:
 
 
 def restore_keywords(snapshot: tuple[list[str] | bool, ...],
-                     cfg: Any = None) -> None:
+                     cfg: ModuleType | None = None) -> None:
     """Put a `keyword_snapshot` back, in place."""
     cfg = _self() if cfg is None else cfg
     for name, saved in zip(_SNAPSHOT_LISTS, snapshot):
@@ -124,7 +123,7 @@ def restore_keywords(snapshot: tuple[list[str] | bool, ...],
     setattr(cfg, "ACCEPT_REMOTE", snapshot[-1])
 
 
-def widen_keywords(cfg: Any = None) -> None:
+def widen_keywords(cfg: ModuleType | None = None) -> None:
     """Turn the relevance filter off, in place: everything is relevant.
 
     For measuring a SOURCE rather than the profile. Every fetcher applies

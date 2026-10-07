@@ -12,9 +12,9 @@ from __future__ import annotations
 import os
 import shutil
 import tomllib
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import tomlkit
 
@@ -45,7 +45,7 @@ def validate(text: str) -> list[str]:
     return problems(data)
 
 
-def apply_updates(updates: dict[str, Any]) -> str:
+def apply_updates(updates: Mapping[str, object]) -> str:
     """Apply {dotted.path: value} updates to the profile with tomlkit
     (comments/order preserved) and return the new TOML text. Creates the
     document from the example template first when the user is still on the

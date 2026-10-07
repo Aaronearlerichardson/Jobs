@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Coroutine
-from typing import Any
+from typing import Never
 
 from src import config, runstate
 from src.claude.api import have_api_key
@@ -22,7 +22,7 @@ _LOOP: asyncio.AbstractEventLoop | None = None
 _LOOP_START = threading.Lock()
 
 
-def call[T](coro: Coroutine[Any, Any, T]) -> T:
+def call[T](coro: Coroutine[object, Never, T]) -> T:
     """`coro`'s result, run on the web UI's event loop while this request
     thread waits, as a run of its own (src/runstate.py): the one way a
     thread reaches async code. The loop starts at first use; at exit, what

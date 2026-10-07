@@ -14,7 +14,7 @@ import sqlite3
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 from src import config
 from src import digest
@@ -87,7 +87,13 @@ async def track_writer(t: RuntimeTrack | None = None, db: store.Writer | Connect
         yield w
 
 
-def group_by_company[T: Mapping[str, Any]](rows: Iterable[T], key: str = "company_id") -> dict[Any, list[T]]:
+@overload
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: Literal["company_id"] = "company_id"
+                                              ) -> dict[int, list[T]]: ...
+@overload
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str) -> dict[str, list[T]]: ...
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str = "company_id"
+                                              ) -> dict[int, list[T]] | dict[str, list[T]]:
     """`rows` bucketed by `key` (their company id by default), in
     first-seen order.
 
@@ -98,10 +104,10 @@ def group_by_company[T: Mapping[str, Any]](rows: Iterable[T], key: str = "compan
     Both backfill paths need this: a board with several stale rows must be
     fetched once, not once per row.
     """
-    out: dict[Any, list[T]] = {}
+    out: dict[object, list[T]] = {}
     for r in rows:
         out.setdefault(r[key], []).append(r)
-    return out
+    return cast(dict[int, list[T]], out)
 
 
 async def board_index(company: CompanyRow) -> dict[str, FetchedJob]:

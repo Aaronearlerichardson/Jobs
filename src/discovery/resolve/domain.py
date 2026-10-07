@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable
-from typing import Any
+from typing import TypedDict, cast
 from urllib.parse import quote
 
 from src import config
@@ -25,7 +25,13 @@ _LEGAL = frozenset({"inc", "llc", "ltd", "corp", "corporation", "co",
                     "company", "plc", "gmbh", "and"})
 
 # The domains.json cache, read once per run and written through.
-_CACHE = per_run(lambda: json_cache_get(cache_dir("domains.json"), float("inf")) or {})
+
+class _Entry(TypedDict):
+    domain: str | None
+    at: float
+
+
+_CACHE = per_run(lambda: cast(dict[str, _Entry], json_cache_get(cache_dir("domains.json"), float("inf"))) or {})
 
 
 def _words(name: str | None) -> list[str]:
@@ -137,7 +143,7 @@ async def official_domain(name: str) -> str | None:
     key = names.name_key(name)
     if not (key and _words(name)):
         return None
-    cache: dict[str, Any] = _CACHE()
+    cache = _CACHE()
     now = time.time()
     got = cache.get(key)
     if got and now - got["at"] < (30 if got["domain"] else 7) * 86400:

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterator, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urljoin
 
 from src import config
@@ -47,10 +47,10 @@ def _class(name: str) -> str:
     return f"contains(concat(' ', normalize-space(@class), ' '), ' {name} ')"
 
 
-def _first_string(tree: etree._Element, rx: re.Pattern[str]) -> Any:
+def _first_string(tree: etree._Element, rx: re.Pattern[str]) -> etree._ElementUnicodeResult | None:
     """The first text node in `tree` (script text included) that `rx`
     searches, or None."""
-    return next((s for s in tree.xpath("//text()") if rx.search(s)), None)
+    return next((s for s in cast("list[etree._ElementUnicodeResult]", tree.xpath("//text()")) if rx.search(s)), None)
 
 
 def _company_site(*urls: object) -> str:
@@ -309,7 +309,7 @@ def parse_metacareers(tree: etree._Element, page_url: str = "") -> list[FetchedJ
             if twin:  # listing card + open detail: keep the richer fields
                 for k, v in j.items():      # k: any key of j, not a literal
                     if v and len(str(v)) > len(str(twin.get(k) or "")):
-                        cast(dict[str, Any], twin)[k] = v
+                        cast(dict[str, object], twin)[k] = v
             else:
                 jobs.append(j)
     return jobs
@@ -584,5 +584,5 @@ def parse_page(url: str, html: str) -> tuple[list[FetchedJob], str]:
                 # merge, keeping the richer field from either.
                 for k, v in j.items():      # k: any key of j, not a literal
                     if v and len(str(v)) > len(str(prev.get(k) or "")):
-                        cast(dict[str, Any], prev)[k] = v
+                        cast(dict[str, object], prev)[k] = v
     return list(by_id.values()), source

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
 from urllib.parse import quote
 
 from src import config
@@ -82,7 +81,7 @@ async def fetch_nlx_company(name: str, location: str | None = None, days: int = 
     hdr = {**HEADERS, "Authorization": f"Bearer {tok}", "Accept": "application/json"}
 
     out: list[FetchedJob] = []
-    seen: set[Any] = set()
+    seen: set[str | int] = set()
     dropped = 0
     for page in range(max_pages):
         # Path: /{userId}/{keyword}/{location}/{radius}/{sortCol}/{sortOrder}

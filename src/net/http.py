@@ -24,8 +24,8 @@ from datetime import timedelta
 from typing import TypedDict, Unpack, cast
 
 import aiohttp
+import certifi
 import requests
-from requests import certs
 from requests.cookies import RequestsCookieJar
 from requests.sessions import SessionRedirectMixin, merge_setting
 from requests.structures import CaseInsensitiveDict
@@ -92,7 +92,7 @@ def _open_session() -> aiohttp.ClientSession:
         default executor, where no work waits on the loop.
     """
     tls = create_urllib3_context()
-    tls.load_verify_locations(certs.where())  # pyrefly: ignore[missing-attribute]  # stubs lack it
+    tls.load_verify_locations(certifi.where())
     tls.sslobject_class = _Handshake
     session = aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(limit=100, ssl=tls, keepalive_timeout=30,
@@ -189,6 +189,12 @@ def _headers(raw: Iterable[tuple[bytes, bytes]]) -> CaseInsensitiveDict[str]:
     return CaseInsensitiveDict(dict(joined.values()))
 
 
+class _Response(requests.Response):
+    """requests.Response, naming the private fields `_reply` fills (the stubs omit them)."""
+    _content: bytes | None
+    _content_consumed: bool
+
+
 def _reply(req: requests.PreparedRequest, status: int, reason: str | None,
            raw_headers: Iterable[tuple[bytes, bytes]], content: bytes,
            elapsed: float = 0.0) -> requests.Response:
@@ -201,12 +207,16 @@ def _reply(req: requests.PreparedRequest, status: int, reason: str | None,
     >>> r.url, r.encoding, r.text
     ('https://a.example/', 'ISO-8859-1', 'Ã©')
     """
-    r = requests.Response()
-    # requests types reason and url as str: aiohttp's reason may be None.
-    r.status_code, r.reason, r.url, r.request = status, reason, req.url, req  # pyrefly: ignore[bad-assignment]  # aiohttp's reason may be None
+    r = _Response()
+    # requests types reason and url as str, and leaves them None until set.
+    r.status_code, r.request = status, req
+    if reason is not None:
+        r.reason = reason
+    if req.url is not None:
+        r.url = req.url
     r.headers = _headers(raw_headers)
     r.encoding = get_encoding_from_headers(r.headers)
-    r._content, r._content_consumed = content, True  # pyrefly: ignore[missing-attribute]  # stubs lack it
+    r._content, r._content_consumed = content, True
     r.elapsed = timedelta(seconds=elapsed)
     return r
 
@@ -693,7 +703,7 @@ class HostBreaker:
     `trip(url)` records one refusal from the host of `url`; `dead(url)` is
     True once `trips` refusals have landed, each within `ttl` seconds of
     the one before, and stays True until `ttl` passes without another.
-    Any URL on the host answers, whatever its path, case or port:
+    A URL on the host answers, whatever its path, case or port:
 
     >>> b = HostBreaker(ttl=60, trips=2)
     >>> b.trip("https://a.example/jobs/1"); b.dead("https://a.example/")

@@ -40,40 +40,17 @@ import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
-from typing import Annotated, Any, cast
+from typing import Annotated
 
 from pydantic import BeforeValidator
 
-from src import runstate
+from src import config, runstate
 from src.store import NOT_A_FIT_SIGNAL
+from src.claude.api import api_disabled, call_claude_json, have_api_key
 from src.claude.reply import Reply, Unit
+from src.match import locality
 from src.rows import FitColumns
 from src.validation import OneOf
-
-config: Any
-call_claude_json: Any
-try:
-    from src import config
-    from src.claude.api import api_disabled, call_claude_json, have_api_key
-except Exception:                      # importable standalone for calibration
-    config = None
-    call_claude_json = None
-    api_disabled = lambda: None        # noqa: E731
-    have_api_key = lambda: False       # noqa: E731
-
-locality: Any
-try:
-    # The one place that knows where a posting IS (profile [locality] /
-    # [locations]): is_nc reads a stored location one office-segment at a
-    # time, remote_signal/us_eligible read the remote vocabulary. The gate
-    # override below reuses them rather than growing a second, drifting
-    # copy of the same question inside the scorer. Imported separately from
-    # the block above so a calibration-only import (no profile) still gets
-    # its `config`; src.match imports nothing from src.claude, so this
-    # cannot cycle.
-    from src.match import locality
-except Exception:                      # no profile loaded
-    locality = None
 
 
 # --------------------------------------------------------------------------- #
@@ -134,8 +111,8 @@ FALLBACK_DOMAIN_LADDER = [
 FALLBACK_STACK_CORE = "the tools named in your résumé"
 
 
-def _cfg(name: str, default: Any) -> Any:
-    return (getattr(config, name, None) or default) if config else default
+def _cfg[T](name: str, default: T) -> T:
+    return getattr(config, name, None) or default
 
 
 def _derived_domain_ladder() -> list[tuple[float, str]]:
@@ -145,8 +122,8 @@ def _derived_domain_ladder() -> list[tuple[float, str]]:
     adjacent fields you'd accept (middle), and everything else is the floor.
     Crude next to a hand-tuned ladder, but it is genuinely YOURS on day one
     instead of being someone else's field."""
-    core = _cfg("CORE_KEYWORDS", [])
-    domain = _cfg("DOMAIN_KEYWORDS", [])
+    core = _cfg("CORE_KEYWORDS", list[str]())
+    domain = _cfg("DOMAIN_KEYWORDS", list[str]())
     rungs = []
     if core:
         rungs.append((1.00, ", ".join(core[:12])))
@@ -163,7 +140,7 @@ def _derived_region() -> str:
     # Last resort only: applies to an empty profile.
     fallback_region = "remote"
     name = _cfg("LOCALITY_NAME", "")
-    places = list(_cfg("LOCALITY_SUBSTRINGS", []))[:8]
+    places = list(_cfg("LOCALITY_SUBSTRINGS", list[str]()))[:8]
     if not name and not places:
         return fallback_region
     where = name or ", ".join(places)
@@ -259,7 +236,7 @@ def combine(axes: dict[str, float], failed_gates: Iterable[str] = (),
 # --------------------------------------------------------------------------- #
 
 def _profile_block() -> str:
-    if config and getattr(config, "CANDIDATE_STRENGTHS", None):
+    if getattr(config, "CANDIDATE_STRENGTHS", None):
         strengths = "\n".join(f"  {i}. {s}" for i, s in enumerate(config.CANDIDATE_STRENGTHS, 1))
         summary = getattr(config, "CANDIDATE_SUMMARY", "") or ""
         avoid = getattr(config, "CANDIDATE_AVOID", "") or ""
@@ -327,7 +304,7 @@ def _read_disposition_block() -> str:
     """disposition_examples_block over the default store. profile.toml
     [fit] disposition_examples sets the count (0 disables); silently empty
     when the store is unavailable."""
-    n = config.FIT_DISPOSITION_EXAMPLES if config else 0
+    n = config.FIT_DISPOSITION_EXAMPLES
     if n <= 0:
         return ""
     try:
@@ -438,7 +415,7 @@ Return ONLY a JSON object with exactly:
 - "reason": one phrase, <= 14 words, naming the deciding factor."""
 
 
-def _parse_gates(raw: Any) -> list[str]:
+def _parse_gates(raw: object) -> list[str]:
     """The known gates a `gates` value trips, lower-cased: an array's
     names, or a {gate: bool} object's truthy keys.
 
@@ -566,7 +543,7 @@ def _clearance_gate_holds(text: str | None) -> bool:
     polygraph" — no eligibility language at all — keeps the gate rather
     than betting the candidate's shortlist on a vocabulary gap.
 
-    Any holding word in any clearance clause keeps the gate, even beside
+    A holding word in any clearance clause keeps the gate, even beside
     eligibility language. That is deliberately conservative: this is a
     safety net that only ever REMOVES a gate, so an ambiguous posting must
     fall on the side of keeping it.
@@ -639,12 +616,7 @@ def _geo_gate_holds(location: str, description: str = "") -> bool:
     remote" is usually written. Deliberately does NOT clear the gate on a
     place name found loose in the body: every JD in the region's orbit
     names the region somewhere.
-
-    With no locality vocabulary loaded there is nothing deterministic to
-    say, so the model's gate stands.
     """
-    if locality is None:
-        return True
     if locality.is_nc(location):
         return False
     if (locality.remote_signal(location, description)
@@ -725,7 +697,7 @@ def _gated(r: FitReply, gates: list[str], reason: str, model: str,
     gates = apply_gate_overrides(gates, location=location,
                                  description=description)
     axes = r.axes()
-    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)  # pyrefly: ignore[missing-attribute]  # config is None only when the standalone import failed
+    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)
     return FitResult(score=score, axes=axes, gates=gates, reason=reason,
                      model=model)
 
@@ -737,8 +709,6 @@ async def score_resume_fit(title: str, description: str = "", *,
     None score as 'don't rank this'), so unscorable rows drop out instead of
     floating at a fabricated cap. `location` rides in the user turn (see
     _user_turn)."""
-    if call_claude_json is None:
-        return FitResult(score=None, reason="scorer unavailable")
     desc = (description or "").strip()
     if len(desc) < MIN_DESC_CHARS:
         # Visible, not silent: a job that passed discovery but arrives here
@@ -846,8 +816,6 @@ async def verify_fit(title: str, description: str = "", *, location: str = "",
     rows the CURRENT verify model has already checked — with years/seat/
     gaps folded into the reason for the digest. A None score means unverifiable
     (no API, no text): callers must keep the first-pass score."""
-    if call_claude_json is None:
-        return FitResult(score=None, reason="scorer unavailable")
     desc = (description or "").strip()
     if len(desc) < MIN_DESC_CHARS:
         return FitResult(score=None, reason="no description; unverified")
@@ -908,7 +876,7 @@ def verify_model() -> str:
     else the screen model. Stored in jobs.fit_model by verify_fit so a
     later run can tell rows verified by THIS model from rows verified by
     an older one (or by nobody: fit_model is NULL on pre-column rows)."""
-    return cast(str, _cfg("CLAUDE_VERIFY_MODEL", None) or _cfg("CLAUDE_MODEL", ""))
+    return _cfg("CLAUDE_VERIFY_MODEL", None) or _cfg("CLAUDE_MODEL", "")
 
 
 # --------------------------------------------------------------------------- #

@@ -157,7 +157,7 @@ DEAD_BOARD_CLOSE_DAYS = 14
 # running is a property of the endpoint, not a bad afternoon, and the row is
 # only parked from PROBING -- it stays open, keeps its rank, and still
 # closes the moment its board stops listing it (store.sync_job_statuses) or
-# its board dies (_dead_board_open_rows below). Any live sighting clears the
+# its board dies (_dead_board_open_rows below). A live sighting clears the
 # streak (store.record_probe_outcome, touch_job, sync_job_statuses).
 CLOSED_PROBE_GIVE_UP = 10
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import io
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -31,12 +32,8 @@ from src import config, runstate
 from src.config import RuntimeTrack
 from src.dispatch import registry
 
-try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
-    # typeshed types sys.stdout as TextIO, which has no reconfigure; the
-    # console stream is a TextIOWrapper, and anything else raises here.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):  # Windows consoles default to cp1252; job text carries em-dashes etc.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def _resolve_track(name: str) -> RuntimeTrack:

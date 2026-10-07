@@ -8,10 +8,19 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable, Iterator
 
 import pytest
+
+
+def _tracking[**P](real: Callable[P, sqlite3.Connection],
+                   opened: list[sqlite3.Connection]) -> Callable[P, sqlite3.Connection]:
+    """`real`, recording each connection it returns in `opened`."""
+    def tracked(*args: P.args, **kwargs: P.kwargs) -> sqlite3.Connection:
+        conn = real(*args, **kwargs)
+        opened.append(conn)
+        return conn
+    return tracked
 
 
 @pytest.fixture(autouse=True)
@@ -30,12 +39,7 @@ def _close_stores(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     opened: list[sqlite3.Connection] = []
     real = sqlite3.connect
 
-    def tracked(*args: Any, **kwargs: Any) -> sqlite3.Connection:
-        conn: sqlite3.Connection = real(*args, **kwargs)
-        opened.append(conn)
-        return conn
-
-    monkeypatch.setattr(sqlite3, "connect", tracked)
+    monkeypatch.setattr(sqlite3, "connect", _tracking(real, opened))
     yield
     for conn in opened:
         with contextlib.suppress(sqlite3.ProgrammingError):

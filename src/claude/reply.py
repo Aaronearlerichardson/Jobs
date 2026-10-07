@@ -9,12 +9,13 @@ profile-reading imports fail.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic.config import JsonDict
 
 
-def _api_schema(schema: dict[str, Any], _cls: type[BaseModel]) -> None:
+def _api_schema(schema: JsonDict, _cls: type[BaseModel]) -> None:
     schema.pop("description", None)
     schema["additionalProperties"] = False
 

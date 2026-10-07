@@ -174,7 +174,7 @@ def first_hit(terms: Iterable[str], text: str,
 # --------------------------------------------------------------------- #
 
 def _kw_in(text: str, keywords: Iterable[str]) -> bool:
-    """Any keyword hits `text` — acronyms on word boundaries (a bare "meg"
+    """A keyword hits `text` — acronyms on word boundaries (a bare "meg"
     would fire inside "omega" and flood aggregator sources with off-topic
     roles), longer terms as substrings (see SHORT_KEYWORD)."""
     return any(token_in(k, text, SHORT_KEYWORD) for k in keywords)

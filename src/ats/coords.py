@@ -16,10 +16,10 @@ store calls it.
 
 from __future__ import annotations
 
-from typing import Any, Unpack
+from typing import Unpack, cast
 
 from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
-from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
+from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn, Slug
 from .board import BOARDS
 from .board.spec import Handle
 
@@ -31,7 +31,7 @@ def _handle(ats: str | None) -> tuple[tuple[HandleColumn, ...], str]:
     return h.columns, h.sep
 
 
-def columns(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None = None,
+def columns(ats: str | None, slug: Slug | list[str | int] = None,
             careers_url: str | None = None, /, **extra: Unpack[CompanyIn]) -> CompanyIn:
     """One board's coordinates as store company columns: a handle spanning
     several columns (its spec's `handle.columns`) fills them from its parts,
@@ -81,13 +81,12 @@ def columns(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None = No
                        "careers_url": careers_url}
     if multi:
         parts = slug if isinstance(slug, (tuple, list)) else str(slug).split(sep)
-        for col, part in zip(cols, parts):
-            out[col] = part
+        out = cast(CompanyIn, {**out, **dict(zip(cols, parts))})
     out.update(extra)
     return out
 
 
-def slug_text(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None) -> str | None:
+def slug_text(ats: str | None, slug: Slug | list[str | int]) -> str | None:
     """A detection's handle as one string: a handle spanning several store
     columns (Workday's (tenant, pod, site)) joined with its spec's
     `handle.sep`, the plain slug for everything else, None for none.
@@ -102,7 +101,7 @@ def slug_text(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None) -
     return slug or None
 
 
-def board_slug(company: BoardCoords) -> Any:
+def board_slug(company: BoardCoords) -> str:
     """The one string that names this board on its own host, independent of
     which coordinate column carries it: the first of its handle's columns
     (Workday's `wd_tenant`), else the ordinary `slug`. '' for a
@@ -118,7 +117,7 @@ def board_slug(company: BoardCoords) -> Any:
     ''
     """
     first = _handle(company.get("ats"))[0][0]
-    return (first != "careers_url" and company.get(first)) or company.get("slug") or ""
+    return cast(str, (first != "careers_url" and company.get(first)) or company.get("slug") or "")
 
 
 def slug_title(company: BoardCoords) -> str:

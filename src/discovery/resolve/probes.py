@@ -17,11 +17,9 @@ from src.ats.board.engine import Board
 from src.ats.signatures import detect
 from src.match.locality import NC_RE
 from src.match.names import slug_guesses
-from src.rows import BoardHit
+from src.rows import BoardHit, Slug
 from .fetchpool import candidate_urls
 from .identity import candidate_pages, foreign_board
-
-type Slug = str | tuple[object, ...] | None    # a tuple where the handle spans columns
 
 
 class _Context(Protocol):
@@ -182,7 +180,7 @@ def scan_hit(text: str | None) -> tuple[str, Slug] | None:
 def _handle(ats: str, slug: Slug) -> str:
     """The engine handle for a resolver hit's slug (a tuple where the
     board spans several columns)."""
-    # TODO(any-zero): handle() is None for empty columns; the old Any return passed it on.
+    # TODO(any-zero): handle() is None for empty columns; the old untyped return passed it on.
     return cast(str, cast(Board, board_for(ats)).handle(coords.columns(ats, slug)))
 
 

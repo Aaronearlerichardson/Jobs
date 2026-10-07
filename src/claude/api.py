@@ -8,14 +8,15 @@ import json
 import logging
 import re
 import time
-from collections.abc import Iterable
-from typing import Annotated, Any
+from collections.abc import Iterable, Mapping
+from typing import Annotated
 
 from pydantic import StrictBool, ValidationError
 
 from src import config, runstate
 from src.claude.reply import Reply, Unit
 from src.net import http
+from src.net.util import JSON, dig
 from src.validation import OneOf
 
 # File-only per-call trace (session log DEBUG channel — never printed).
@@ -72,7 +73,7 @@ class LocationReply(Reply):
 #: name alone, by a guessed handle (`guess`) or one read off its careers
 #: pages (`discovery.scan`).
 _ATS_GUESSES = (*(ats for ats, spec in config.BOARDS.items()
-                  if spec.get("guess") or spec.get("discovery", {}).get("scan")),
+                  if spec.get("guess") or dig(spec, "discovery", "scan")),
                 "unknown")
 
 DISCOVER_SYSTEM = f"""You are a technical recruiter who maps employers to ATS platforms. Given a sector, industry, or job concept, list companies that (a) plausibly hire for roles in that space and (b) are likely to post jobs publicly. The candidate you're sourcing for:
@@ -188,7 +189,7 @@ class _Calls:
 _CALLS = runstate.per_run(_Calls)
 
 
-def _system_field(system_prompt: str, cache: bool = True) -> str | list[dict[str, Any]]:
+def _system_field(system_prompt: str, cache: bool = True) -> str | list[dict[str, JSON]]:
     """`system` as a cache-marked block list, or the plain string when caching
     is off. One breakpoint, on the last (only) system block — that covers the
     whole tools->system prefix and leaves the varying user turn uncached."""
@@ -202,7 +203,7 @@ def _system_field(system_prompt: str, cache: bool = True) -> str | list[dict[str
 
 def build_payload(system_prompt: str, user_content: str, max_tokens: int = 1000,
                   model: str | None = None, thinking: bool = False, cache: bool = True, *,
-                  reply: type[Reply] | None = None) -> dict[str, Any]:
+                  reply: type[Reply] | None = None) -> dict[str, JSON]:
     """The /v1/messages request body. Split out from the POST so the payload
     shape (cache breakpoint placement, thinking guard, reply schema) is
     testable offline.
@@ -237,20 +238,20 @@ def build_payload(system_prompt: str, user_content: str, max_tokens: int = 1000,
     legacy = ("claude-3", "claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-2025",
               "claude-sonnet-4-0", "claude-sonnet-4-2025")
     use_model = model or config.CLAUDE_MODEL
-    payload: dict[str, Any] = {
+    payload: dict[str, JSON] = {
         "model":      use_model,
         "max_tokens": max_tokens,
         "system":     _system_field(system_prompt, cache),
         "messages":   [{"role": "user", "content": user_content}],
     }
-    output: dict[str, Any] = {}
+    output: dict[str, JSON] = {}
     if not thinking:
         if use_model.startswith(thinking_always):
             # max_tokens is the only cap on their thinking (budget_tokens
             # 400s too), and callers size it for the reply alone (120-300
             # tokens for a score): headroom for low-effort thinking, billed
             # only as used and bounded by config.CLAUDE_TIMEOUT.
-            payload["max_tokens"] += config.CLAUDE_THINKING_HEADROOM
+            payload["max_tokens"] = max_tokens + config.CLAUDE_THINKING_HEADROOM
             output["effort"] = "low"
         elif use_model.startswith(thinking_optional):
             payload["thinking"] = {"type": "disabled"}
@@ -281,7 +282,7 @@ async def _claim_prefix(model: str, system_prompt: str) -> asyncio.Event | None:
     return None
 
 
-def _record_usage(usage: dict[str, Any]) -> None:
+def _record_usage(usage: Mapping[str, int | None]) -> None:
     u = _CALLS().usage
     u["calls"] += 1
     u["uncached_input"] += int(usage.get("input_tokens") or 0)

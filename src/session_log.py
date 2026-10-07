@@ -41,7 +41,7 @@ import time
 from collections.abc import Callable, Hashable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TextIO
 
 from src import config
 
@@ -277,7 +277,7 @@ class _Tee:
     def flush(self) -> None:
         self._stream.flush()
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> object:
         return getattr(self._stream, name)
 
 

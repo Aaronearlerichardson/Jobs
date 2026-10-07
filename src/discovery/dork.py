@@ -16,7 +16,6 @@ import asyncio
 import json
 from collections.abc import Callable, Iterable, Sequence
 from functools import partial
-from typing import Any
 
 from src import config
 from src import store
@@ -124,7 +123,7 @@ def build_dork_queries(rotation: int = 0) -> list[str]:
     return [q for q in queries if loc_site and loc_site in q or _CORE and _CORE in q]
 
 
-def extract_boards_from_urls(urls: Iterable[str]) -> list[tuple[str, Any]]:
+def extract_boards_from_urls(urls: Iterable[str]) -> list[tuple[str, str | tuple[str, ...]]]:
     """From a list of URLs, return de-duped [(ats, slug|triple)] board handles.
 
     List in, list out: one handle per distinct board, in first-seen order.
@@ -164,7 +163,7 @@ def extract_boards_from_urls(urls: Iterable[str]) -> list[tuple[str, Any]]:
     ...                           "https://unc.peopleadmin.com/postings/123"])
     []
     """
-    out: list[tuple[str, Any]] = []
+    out: list[tuple[str, str | tuple[str, ...]]] = []
     seen: set[tuple[str, str]] = set()
     for u in urls:
         hit = detect("", u, leads=False)

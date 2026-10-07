@@ -11,7 +11,7 @@ Getro are OFF: one needs credentials, the other names a place.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TypedDict
 
 from .profile import PROFILE
 
@@ -90,7 +90,29 @@ BOARD_DIRECTORY = _src.board_directory
 
 # Name registries (src/discovery/registries.py, enabled by
 # [discovery].registries): each reader's endpoint and query facts.
-REGISTRIES: dict[str, dict[str, Any]] = {
+class NihSbirSpec(TypedDict):
+    url: str
+    activity_codes: list[str]
+    page: int
+    max_offset: int
+    include_fields: list[str]
+    blurb_field: str
+
+
+class OpenFdaSpec(TypedDict):
+    url: str
+    limit: int
+    count: str
+    search: str
+    specialty_search: str
+
+
+class _Registries(TypedDict):
+    nih_sbir: NihSbirSpec
+    openfda_devices: OpenFdaSpec
+
+
+REGISTRIES: _Registries = {
     "nih_sbir": {
         "url": "https://api.reporter.nih.gov/v2/projects/search",
         "activity_codes": ["R41", "R42", "R43", "R44", "U43", "U44", "SB1"],

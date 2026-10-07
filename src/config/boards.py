@@ -21,11 +21,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from typing import Any
 
+from src.rows import JSON, dig
 from src.rows import HandleColumn
 
-BOARDS: dict[str, dict[str, Any]] = {
+BOARDS: dict[str, dict[str, JSON]] = {
     "greenhouse": {
         "detect": [{"host": "greenhouse.io",
                     "re": [r"(?i)(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"]}],
@@ -1571,9 +1571,12 @@ AGGREGATOR_HOSTS = ("linkedin.com", "indeed.com", "glassdoor.", "ziprecruiter.co
 def _hosts(fetchable: bool) -> tuple[str, ...]:
     """The vendor hosts the specs' `detect` entries claim, in spec order;
     only a fetchable spec's (one with a `listing`) when `fetchable`."""
-    return tuple(dict.fromkeys(d["host"] for s in BOARDS.values()
-                               if s.get("listing") or not fetchable
-                               for d in s.get("detect", []) if "host" in d))
+    hosts: list[JSON] = []
+    for s in BOARDS.values():
+        dets = s.get("detect")
+        if (s.get("listing") or not fetchable) and isinstance(dets, list):
+            hosts += [dig(d, "host") for d in dets]
+    return tuple(dict.fromkeys(h for h in hosts if isinstance(h, str)))
 
 
 #: The vendor hosts of the platforms the engine fetches.

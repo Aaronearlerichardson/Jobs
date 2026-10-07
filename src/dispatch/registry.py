@@ -37,7 +37,7 @@ import asyncio
 import inspect
 import operator
 from collections.abc import Callable
-from typing import Annotated, Any, ClassVar, NotRequired, TypedDict, cast
+from typing import Annotated, ClassVar, NotRequired, TypedDict, cast
 
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Field, ValidationError, model_validator)
@@ -62,10 +62,10 @@ class ParamError(ValueError):
         super().__init__(f"bad parameters for {name!r}: " + "; ".join(lines))
 
 
-def _omit(key: str | None = None) -> Any:
+def _omit[T](key: str | None = None) -> T:
     """A field left out of the kwargs while absent, so the target's own
     default applies."""
-    return Field(None, validation_alias=key, exclude_if=lambda v: v is None)
+    return cast(T, Field(None, validation_alias=key, exclude_if=lambda v: v is None))
 
 
 #: A "skip X" flag delivered as X: no_fit=True -> fit=False.

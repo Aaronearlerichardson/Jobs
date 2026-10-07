@@ -607,6 +607,9 @@ class Board:
                       url: str | None
                       ) -> tuple[dict[str, str], int | None, JSON, str | Exception | None]:
         (name, values), = tries.items()
+        if not values:
+            raise ValueError(f"handle.try names no value for {name!r}")
+        v, status, payload, err = "", None, None, None
         refused = None
         for v in dict.fromkeys(fields.fmt(t, parts.get) for t in values):
             status, payload, err = await self._fetch(req, {**parts, name: v}, vals, None, timeout,
@@ -619,7 +622,7 @@ class Board:
                                     or status in (403, 405, 429)):
                 refused = v, status, payload, err
         else:
-            v, status, payload, err = refused or (v, status, payload, err)  # pyrefly: ignore[unbound-name]  # the spec guarantees a non-empty tuple (`try` min_length=1)
+            v, status, payload, err = refused or (v, status, payload, err)
         return {**parts, name: v}, status, payload, err
 
     def _wrong(self, req: Listing | Detail, status: int | None, payload: JSON) -> bool:
@@ -856,7 +859,7 @@ class Board:
         path = hashed_cache_path(cache_dir("loc"), cast(str, url)) if days else None
         hit = await asyncio.to_thread(json_cache_get, path, days * 86400) if path else None
         if hit is not None:
-            return hit.get("location") or "", None, {}, {}
+            return cast(dict[str, str], hit).get("location") or "", None, {}, {}
         rec, fs, ctx = await self._posting(url, report, company)
         loc = (fs["location"](rec, ctx) or "") if rec else ""
         if loc and path:

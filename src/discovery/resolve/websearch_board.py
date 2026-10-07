@@ -14,15 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
-
 from src import config
 from src.ats.board import BOARDS
-from src.ats.signatures import detect, pack
+from src.ats.signatures import Detection, detect, pack
 from src.match.names import name_key
 from src.net import ddg, http
 from src.net.http import HEADERS
 from .identity import foreign_board
+from .probes import Slug
 
 # Job aggregators / company-directory sites: they rank highly for
 # '"<name>" careers' but are never the employer's own ATS board, so sniffing
@@ -75,7 +74,7 @@ def _host_matches_name(url: str, name: str) -> bool:
     return any(len(t) >= 4 and t in hostslug for t in tokens)
 
 
-def _slug_matches_name(slug: Any, name: str) -> bool:
+def _slug_matches_name(slug: Slug, name: str) -> bool:
     """True if a web-searched ATS slug/tenant plausibly belongs to the
     company — guards against the dork surfacing an unrelated board (e.g.
     'Novamed' -> the 'nc' NC-government Workday tenant)."""
@@ -89,7 +88,7 @@ def _slug_matches_name(slug: Any, name: str) -> bool:
     return any(len(t) >= 3 and (s in t or t in s) for t in tokens)
 
 
-async def websearch_board(name: str, max_results: int = 8) -> dict[str, Any] | None:
+async def websearch_board(name: str, max_results: int = 8) -> Detection | None:
     """Find a company's board via web search when domain-guessing fails
     (gov/org domains, acronyms, or product-named domains — e.g. 'Core Sound
     Imaging' -> corestudycast.com). Returns the sniff_ats result shape, or
@@ -104,7 +103,7 @@ async def websearch_board(name: str, max_results: int = 8) -> dict[str, Any] | N
     """
     from src.ats.board.custom import custom_board_listing_url
 
-    async def _resolve(urls: list[str]) -> dict[str, Any] | None:
+    async def _resolve(urls: list[str]) -> Detection | None:
         # Pass 1: ATS coordinates already visible in a result URL
         # (myworkdayjobs.com / boards.greenhouse.io / *.icims.com links).
         # The slug must match the name — a bare board link from search has no

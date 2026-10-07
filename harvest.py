@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import io
 import sys
 import time
 import traceback
@@ -52,12 +53,8 @@ from contextlib import closing
 from datetime import datetime
 from typing import Any, TextIO
 
-try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
-    # typeshed types sys.stdout as TextIO, which has no reconfigure; the
-    # console stream is a TextIOWrapper, and anything else raises here.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):  # Windows consoles default to cp1252; job text carries em-dashes etc.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 DEFAULT_EVERY_HOURS = 12.0
 # Longest single wait between deadline checks. Short enough that a machine

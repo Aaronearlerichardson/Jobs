@@ -11,11 +11,10 @@ import os
 import re
 import threading
 import time
-from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast, overload
+from typing import Literal, cast, overload
 from urllib.parse import urlsplit
 
 from cssselect import HTMLTranslator
@@ -23,22 +22,9 @@ from lxml import etree
 from yarl import URL
 
 from src import config
+from src.rows import JSON, dig  # noqa: F401 (the facade: defined in rows, below config)
 
 _log = logging.getLogger(__name__)
-
-#: What `json.loads` returns, once narrowed: a payload's value.
-type JSON = Mapping[str, JSON] | Sequence[JSON] | str | int | float | bool | None
-
-
-def dig(v: JSON, *keys: str) -> JSON:
-    """`v` at the nested dict `keys`; None where the shape breaks.
-
-    >>> dig({"a": {"b": [1]}}, "a", "b"), dig({"a": 1}, "a", "b"), dig([1], "a")
-    ([1], None, None)
-    """
-    for k in keys:
-        v = v.get(k) if isinstance(v, dict) else None
-    return v
 
 # City, ST  |  City, State  |  Remote — a location as a careers page prints
 # it, for reading one off a listing row's text (custom boards, iCIMS).
@@ -60,7 +46,7 @@ def hashed_cache_path(base_dir: Path, key: str) -> Path:
     return base_dir / f"{h}.json"
 
 
-def json_cache_get(path: Path, ttl: float) -> Any:
+def json_cache_get(path: Path, ttl: float) -> JSON:
     """The JSON value stored at `path`, or None when the file is absent,
     unreadable, or older than `ttl` seconds.
 
@@ -71,12 +57,12 @@ def json_cache_get(path: Path, ttl: float) -> Any:
     try:
         if time.time() - path.stat().st_mtime > ttl:
             return None
-        return json.loads(path.read_text("utf-8"))
+        return cast(JSON, json.loads(path.read_text("utf-8")))
     except Exception:
         return None
 
 
-def json_cache_put(path: Path, value: Any) -> None:
+def json_cache_put(path: Path, value: object) -> None:
     """Best-effort JSON write to `path`; a cache failure never fails the
     caller."""
     try:
@@ -297,7 +283,7 @@ def xpath(expr: str) -> etree.XPath:
     return xp
 
 
-def first(expr: str, scope: etree._Element, **variables: Any) -> Any:
+def first(expr: str, scope: etree._Element, **variables: str) -> etree._Element | None:
     """The first node `xpath(expr)` finds from `scope`, its $names filled
     from `variables`; None when it finds none.
 
@@ -306,7 +292,7 @@ def first(expr: str, scope: etree._Element, **variables: Any) -> Any:
     ('a', 'b', None)
     """
     hit = xpath(expr)(scope, **variables)
-    return hit[0] if hit else None
+    return cast(etree._Element, hit[0]) if hit else None
 
 
 def links(tree: etree._Element) -> list[etree._Element]:
@@ -320,7 +306,11 @@ def jsonld_scripts(tree: etree._Element) -> list[etree._Element]:
     return cast(list[etree._Element], xpath("//script[@type='application/ld+json']")(tree))
 
 
-def named(scope: etree._Element, name: str, one: bool = False) -> Any:
+@overload
+def named(scope: etree._Element, name: str, one: Literal[True]) -> etree._Element | None: ...
+@overload
+def named(scope: etree._Element, name: str, one: Literal[False] = False) -> list[etree._Element]: ...
+def named(scope: etree._Element, name: str, one: bool = False) -> etree._Element | None | list[etree._Element]:
     """The elements at or below `scope` whose local name is `name`, in any
     namespace (an Atom feed's are in its own); with `one`, the first, or
     None.
@@ -331,7 +321,7 @@ def named(scope: etree._Element, name: str, one: bool = False) -> Any:
     (2, 'A', None)
     """
     expr = "descendant-or-self::*[local-name()=$name]"
-    return first(expr, scope, name=name) if one else xpath(expr)(scope, name=name)
+    return first(expr, scope, name=name) if one else cast(list[etree._Element], xpath(expr)(scope, name=name))
 
 
 @functools.cache

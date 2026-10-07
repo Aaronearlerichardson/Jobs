@@ -30,6 +30,7 @@ import asyncio
 import json
 import re
 import sqlite3
+import io
 import sys
 from collections.abc import Iterable
 from pathlib import Path
@@ -37,12 +38,8 @@ from typing import Any
 
 from aiohttp import web
 
-try:
-    # typeshed types sys.stdout as TextIO, which has no reconfigure; the
-    # console stream is a TextIOWrapper, and anything else raises here.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-except Exception:
-    pass
+if isinstance(sys.stdout, io.TextIOWrapper):  # Windows consoles default to cp1252; job text carries em-dashes etc.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from src import runstate
 from src import store

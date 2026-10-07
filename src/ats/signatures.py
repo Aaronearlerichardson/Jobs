@@ -11,7 +11,9 @@ share one definition of "what is a board".
 from __future__ import annotations
 
 import html
-from typing import Any
+from typing import TypedDict
+
+from src.rows import Slug
 
 from .board import BOARDS, board_for
 
@@ -95,7 +97,16 @@ def detect(text: str, final_url: str = "", leads: bool = True,
     return None
 
 
-def pack(ats: str, slug: str | tuple[Any, ...] | None, careers_url: str) -> dict[str, Any]:
+class Detection(TypedDict, total=False):
+    """A detected board, as `pack` writes it: the handle under `triple`
+    where it spans columns, else `slug`."""
+    ats: str
+    careers_url: str
+    slug: Slug
+    triple: Slug
+
+
+def pack(ats: str, slug: Slug, careers_url: str) -> Detection:
     """A detection -> the coordinate dict every resolver consumes.
 
     A handle spanning several store columns (Workday's (tenant, pod, site))
@@ -126,6 +137,6 @@ def pack(ats: str, slug: str | tuple[Any, ...] | None, careers_url: str) -> dict
     """
     b = board_for(ats)
     rebuilt = b.careers_url(slug, careers_url) if b and slug else None
-    out: dict[str, Any] = {"ats": ats, "careers_url": rebuilt or careers_url}
+    out: Detection = {"ats": ats, "careers_url": rebuilt or careers_url}
     out["triple" if b and b.multi_column else "slug"] = slug
     return out

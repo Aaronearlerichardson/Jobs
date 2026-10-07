@@ -23,6 +23,7 @@ from src import config
 from src import store
 from src.ats.board.pager import FILL_FLOORS, fill_rates
 from src.net.http import Snapshot
+from src.net.util import dig
 from src.rows import FetchedJob
 
 
@@ -107,8 +108,9 @@ def floors(ats: str) -> dict[str, float]:
     >>> floors("no-such-platform") == FILL_FLOORS
     True
     """
-    canary = config.BOARDS.get(ats, {}).get("canary") or {}
-    return FILL_FLOORS | dict(canary.get("min_fill", {}))
+    fill = dig(config.BOARDS.get(ats, {}), "canary", "min_fill")
+    return FILL_FLOORS | {k: v for k, v in (fill.items() if isinstance(fill, dict) else ())
+                          if isinstance(v, (int, float))}
 
 
 def _bad(r: Counts) -> float:
@@ -163,7 +165,7 @@ def record(conn: sqlite3.Connection, tally: Tally, now: datetime | None = None) 
     rows = tally.rows(stamp)
     lines = [f"platform {r['ats']}: {why}" for r in rows for why in flags(
         r, [cast(Counts, dict(h)) for h in store.platform_health_history(
-            conn, r["ats"], config.PLATFORM_HEALTH["window"], stamp)])]
+            conn, r["ats"], int(config.PLATFORM_HEALTH["window"]), stamp)])]
     store.record_platform_health(conn, [dict(r) for r in rows])
     return lines
 
@@ -172,4 +174,4 @@ def alerts(conn: sqlite3.Connection) -> list[str]:
     """The flags of every platform's latest pass (the status view)."""
     return [f"{r['ats']}: {why}" for r in store.latest_platform_health(conn)
             for why in flags(cast(HealthRow, dict(r)), [cast(Counts, dict(h)) for h in store.platform_health_history(
-                conn, r["ats"], config.PLATFORM_HEALTH["window"], r["pass_at"])])]
+                conn, r["ats"], int(config.PLATFORM_HEALTH["window"]), r["pass_at"])])]

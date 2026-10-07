@@ -103,7 +103,7 @@ def cache_get(key: str) -> JSON:
     """The cached JSON value for `key`, or None when absent or older than
     seven days. Also used by the LLM name brainstorm, which rides the same
     TTL."""
-    return cast(JSON, json_cache_get(_cache_path(key), 7 * 24 * 3600))
+    return json_cache_get(_cache_path(key), 7 * 24 * 3600)
 
 
 def cache_put(key: str, value: object) -> None:

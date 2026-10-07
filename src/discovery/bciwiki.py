@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from typing import Any
 
 from src.config import FETCH_TIMEOUT
 from src.net import http
@@ -36,7 +35,7 @@ async def _category_members(category: str, max_items: int = 2000,
     """Return all page titles in a BCIWiki category, following cmcontinue;
     each page's JSON decoded off the loop."""
     titles: list[str] = []
-    cont: dict[str, Any] = {}
+    cont: dict[str, str] = {}
     while len(titles) < max_items:
         params = {
             "action":  "query",
@@ -95,7 +94,7 @@ async def bciwiki_company_names(categories: Iterable[str] = ("companies",),
 
 
 async def bciwiki_seed_candidates(categories: Iterable[str] = ("companies",),
-                                  max_items: int = 2000) -> list[dict[str, Any]]:
+                                  max_items: int = 2000) -> list[dict[str, str | None]]:
     """Candidate dicts (same shape as Claude's discovery payload) so the
     names flow through candidate_from_dict / validate_candidate unchanged."""
     return [

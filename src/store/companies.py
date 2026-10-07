@@ -37,6 +37,7 @@ from pydantic import AfterValidator, BeforeValidator, ConfigDict, TypeAdapter
 from src import config, tags
 from src.runstate import per_run
 from src.match.names import name_key as _name_key
+from src.net.util import dig
 from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
 from .employers import MISSION_COLS, apply_facts, write_mission
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
@@ -615,9 +616,10 @@ def company_by_host(conn: sqlite3.Connection, url: str | None) -> CompanyRow | N
 def _board_columns(ats: str) -> tuple[HandleColumn, ...]:
     """The columns naming an ATS's board: config.BOARDS `handle.columns`,
     default the slug; a capture-only board is named by its careers_url."""
-    return (("careers_url",) if ats == CAPTURE_ATS
-            else ((config.BOARDS.get(ats) or {}).get("handle") or {}).get(
-                "columns", config.DEFAULT_HANDLE_COLUMNS))
+    if ats == CAPTURE_ATS:
+        return ("careers_url",)
+    columns = dig(config.BOARDS, ats, "handle", "columns")
+    return config.DEFAULT_HANDLE_COLUMNS if columns is None else cast(tuple[HandleColumn, ...], columns)
 
 
 type BoardKey = tuple[str, *tuple[object, ...]]
@@ -687,7 +689,7 @@ def board_key(r: BoardCoords) -> BoardKey | None:
     if not ats:
         return None
     cols = _board_columns(ats)
-    fold = bool(((config.BOARDS.get(ats) or {}).get("handle") or {}).get("fold"))
+    fold = bool(dig(config.BOARDS, ats, "handle", "fold"))
     vals = [(v.rstrip("/").lower() if fold or c == "careers_url" else v.rstrip("/"))
             if isinstance(v := r.get(c), str) else v for c in cols]
     return (ats, *vals) if vals[0] else None

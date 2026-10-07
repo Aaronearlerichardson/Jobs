@@ -18,7 +18,6 @@ resolve.board.resolve_or_miss, score, queue for review).
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from src import store
 from src.claude.api import have_api_key
@@ -366,7 +365,7 @@ def _name_state(key: str, tracked: set[str], blocked: set[str],
 
 
 async def preview_names(blob: str | bytes | list[str] | tuple[str, ...],
-                        use_llm: bool | None = None) -> list[dict[str, Any]]:
+                        use_llm: bool | None = None) -> list[dict[str, str]]:
     """A pasted page -> the list a person ticks through before anything is
     resolved: ``[{"name", "key", "state"}]``, one entry per distinct name, in
     the order they appear, with `state` from `_name_state`.

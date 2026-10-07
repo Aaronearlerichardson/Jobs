@@ -55,7 +55,7 @@ async def fetch_discourse(display_name: str, base_url: str, category_id: int,
     for t in topics:
         if t.posts_count == 1 and t.reply_count == 0:
             continue
-        title = t.title
+        title = t.title or ""
         tid   = t.id
         jurl  = f"{base_url}/t/{t.slug}/{tid}"
         loc   = t.last_posted_at[:10] if t.last_posted_at else "See post"
@@ -63,7 +63,7 @@ async def fetch_discourse(display_name: str, base_url: str, category_id: int,
             jobs.append({
                 "id":          f"discourse_{base_url.split('.')[0].split('//')[1]}_{tid}",
                 "company":     display_name,
-                "title":       title,  # pyrefly: ignore[bad-assignment]  # null passes through, as before
+                "title":       title,
                 "url":         jurl,
                 "location":    f"Posted {loc}",
                 "description": "",

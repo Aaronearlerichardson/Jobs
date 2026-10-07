@@ -16,7 +16,7 @@ from collections.abc import Callable, Coroutine, Hashable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Concatenate, Literal, cast
+from typing import TYPE_CHECKING, Concatenate, Literal, cast
 
 from src import config
 from src.rows import JobRow
@@ -63,7 +63,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     -wal is not optional: the newest writes live there until SQLite
     folds them back in).
 
-    Any thread may use the connection, one at a time: a Writer adopts one
+    A thread may use the connection, one at a time: a Writer adopts one
     opened elsewhere (sqlite3 is serialized, threadsafety 3).
     """
     conn = sqlite3.connect(path or config.STORE_DB_PATH,
@@ -263,9 +263,7 @@ class Writer:
     """
 
     #: The block's call queue and its drainer, made as the block opens.
-    # TODO(any-zero): Future is invariant and each ask has its own T; one
-    # queue of mixed asks needs Any here (a closure-per-ask rewrite would change flow).
-    _queue: asyncio.Queue[tuple[asyncio.Future[Any], Callable[..., object],
+    _queue: asyncio.Queue[tuple[asyncio.Future[object], Callable[..., object],
                                 Callable[[], object]] | None]
     _drainer: asyncio.Task[None]
 
@@ -309,7 +307,7 @@ class Writer:
 
     async def _ask[T](self, whole: bool, fn: Callable[..., T], args: tuple[object, ...],
                       kw: dict[str, object]) -> T:
-        asked: asyncio.Future[T] = asyncio.get_running_loop().create_future()
+        asked: asyncio.Future[object] = asyncio.get_running_loop().create_future()
 
         def call() -> T:
             if not whole:
@@ -322,7 +320,7 @@ class Writer:
                     raise RuntimeError("its caller was cancelled: rolled back")
             return got
         self._queue.put_nowait((asked, contextvars.copy_context().run, call))
-        return await asked
+        return cast(T, await asked)
 
     async def _drain(self) -> None:
         """Run the queued calls on the store's thread, one at a time, until

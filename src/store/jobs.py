@@ -781,7 +781,7 @@ def remote_admitted(row: Mapping[str, object], remote_mission_floor: float | Non
     ...                  "mission_score": 0.05}, 0.85)
     True
 
-    Any other company has to reach `remote_mission_floor` on its own
+    No other company gets in; it has to reach `remote_mission_floor` on its own
     judged mission score:
 
     >>> remote_admitted({"mission_score": 0.9}, 0.85)

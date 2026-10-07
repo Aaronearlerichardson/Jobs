@@ -13,11 +13,26 @@ import it, so it imports nothing of theirs.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Annotated, Any, Literal
+from collections.abc import Mapping, Sequence
+from typing import Annotated, Literal
 
 from annotated_types import MinLen
 from typing_extensions import NotRequired, ReadOnly, TypedDict
+
+
+#: What `json.loads` returns, once narrowed: a payload's value.
+type JSON = Mapping[str, JSON] | Sequence[JSON] | str | int | float | bool | None
+
+
+def dig(v: JSON, *keys: str) -> JSON:
+    """`v` at the nested dict `keys`; None where the shape breaks.
+
+    >>> dig({"a": {"b": [1]}}, "a", "b"), dig({"a": 1}, "a", "b"), dig([1], "a")
+    ([1], None, None)
+    """
+    for k in keys:
+        v = v.get(k) if isinstance(v, dict) else None
+    return v
 
 
 class FitColumns(TypedDict, total=False):
@@ -285,17 +300,21 @@ class CompanyRow(TypedDict, closed=True):
     watch: int | None
 
 
-def is_watched(company: Mapping[str, Any] | None) -> bool:
+def is_watched(company: Mapping[str, object] | None) -> bool:
     """True when `company` (a CompanyRow, or None) is on the watch list."""
     return bool(company and company.get("watch"))
 
 
 # Closed, so `"wd_tenant" in x` narrows a `BoardHit | CompanyRow` to the row.
+#: A board's handle: a slug, or Workday's (tenant, pod, site).
+type Slug = str | tuple[str | int, ...] | None
+
+
 class BoardHit(TypedDict, total=False, closed=True):
     """A resolver's answer for one board: its coordinates and what reading it found."""
     name: str
     ats: str
-    slug: str | tuple[Any, ...] | None      # a tuple where the handle spans columns
+    slug: Slug                              # a tuple where the handle spans columns
     careers_url: str | None
     count: int                              # postings on the board
     nc: int                                 # of them, in your [locality]
@@ -311,7 +330,7 @@ class BoardCoords(TypedDict, total=False):
     """The board coordinates a hit and a store row both carry, for a function
     that reads only these and takes either."""
     ats: ReadOnly[str | None]
-    slug: ReadOnly[str | tuple[Any, ...] | None]
+    slug: ReadOnly[Slug]
     wd_tenant: ReadOnly[str | None]
     wd_pod: ReadOnly[int | str | None]
     wd_site: ReadOnly[str | None]

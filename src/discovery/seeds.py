@@ -28,11 +28,9 @@ inside "neuroscience".
 from __future__ import annotations
 
 import re
-from typing import Any
-
 from src import config
 
-SEED_COMPANIES: list[dict[str, Any]] = config.DISCOVERY_SEED_COMPANIES
+SEED_COMPANIES: list[dict[str, str]] = config.DISCOVERY_SEED_COMPANIES
 SEED_TRIGGERS: tuple[str, ...] = tuple(
     t.strip().lower() for t in config.DISCOVERY_SEED_TRIGGERS if t.strip()
 )
@@ -56,7 +54,7 @@ def _matches_term(term: str) -> bool:
     return False
 
 
-def seed_candidates_for(term: str) -> list[dict[str, Any]]:
+def seed_candidates_for(term: str) -> list[dict[str, str | None]]:
     """
     Return raw candidate dicts to merge with the LLM's discovery output, or
     [] if `term` doesn't match a configured trigger.

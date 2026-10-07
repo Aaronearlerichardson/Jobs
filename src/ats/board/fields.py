@@ -270,14 +270,22 @@ def path(obj: JSON, p: str) -> JSON:
     return _getter(p)(obj)
 
 
+def _step(s: str) -> tuple[str, str | None]:
+    """One path step as (key, index): `a[3]` -> ('a', '3'), `a[]` -> ('a', ''), `a` -> ('a', None).
+
+    >>> _step("a[3]"), _step("a[]"), _step("a"), _step("a[b]")
+    (('a', '3'), ('a', ''), ('a', None), ('a[b]', None))
+    """
+    m = re.search(r"\[(\d*)\]$", s)
+    return (s[:m.start()], m.group(1)) if m else (s, None)
+
+
 @functools.cache
 def _getter(p: str) -> Callable[[JSON], JSON]:
     """`path` for one `p`, parsed once: a callable obj -> value."""
     if p == "":
         return lambda obj: obj
-    # The pattern matches any one-line step: never None.
-    split = [re.match(r"^(.*?)(?:\[(\d*)\])?$", s).groups()  # pyrefly: ignore[missing-attribute]  # the pattern matches every string
-             for s in p.split(".")]
+    split = [_step(s) for s in p.split(".")]
     if all(index is None for _key, index in split):
         keys = tuple(key for key, _index in split)
 

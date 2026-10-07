@@ -10,7 +10,6 @@ run_scraper.py --import-companies roster.json.
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import Any
 
 from src.rows import CompanyRow
 # _self: the config PACKAGE, which is what callers monkeypatch.
@@ -327,7 +326,7 @@ BOARD_DETECT_CACHE_S = 6 * 3600
 # Platform health (src.crawl.health): a platform is flagged when its
 # error+empty board rate beats the median of its last `window` passes by
 # `margin`, needing `min_boards` boards this pass and `min_passes` of history.
-PLATFORM_HEALTH: dict[str, Any] = {"window": 7, "min_boards": 5, "min_passes": 3, "margin": 0.25}
+PLATFORM_HEALTH: dict[str, float] = {"window": 7, "min_boards": 5, "min_passes": 3, "margin": 0.25}
 
 RESPECT_ROBOTS = _pol.respect_robots
 

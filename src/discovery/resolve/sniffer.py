@@ -17,13 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TypedDict
 
 from src import config
 from src.ats import coords
 from src.ats.board import board_for
-from src.ats.signatures import detect, pack
-from src.rows import BoardHit
+from src.ats.signatures import Detection, detect, pack
+from src.rows import BoardHit, Slug
 from .fetchpool import ROOT_PATTERNS
 from .identity import (candidate_pages, candidate_responses, corroborated,
                        foreign_board)
@@ -31,19 +30,6 @@ from .probes import SCANNED, confirm, slug_keyed
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.sniffer")
-
-
-#: A detected handle: a slug, or Workday's (tenant, pod, site).
-type Handle = str | tuple[str | int, ...] | None
-
-
-class Detection(TypedDict, total=False):
-    """A detected board, as `signatures.pack` writes it: the handle under
-    `triple` where it spans columns, else `slug`."""
-    ats: str
-    careers_url: str
-    slug: Handle
-    triple: Handle
 
 
 async def _scan_root(name: str, careers_url: str = "") -> Detection | None:
@@ -109,7 +95,7 @@ async def sniff_ats(name: str, careers_url: str = "") -> Detection | None:
     return custom
 
 
-async def _confirmed(ats: str, slug: Handle, page_url: str,
+async def _confirmed(ats: str, slug: Slug, page_url: str,
                      tried: dict[tuple[str, str | None], int | None]) -> int | None:
     """A live posting count for a detection on `page_url` (probes.confirm),
     or None. Asked once per board (`tried` memoizes it), at the careers URL
