@@ -414,7 +414,10 @@ class HostLimiter:
         self._origins: dict[str, _Turn] = {}
 
     def _slot(self, url: str) -> _Turn:
-        return self._origins.setdefault(origin_key(url), _Turn())
+        key = origin_key(url)
+        if (turn := self._origins.get(key)) is None:
+            turn = self._origins[key] = _Turn()
+        return turn
 
     async def wait(self, url: str, gap: float) -> None:
         """Wait for url's origin's turn, then book the next `gap` on."""
