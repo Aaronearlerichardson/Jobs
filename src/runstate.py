@@ -145,11 +145,11 @@ def run[T](main: Awaitable[T]) -> T:
 
 
 def _current() -> Run:
-    try:
-        return RUN.get()
-    except LookupError:
+    run = RUN.get(None)
+    if run is None:
         raise RuntimeError("no run: an entry point starts one "
-                           "(runstate.run, or `async with runstate.Run():`)") from None
+                           "(runstate.run, or `async with runstate.Run():`)")
+    return run
 
 
 def per_run[T](make: Callable[[], T]) -> Callable[[], T]:
@@ -157,11 +157,10 @@ def per_run[T](make: Callable[[], T]) -> Callable[[], T]:
     `make()` at its first use in the run."""
     def get() -> T:
         state = _current().state
-        try:
+        if get in state:
             return cast(T, state[get])
-        except KeyError:
-            state[get] = made = make()
-            return made
+        state[get] = made = make()
+        return made
     return get
 
 

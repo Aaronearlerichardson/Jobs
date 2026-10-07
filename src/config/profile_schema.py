@@ -219,10 +219,10 @@ class Track(Methodology):
             return data
         data = {k: v for k, v in data.items()
                 if k == "db" or not (isinstance(v, str) and not v.strip())}
-        try:
-            eng = ENGINE_DEFAULTS[_engine(data.get("engine", "local"))]
-        except (ValueError, TypeError, KeyError):   # the engine field reports it
-            return data
+        name = data.get("engine", "local")
+        if not isinstance(name, str) or ENGINE_ALIASES.get(name, name) not in ENGINE_DEFAULTS:
+            return data                             # the engine field reports it
+        eng = ENGINE_DEFAULTS[ENGINE_ALIASES.get(name, name)]
         fill = {n: getattr(eng, n) for n in Methodology.model_fields if n not in data}
         if isinstance(mine := data.get("sources"), (dict, TrackSources)):
             mine = mine if isinstance(mine, dict) else mine.model_dump(exclude_unset=True)

@@ -113,7 +113,7 @@ class _ScoreKw(TypedDict, total=False):
     score_cap: int
 
 
-class BoardStats(TypedDict, total=False):
+class BoardStats(http.Snapshot, total=False):
     """One board's harvest stats: the counters plus http.snapshot_info()'s keys."""
     name: str | None
     ats: str | None
@@ -126,13 +126,6 @@ class BoardStats(TypedDict, total=False):
     err: str | None
     secs: float
     tried: list[str]
-    fetch_errors: int
-    incomplete: bool
-    capped: bool
-    capped_total: int | None
-    last_error: str | None
-    fill: dict[str, float]
-    fill_rows: int
 
 
 # --------------------------------------------------------------------------- #
@@ -406,8 +399,7 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
         return stats
     progress()
     stats["fetched"] = len(jobs)
-    # TODO(any-zero): mypy rejects a total Snapshot as update() arg of a partial TypedDict.
-    stats.update(cast(BoardStats, http.snapshot_info()))
+    stats.update(**http.snapshot_info())
 
     try:
         # Bodies already in the store (an earlier harvest, or a crawl) are

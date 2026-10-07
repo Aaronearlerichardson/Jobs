@@ -51,6 +51,7 @@ from src.config.profile_schema import TrackKeywords
 from src.crawl import health
 from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
 from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
+from src.net.http import Snapshot
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
 from src.rows import CompanyRow, FetchedJob, RankedJob, is_watched
@@ -303,7 +304,7 @@ class Collected(NamedTuple):
 
 async def _gate_company_board(
         db: store.Writer, t: RuntimeTrack, c: CompanyRow, jobs: list[FetchedJob], commit: bool,
-        snapshot: health.SnapFacts | None = None,
+        snapshot: Snapshot | None = None,
 ) -> tuple[list[FetchedJob], list[FetchedJob], list[tuple[CompanyRow, FetchedJob, bool]], int, int]:
     """One store company's board through the gates, on `db` (the crawl's
     store.Writer).

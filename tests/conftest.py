@@ -169,6 +169,7 @@ def _fresh_run(monkeypatch):
     monkeypatch.setattr(_http, "LIMITER", _http.HostLimiter())
     monkeypatch.setattr(_claude, "_BOARD_OWNER_CACHE", {})
     monkeypatch.setattr(_scoring, "_GIVEN_UP", set())
+    _http.reset_fetch_failures()     # the failure count is a ContextVar a sync test leaves set
     yield
     _runstate.RUN.reset(token)
 

@@ -21,7 +21,7 @@ import sys
 import time
 from collections.abc import Iterable, Mapping
 from datetime import timedelta
-from typing import Any, TypedDict, Unpack, cast
+from typing import TypedDict, Unpack, cast
 
 import aiohttp
 import requests
@@ -451,8 +451,8 @@ class HostLimiter:
 LIMITER = HostLimiter()
 
 
-# TODO(any-zero): board/engine.py passes a dict[str, JSON] splat, which Unpack[SendKw] rejects.
-async def request(method: str, url: str, label: str | None = None, **kw: Any
+async def request(method: str, url: str, label: str | None = None, *,
+                  polite: bool = True, **kw: Unpack[SendKw]
                   ) -> tuple[int | None, requests.Response | None, str | Exception | None]:
     """(status, response, error) for one polite request, HEADERS under the
     call's own.
@@ -462,9 +462,9 @@ async def request(method: str, url: str, label: str | None = None, **kw: Any
     `fetch_failed` under `label` when a label is given. A caller judging a
     status itself (a closure probe reading 404 as "gone") passes no label.
     """
+    own: SendKw = {**kw, "headers": {**HEADERS, **(kw.get("headers") or {})}}
     try:
-        r = await send(method, url, headers={**HEADERS, **kw.pop("headers", {})},
-                       **kw)
+        r = await send(method, url, polite=polite, **own)
     except Exception as e:
         return None, None, failed(label, e)
     if r.status_code >= 400:
@@ -487,14 +487,14 @@ def _json_of(status: int | None, r: requests.Response | None, err: str | Excepti
         return status, None, failed(label, "non-JSON response")
 
 
-# TODO(any-zero): as `request`.
-async def request_json(method: str, url: str, label: str | None = None, **kw: Any
+async def request_json(method: str, url: str, label: str | None = None, *,
+                       polite: bool = True, **kw: Unpack[SendKw]
                        ) -> tuple[int | None, JSON, str | Exception | None]:
     """(status, payload, error) for one JSON request: `request`'s, plus
     "empty response" and "non-JSON response" as errors. The JSON is
     decoded off the loop, its failure counted here (`_account`)."""
     _account()
-    status, r, err = await request(method, url, label, **kw)
+    status, r, err = await request(method, url, label, polite=polite, **kw)
     return await asyncio.to_thread(_json_of, status, r, err, label)
 
 
@@ -640,14 +640,17 @@ def note_fill(rows: int, rates: dict[str, float]) -> None:
     >>> snapshot_info()["fill"], snapshot_info()["fill_rows"]
     ({'title': 0.75}, 4)
     """
+    if not rows:
+        return
     acct = _account()
     acct.fill_rows += rows
     for k, v in rates.items():
         acct.fill_sum[k] = acct.fill_sum.get(k, 0.0) + v * rows
 
 
-class Snapshot(TypedDict):
-    """What `snapshot_info` reports."""
+class Snapshot(TypedDict, total=False):
+    """What `snapshot_info` reports (every key, though partial dicts read
+    the same: a Tally's snap, a harvest's BoardStats, are views of this)."""
     fetch_errors: int
     incomplete: bool
     capped: bool

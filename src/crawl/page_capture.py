@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urljoin
 
@@ -328,39 +328,53 @@ def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
     >>> [(j["title"], j["company"], j["location"], j["company_url"])
     ...  for j in parse_jsonld(parse_markup(page))]
     [('Chemist', 'Acme', 'Durham, NC', 'https://acme.example')]
+
+    A string, list or otherwise non-object `address` is read without error:
+    a string gives no location, a list its first object.
+
+    >>> def loc(addr):
+    ...     d = {"@type": "JobPosting", "title": "T", "url": "https://x.test/1",
+    ...          "jobLocation": {"address": addr}}
+    ...     tag = '<script type="application/ld+json">%s</script>' % json.dumps(d)
+    ...     return [j["location"] for j in parse_jsonld(parse_markup(tag))]
+    >>> loc("Durham, NC"), loc({"addressLocality": "Cary"}), loc([{"addressRegion": "NC"}])
+    ([''], ['Cary'], ['NC'])
     """
     jobs = []
     for tag in jsonld_scripts(tree):
         try:
-            data = json.loads(tag.text or "")
+            data: JSON = json.loads(tag.text or "")
         except Exception:
             continue
-        items = data if isinstance(data, list) else \
-            data.get("itemListElement", [data]) if isinstance(data, dict) else []
-        for it in items:
-            jp = it.get("item", it) if isinstance(it, dict) else dict[str, JSON]()
-            if not isinstance(jp, dict) or jp.get("@type") not in ("JobPosting",):
+        listed = data.get("itemListElement", [data]) if isinstance(data, Mapping) else data
+        for it in listed if isinstance(listed, list) else []:
+            jp = it.get("item", it) if isinstance(it, Mapping) else None
+            if not isinstance(jp, Mapping) or jp.get("@type") != "JobPosting":
                 continue
-            jp = cast(dict[str, Any], jp)   # TODO(any-zero): schema.org JSON-LD is read untyped
             org = jp.get("hiringOrganization") or {}
-            loc = jp.get("jobLocation") or {}
+            loc = jp.get("jobLocation")
             if isinstance(loc, list):
-                loc = loc[0] if loc else dict[str, JSON]()
-            addr = (cast(dict[str, Any], loc.get("address") or {})   # TODO(any-zero)
-                    if isinstance(loc, dict) else dict[str, Any]())
-            location = ", ".join(x for x in (addr.get("addressLocality"),
-                                             addr.get("addressRegion")) if x)
-            url = jp.get("url") or page_url
+                loc = loc[0] if loc else None
+            addr = loc.get("address") if isinstance(loc, Mapping) else None
+            if isinstance(addr, list):
+                addr = addr[0] if addr else None
+            parts: list[JSON] = ([addr.get("addressLocality"), addr.get("addressRegion")]
+                     if isinstance(addr, Mapping) else [])
+            location = ", ".join(x for x in parts if x and isinstance(x, str))
+            url = jp.get("url")
+            url = url if url and isinstance(url, str) else page_url
             # schema.org marks the employer's own site in hiringOrganization
             # (sameAs / url) — capture it as the lead's careers_url hint.
             org_site = ""
-            if isinstance(org, dict):
+            if isinstance(org, Mapping):
                 same = org.get("sameAs")
                 same = same if isinstance(same, list) else [same]
                 org_site = _company_site(*same, org.get("url"))
+            name = jp.get("title") or jp.get("name") or ""
+            org_name = org.get("name", "") if isinstance(org, Mapping) else str(org)
             j = _job(f"cap_{stable_id(url, jp.get('title'))}",
-                     (jp.get("title") or jp.get("name") or ""),
-                     org.get("name", "") if isinstance(org, dict) else str(org),
+                     name if isinstance(name, str) else None,
+                     org_name if isinstance(org_name, str) else None,
                      url, location,
                      strip_html(jp.get("description")),
                      company_url=org_site)

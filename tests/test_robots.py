@@ -185,10 +185,10 @@ class TestWhatAFetchedFileMeans:
         rules = await robots.RobotsCache()._fetch("https://a.test")
         assert rules.protego is None and not rules.disallow_all
 
-    async def test_an_error_while_matching_fails_open(self, monkeypatch):
+    async def test_an_error_while_matching_fails_closed(self, monkeypatch):
         cache = robots.RobotsCache()
         monkeypatch.setattr(cache, "_fetch", answer(SimpleNamespace(allows=lambda url: 1 / 0)))
-        assert await cache.allowed("https://a.test/x") is True
+        assert await cache.allowed("https://a.test/x") is False
 
     async def test_sitemaps_are_the_ones_the_file_lists(self, serve):
         serve(fake_response(text="User-agent: *\nDisallow: /x\nSitemap: https://a.test/s1.xml\n"
@@ -595,3 +595,38 @@ class TestQuietSpeculativeProbes:
         with robots.quiet():
             rules = await robots.CACHE()._fetch("https://red.io")
         assert rules.protego is None and not rules.disallow_all   # still fails open
+
+
+class TestUncheckableRules:
+    """A robots.txt we cannot read, or a URL we cannot check, is logged."""
+
+    @pytest.fixture
+    def cache(self, monkeypatch):
+        from src import config
+        monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
+        return robots.RobotsCache()
+
+    async def test_a_url_that_cannot_be_checked_is_not_fetched(self, cache, monkeypatch, caplog):
+        class Broken(robots._HostRules):
+            def allows(self, url):
+                raise ValueError("bad url")
+
+        async def rules(url):
+            return Broken()
+
+        monkeypatch.setattr(cache, "_rules", rules)
+        with caplog.at_level(logging.WARNING, logger="src.net.robots"):
+            assert not await cache.allowed("https://x.test/a")
+        assert "could not check" in caplog.text
+
+    async def test_a_robots_txt_that_cannot_be_parsed_is_logged(self, cache, monkeypatch,
+                                                                caplog, serve):
+        def boom(text, user_agent):
+            raise ValueError("parser bug")
+
+        serve(fake_response(text="User-agent: *\nDisallow: /"))
+        monkeypatch.setattr(robots._HostRules, "parse", staticmethod(boom))
+        with caplog.at_level(logging.WARNING, logger="src.net.robots"):
+            rules = await cache._fetch("https://x.test")
+        assert rules.protego is None and not rules.disallow_all
+        assert "could not parse" in caplog.text

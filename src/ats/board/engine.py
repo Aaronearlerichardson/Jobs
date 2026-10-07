@@ -458,14 +458,15 @@ class Board:
         followed, once. The answer is decoded off the loop."""
         dec = req.decoder
         vals = {**_NAMED, **(vals or {})}
-        kw: dict[str, JSON] = {"headers": {**(JSON_HEADERS if dec.kind == "json" else HEADERS),
-                                          **cast(Mapping[str, JSON],
-                                                 _fill(req.headers, parts.get, vals))}}
+        kw: http.SendKw = {"headers": {**(JSON_HEADERS if dec.kind == "json" else HEADERS),
+                                       **cast(Mapping[str, str | None],
+                                              _fill(req.headers, parts.get, vals))}}
         if url is None and req.params:
             params = {k: v.get(k) if isinstance(v, dict) else v
                       for k, v in cast(Mapping[str, JSON],
                                        _fill(req.params, parts.get, vals)).items()}
-            kw["params"] = {k: v for k, v in params.items() if v is not None}
+            kw["params"] = cast(Mapping[str, http.Param | None],   # TODO(any-zero): JSON values, str|int in practice
+                                {k: v for k, v in params.items() if v is not None})
         if url is None and req.json_:
             kw["json"] = _fill(req.json_, parts.get, vals)
         if timeout:

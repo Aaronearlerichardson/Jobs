@@ -221,7 +221,7 @@ class CompanyIn(TypedDict, total=False, closed=True):
     ats: str | None
     slug: str | None
     wd_tenant: str | None
-    wd_pod: int | None
+    wd_pod: int | str | None    # a slug's text part is written; INTEGER affinity stores an int
     wd_site: str | None
     careers_url: str | None
     local_job_count: int | None
@@ -313,7 +313,7 @@ class BoardCoords(TypedDict, total=False):
     ats: ReadOnly[str | None]
     slug: ReadOnly[str | tuple[Any, ...] | None]
     wd_tenant: ReadOnly[str | None]
-    wd_pod: ReadOnly[int | None]
+    wd_pod: ReadOnly[int | str | None]
     wd_site: ReadOnly[str | None]
     careers_url: ReadOnly[str | None]
 

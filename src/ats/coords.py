@@ -52,6 +52,13 @@ def columns(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None = No
     >>> wd["slug"] is None, wd["wd_tenant"], wd["wd_pod"], wd["wd_site"]
     (True, 'acme', 5, 'External')
 
+    A `sep`-joined string gives the parts as text; the store's INTEGER
+    column turns the pod back into an int on write:
+
+    >>> wd = columns("workday", "acme|5|External")
+    >>> wd["wd_tenant"], wd["wd_pod"], wd["wd_site"]
+    ('acme', '5', 'External')
+
     A self-hosted board has no handle at all; its identity is the URL
     (core.store.board_key), and the same is true of a hosted PeopleAdmin
     tenant:
@@ -75,7 +82,7 @@ def columns(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None = No
     if multi:
         parts = slug if isinstance(slug, (tuple, list)) else str(slug).split(sep)
         for col, part in zip(cols, parts):
-            out[col] = part  # pyrefly: ignore[bad-assignment]  # TODO(user decision): wd_pod is typed int | None but a str part is stored; SQLite INTEGER affinity coerces on write
+            out[col] = part
     out.update(extra)
     return out
 

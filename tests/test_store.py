@@ -206,7 +206,8 @@ class TestSchema:
         assert {r[1] for r in db.execute("PRAGMA table_info(companies_effective)")} == cols
         assert set(CompanyIn.__annotations__) < set(CompanyRow.__annotations__)
         writer, reader = get_type_hints(CompanyIn), get_type_hints(CompanyRow)
-        assert all(writer[k] == reader[k] for k in writer), "CompanyIn and CompanyRow disagree"
+        assert all(writer[k] == reader[k] for k in writer if k != "wd_pod"),             "CompanyIn and CompanyRow disagree"
+        assert writer["wd_pod"] == reader["wd_pod"] | str    # a slug's text part, stored as an int
         assert CompanyRow.__required_keys__ == set(CompanyRow.__annotations__)
         assert set(get_args(HandleColumn)) <= cols
         assert set(BoardCoords.__annotations__) == {"ats", *get_args(HandleColumn)}
@@ -464,7 +465,8 @@ class TestImportCompanies:
     def test_a_bad_row_is_named_and_nothing_is_written(self, db, tmp_path, row, loc, kind):
         with pytest.raises(ValidationError) as err:
             self._load(db, tmp_path, [{"name": "Good"}, row])
-        assert [(e["loc"], e["type"]) for e in err.value.errors()] == [(loc, kind)]
+        errors = [(e["loc"][:len(loc)], e["type"]) for e in err.value.errors()]
+        assert errors[:1] == [(loc, kind)]      # wd_pod's int | str reports one error per branch
         assert db.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 0
 
     def test_every_bad_row_is_listed_at_once(self, db, tmp_path):

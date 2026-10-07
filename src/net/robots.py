@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import socket
 import time
 from collections.abc import Iterator
@@ -64,6 +65,8 @@ from protego import Protego
 from src import config, runstate
 from . import http
 from .util import host_of, origin_key
+
+_log = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
@@ -223,7 +226,8 @@ class RobotsCache:
     # -- internals --------------------------------------------------------
 
     async def _fetch(self, origin: str) -> _HostRules:
-        """Fetch + parse one host's robots.txt. Never raises."""
+        """Fetch + parse one host's robots.txt. Never raises; a file that
+        cannot be parsed is logged and asks nothing."""
         try:
             r = await http.send("GET", f"{origin}/robots.txt", polite=False,
                                 timeout=(config.ROBOTS_CONNECT_TIMEOUT,
@@ -246,6 +250,10 @@ class RobotsCache:
         try:
             return _HostRules.parse(r.text, self.user_agent)
         except Exception:
+            # An unreadable file asks nothing we can read (RFC 9309), but a
+            # parser bug must not pass for "no robots.txt": say so.
+            _log.warning("robots: %s: could not parse robots.txt; proceeding "
+                         "without restrictions", origin, exc_info=True)
             return _HostRules()
 
     async def _rules(self, url: str) -> _HostRules | None:
@@ -312,7 +320,10 @@ class RobotsCache:
         try:
             return rules is None or rules.allows(url)
         except Exception:
-            return True
+            # A URL we cannot check is one we do not fetch.
+            _log.warning("robots: could not check %s; not fetching it", url,
+                         exc_info=True)
+            return False
 
     async def crawl_delay(self, url: str) -> float | None:
         """Seconds this host asks us to wait between requests, or None."""

@@ -937,6 +937,9 @@ def _checked(row: CompanyIn) -> CompanyIn:
         raise ValueError("name is required")
     if row.get("review") not in (None, "pending", "confirmed"):
         raise ValueError("review is 'pending' or 'confirmed'")
+    pod = row.get("wd_pod")
+    if isinstance(pod, str) and not pod.isdecimal():    # CompanyIn.wd_pod admits text; the column is INTEGER
+        raise ValueError("wd_pod is a number")
     return row
 
 
