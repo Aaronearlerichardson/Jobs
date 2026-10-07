@@ -109,11 +109,11 @@ class PlanStats(TypedDict, total=False):
     min_age_hours: float
 
 
-class _ScoreKw(TypedDict, total=False):
+class _ScoreKw(TypedDict, total=False, closed=True):
     score_cap: int
 
 
-class BoardStats(http.Snapshot, total=False):
+class BoardStats(http.SnapshotFields, total=False):
     """One board's harvest stats: the counters plus http.snapshot_info()'s keys."""
     name: str | None
     ats: str | None
@@ -399,7 +399,7 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
         return stats
     progress()
     stats["fetched"] = len(jobs)
-    stats.update(**http.snapshot_info())
+    stats.update(http.snapshot_info())
 
     try:
         # Bodies already in the store (an earlier harvest, or a crawl) are

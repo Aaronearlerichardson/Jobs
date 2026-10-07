@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from pydantic import (AfterValidator, BaseModel, BeforeValidator,
-                      ConfigDict, Field, ValidationError, ValidationInfo,
-                      field_validator, model_validator)
+                      ConfigDict, Field, PrivateAttr, TypeAdapter,
+                      ValidationError, ValidationInfo, field_validator,
+                      model_validator)
 
 from src import tags
 from src.validation import Regex, error_lines
@@ -79,11 +80,23 @@ class TrackKeywords(_Table):
     skill: list[str] = []
 
 
+_KEYWORD_TABLES = TypeAdapter(dict[str, Annotated[TrackKeywords, BeforeValidator(_table_only)]])
+
+
 class Keywords(TrackKeywords):
     model_config = ConfigDict(extra="allow")
-    # `Field(init=False)` only keeps it out of __init__ for type checkers.
-    __pydantic_extra__: dict[str, Annotated[TrackKeywords,
-                                            BeforeValidator(_table_only)]] = Field(init=False)
+    _tracks: dict[str, TrackKeywords] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _read_tracks(self) -> Self:
+        """The undeclared keys, each validated as a `TrackKeywords` table."""
+        self._tracks = _KEYWORD_TABLES.validate_python(self.model_extra or {})
+        return self
+
+    @property
+    def tracks(self) -> dict[str, TrackKeywords]:
+        """The per-track tables, by track id."""
+        return self._tracks
 
 
 class TrackExclude(_Table):
@@ -96,14 +109,27 @@ class TrackExclude(_Table):
     clinical_markers: list[str] = []
 
 
+_EXCLUDE_TABLES = TypeAdapter(dict[str, Annotated[TrackExclude, BeforeValidator(_table_only)]])
+
+
 class Exclude(_Table):
     model_config = ConfigDict(extra="allow")
-    __pydantic_extra__: dict[str, Annotated[TrackExclude,
-                                            BeforeValidator(_table_only)]] = Field(init=False)
+    _tracks: dict[str, TrackExclude] = PrivateAttr(default_factory=dict)
     phrases: list[str] = []
     title_phrases: list[str] = []
     title_exempt_phrases: list[str] = []
     boilerplate_phrases: list[Regex] = []
+
+    @model_validator(mode="after")
+    def _read_tracks(self) -> Self:
+        """The undeclared keys, each validated as a `TrackExclude` table."""
+        self._tracks = _EXCLUDE_TABLES.validate_python(self.model_extra or {})
+        return self
+
+    @property
+    def tracks(self) -> dict[str, TrackExclude]:
+        """The per-track tables, by track id."""
+        return self._tracks
 
 
 class Locations(_Table):

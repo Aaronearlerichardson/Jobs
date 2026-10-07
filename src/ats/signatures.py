@@ -30,7 +30,7 @@ BAD_SLUGS = frozenset({
 
 
 def detect(text: str, final_url: str = "", leads: bool = True,
-           only: str | None = None) -> tuple[str, str, str | tuple[str, ...]] | None:
+           only: str | None = None) -> tuple[str, str, str | tuple[str | int, ...]] | None:
     """Scan text + final URL (HTML entities decoded) for an ATS signature.
 
     Returns (kind, ats, slug) or None: kind "fetchable" for a spec with a

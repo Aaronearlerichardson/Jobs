@@ -415,9 +415,11 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
         rows = [r for r in rows if not walked.get(r["company_id"])
                 or walked[r["company_id"]] > cutoff]
         n_deferred, n_queued = n_rows - len(rows), len(rows)
-        # TODO(any-zero): url may be None; probe_origin gets it as-is.
+        # A row with no URL has nothing to probe (probe_origin used to crash on it).
         hosts = group_by_company(await asyncio.to_thread(
-            lambda: [ProbeRow(**r, origin=closure.probe_origin(cast(str, r["url"]))) for r in rows]), "origin")
+            lambda: [ProbeRow(job_id=r["job_id"], title=r["title"], company_name=r["company_name"],
+                              company_id=r["company_id"], url=url, origin=closure.probe_origin(url))
+                     for r in rows if (url := r["url"])]), "origin")
         ranks = itertools.zip_longest(*(q[:config.CLOSED_PROBE_PER_HOST] for q in hosts.values()))
         rows = [r for rank in ranks for r in rank if r is not None][:int(limit) if limit else None]
         print(f"  probing {len(rows)} open job(s) on "

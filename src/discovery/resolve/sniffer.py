@@ -51,7 +51,7 @@ async def _scan_root(name: str, careers_url: str = "") -> Detection | None:
         if hit:
             if await foreign_board(name, hit[1], hit[2]):
                 continue
-            return Detection(**pack(hit[1], hit[2], r.url))
+            return pack(hit[1], hit[2], r.url)
     return None
 
 
@@ -74,7 +74,7 @@ async def sniff_ats(name: str, careers_url: str = "") -> Detection | None:
             else:               # still capture the company's OWN listings
                 _log.debug("sniff %s: %s %r found on %s",
                            name, hit[1], hit[2], r.url)
-                return Detection(**pack(hit[1], hit[2], r.url))
+                return pack(hit[1], hit[2], r.url)
         if custom is None:
             # Custom board: resolve to the page that actually holds the
             # listings (this page, or the openings page one hop away).

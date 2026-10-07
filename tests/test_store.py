@@ -234,9 +234,10 @@ class TestSchema:
 
     def test_the_fit_columns_are_what_the_scorer_produces(self):
         from src.claude import fit
-        assert set(FitColumns.__annotations__) == set(fit.FitResult(score=0.5).as_columns())
-        assert {"fit_" + a for a in fit.AXES} <= set(FitColumns.__annotations__)
-        assert store._SCORE_COLS == tuple(FitColumns.__annotations__)
+        keys = FitColumns.__optional_keys__
+        assert set(keys) == set(fit.FitResult(score=0.5).as_columns())
+        assert {"fit_" + a for a in fit.AXES} <= keys
+        assert set(store._SCORE_COLS) == keys
 
     def test_migrating_a_current_store_changes_nothing(self, db):
         before = db.execute("SELECT group_concat(sql) FROM sqlite_master").fetchone()[0]

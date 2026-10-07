@@ -149,8 +149,7 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
                 if not desc and r.get("url"):
                     # Board didn't cover this row — hydrate from the job's own
                     # detail page (JSON-LD / career-site markup).
-                    # TODO(any-zero): title may be None; passed as-is.
-                    stub: FetchedJob = {"title": cast(str, r["title"]), "url": r["url"],
+                    stub: FetchedJob = {"title": r["title"] or "", "url": r["url"],
                             "ats": company.get("ats"), "description": ""}
                     await company_fetch.hydrate_description(stub, company)
                     desc = stub.get("description")

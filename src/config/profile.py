@@ -173,8 +173,8 @@ EXCLUDE_BOILERPLATE_PHRASES = list(PROFILE.exclude.boilerplate_phrases)
 # Per-track keyword/exclude overrides — [keywords.<track>] / [exclude.<track>]
 # tables. Tracks read their own model (e.g. KEYWORDS_BY_TRACK.get("local"))
 # instead of hardcoding their vocabulary; see src/crawl/runner.py.
-KEYWORDS_BY_TRACK: dict[str, TrackKeywords] = {**PROFILE.keywords.__pydantic_extra__}
-EXCLUDE_BY_TRACK: dict[str, TrackExclude] = {**PROFILE.exclude.__pydantic_extra__}
+KEYWORDS_BY_TRACK: dict[str, TrackKeywords] = dict(PROFILE.keywords.tracks)
+EXCLUDE_BY_TRACK: dict[str, TrackExclude] = dict(PROFILE.exclude.tracks)
 
 # Mutated at runtime: src/crawl/runner.py sets it to the crawling track's
 # `accept_remote` and src/dispatch/background.py restores it between operations. Read it

@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import TypedDict, cast
+from typing import cast
 from urllib.parse import urldefrag, urljoin
 
 from lxml import etree
+from typing_extensions import TypedDict
 
 from src import config
 from src.match.locality import LocationRE
@@ -34,7 +35,7 @@ from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
 _OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
 
 
-class PageElement(TypedDict):
+class PageElement(TypedDict, closed=True):
     """One job link `read_page` found."""
 
     title: str
@@ -43,7 +44,7 @@ class PageElement(TypedDict):
     location: str
 
 
-class Page(TypedDict, total=False):
+class Page(TypedDict, total=False, closed=True):
     """`read_page`'s answer: the links, or the page to read instead."""
 
     elements: list[PageElement]

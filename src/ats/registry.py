@@ -52,12 +52,13 @@ def sweep(ats: str, name: str,
 
 
 def iter_store_sources(companies: Iterable[CompanyRow]) -> Iterator[
-        tuple[str, str, str, Callable[[], Awaitable[list[FetchedJob]]] | None]]:
+        tuple[str, str, str, Callable[[], Awaitable[list[FetchedJob]]]]]:
     """Yield (ats, name, handle, thunk) for the store rows on a platform
     the lightweight sweep pulls whole (its spec's `sweep`) that name a
     board."""
     for c in companies:
         board = board_for(c.get("ats"))
         handle = board.handle(c) if board and board.spec.sweep else None
-        if board and handle:
-            yield board.name, c["name"], handle, sweep(board.name, c["name"], handle)
+        thunk = sweep(board.name, c["name"], handle) if board and handle else None
+        if board and handle and thunk:
+            yield board.name, c["name"], handle, thunk

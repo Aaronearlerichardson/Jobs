@@ -35,7 +35,7 @@ import html
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Literal, cast, overload
+from typing import Literal, overload
 from urllib.parse import unquote
 
 from src.match.locality import MONTH_ABBRS, location_snippet
@@ -240,14 +240,15 @@ def merge_locations(primary: JSON, extras: list[JSON] | None) -> str:
     'Tokyo, Japan'
     >>> merge_locations(None, [])
     ''
+    >>> merge_locations(["Durham"], ["Tokyo"])
+    'Tokyo'
 
     Notes:
         Multi-location postings often show only "Remote" (or one HQ city)
         up front while the site that matters hides in the secondary list;
         the location regex and the geo logic must see them all.
     """
-    # TODO(any-zero): a typed Reader return makes `primary` str | None | list; a list raises.
-    loc = (cast(str | None, primary) or "").strip()
+    loc = (text(primary) or "").strip()
     seen = loc.lower()
     for e in extras or []:
         e = e.strip() if isinstance(e, str) else ""
@@ -415,12 +416,25 @@ def value(spec: JSON, entry: JSON, ctx: Mapping[str, JSON] | None = None,
     return reader(spec, strict)(entry, ctx or {})
 
 
+def text(v: JSON) -> str | None:
+    """`v` as the text of a row field: text as is, a number as digits, None
+    for None and for what is no text (a bool, a list, a dict).
+
+    >>> text("a"), text(7), text(2.0), text(2.5), text(True), text(["x"]), text(None)
+    ('a', '7', '2', '2.5', None, None, None)
+    """
+    if v is None or isinstance(v, str):
+        return v
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return str(int(v)) if isinstance(v, float) and v.is_integer() else str(v)
+
+
 def str_reader(spec: JSON, strict: bool = False) -> StrReader:
     """`reader(spec)` for a row field that holds text (id, title, url,
-    location, description, posted_at, remote_hint)."""
-    # TODO(any-zero): a spec can name a list or dict here, and the reader
-    # then gives one; nothing is converted or checked. Parse the spec by type.
-    return cast(StrReader, reader(spec, strict))
+    location, description, posted_at, remote_hint): its value through `text`."""
+    read = reader(spec, strict)
+    return lambda entry, ctx: text(read(entry, ctx))
 
 
 def reader(spec: JSON, strict: bool = False) -> Reader:

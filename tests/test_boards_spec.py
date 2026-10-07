@@ -106,7 +106,7 @@ def test_the_fetched_job_names_the_row_fields_and_fit_columns():
     column a score stamps, and none of the engine row's own keys."""
     keys = set(FetchedJob.__annotations__)
     assert spec.ROW_FIELDS - {"department"} <= keys
-    assert set(FitColumns.__annotations__) <= keys
+    assert FitColumns.__optional_keys__ <= keys
     assert not {"head", "_free"} & keys
 
 

@@ -22,7 +22,7 @@ from typing import TypedDict, cast
 from src import config
 from src import store
 from src.ats.board.pager import FILL_FLOORS, fill_rates
-from src.net.http import Snapshot
+from src.net.http import SnapshotFields
 from src.net.util import dig
 from src.rows import FetchedJob
 
@@ -62,7 +62,7 @@ class Tally:
             lambda: defaultdict(float))
 
     def note(self, ats: str, n: int, fill: Mapping[str, float], *,
-             err: object, snap: Snapshot) -> None:
+             err: object, snap: SnapshotFields) -> None:
         """One board's outcome: `n` rows, their `fill` rates, the fetch's
         exception `err` and net.http.snapshot_info() `snap` (any mapping with
         its keys). A failure with no rows is an error, with rows partial."""
@@ -80,7 +80,7 @@ class Tally:
             self._fill[ats][k] += v * weight
 
     def note_jobs(self, ats: str, jobs: list[FetchedJob] | None, err: object,
-                  snap: Snapshot | None) -> None:
+                  snap: SnapshotFields | None) -> None:
         """`note` for a board whose rows are in hand; the fill is the
         snapshot's (raw listing rows), else the kept `jobs`'.
 

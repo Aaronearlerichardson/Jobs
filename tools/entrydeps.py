@@ -40,7 +40,7 @@ import sys
 from collections import Counter, defaultdict
 from modulefinder import Module, ModuleFinder
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, override
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -69,6 +69,7 @@ class _Finder(ModuleFinder):
     catches ImportError and files it under badmodules.
     """
 
+    @override
     def find_module(self, name: str, path: str | None,
                     parent: Module | None = None
                     ) -> tuple[IO[Any] | None, str | None, tuple[str, str, int]]:

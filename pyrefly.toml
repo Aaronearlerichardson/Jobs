@@ -2,11 +2,14 @@
 project-includes = ["src", "tools"]
 # tools/ are scripts that import `src` and `tools._harness` by package path.
 search-path = ["."]
-python-version = "3.12"
+python-version = "3.14"
 # Site-packages come from the `jobs` conda env, so the LSP and a bare `pyrefly check`
-# see third-party imports without that env on PATH.
-conda-environment = "jobs"
-preset = "legacy"
+# see third-party imports without that env on PATH. A path, not `conda-environment`:
+# the PyCharm-launched LSP has no `conda` on PATH and fell back to base miniconda.
+python-interpreter-path = "C:/Users/Jakda/miniconda3/envs/jobs/python.exe"
+# strict: implicit-any family (disallow_any_*), unused-ignore (warn_unused_ignores),
+# missing-override-decorator, open-unpacking, strict-callable-subtyping.
+preset = "strict"
 ignore-missing-imports = [
     "lxml.*",
     "html5lib.*",
@@ -15,30 +18,21 @@ ignore-missing-imports = [
 ]
 # mypy `strict` with unannotated defs checked and no return-type inference.
 check-unannotated-defs = true
-infer-return-types = "never"
+#infer-return-types = "never"
 
 [errors]
-# mypy `strict` member flags.
-implicit-any = "error"            # disallow_any_explicit/unimported/decorated family
-implicit-any-parameter = "error"  # disallow_untyped_defs, disallow_incomplete_defs
-implicit-any-attribute = "error"
-implicit-any-empty-container = "error"
-implicit-any-lambda = "error"
-implicit-any-type-argument = "error"  # disallow_any_generics
+# mypy `strict` flags the preset leaves at warn/ignore.
 unannotated-return = "error"      # disallow_untyped_defs
 unannotated-parameter = "error"
 unannotated-attribute = "error"
 no-any-return = "error"           # warn_return_any
 redundant-cast = "error"          # warn_redundant_casts
-unused-ignore = "error"           # warn_unused_ignores
 unused-type-ignore = "error"
 untyped-function-decorator = "error"  # disallow_untyped_decorators
 untyped-class-decorator = "error"
 unnecessary-comparison = "error"  # strict_equality
 # warn_unreachable = True
 unreachable = "error"
-# enable_error_code = possibly-undefined
-unbound-name = "error"
 # enable_error_code = redundant-expr (found the EngineRow.id str that is None
 # whenever a spec names no id)
 redundant-condition = "error"
@@ -46,7 +40,7 @@ redundant-condition = "error"
 # re-export it, and this flag wants each of ~440 of them named again in an
 # `__all__`, which tests/test_invariants.py's single-reader rules would then have
 # to read around.
-implicit-reexport = "ignore"
+#implicit-reexport = "ignore"
 # GAPS (no Pyrefly equivalent found in `pyrefly check --help` error kinds):
 #   mypy ignore-without-code: none; `# pyrefly: ignore[kind]` codes are optional
 #     (misplaced-ignore only flags position). Enforce by review/tools/scans.py.

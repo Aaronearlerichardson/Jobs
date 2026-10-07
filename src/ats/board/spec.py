@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from typing import Annotated, ClassVar, Literal, Self, Union, cast, get_args
+from typing import Annotated, ClassVar, Literal, Self, Union, cast, get_args, override
 
 from cssselect import SelectorError
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
@@ -178,6 +178,7 @@ class _Decoder(_Spec):
 
 class _Json(_Decoder):
     @property
+    @override
     def first(self) -> str:
         return ""
 
@@ -267,6 +268,7 @@ class _SizedPager(_Pager):
     size: Count = Field(description="Rows asked per page")
 
     @property
+    @override
     def stride(self) -> int | None:
         return self.size
 
@@ -279,9 +281,11 @@ class OffsetPager(_Pager):
     start: Annotated[Int, Field(ge=0)] = Field(0, description="The first row's offset")
 
     @property
+    @override
     def stride(self) -> int | None:
         return self.size
 
+    @override
     def offset(self, n: int, size: int) -> int:
         return self.start + n * size
 
@@ -298,9 +302,11 @@ class OverlapPager(_SizedPager):
         return self
 
     @property
+    @override
     def stride(self) -> int:
         return self.step
 
+    @override
     def offset(self, n: int, size: int) -> int:
         """Steps `step` in `size` rows: a server serving pages smaller than
         asked keeps the same overlap."""
@@ -315,12 +321,15 @@ class PagePager(_Pager):
     bare_first: Bool = Field(False, description="The first page's request names no page")
 
     @property
+    @override
     def stride(self) -> int | None:
         return self.size
 
+    @override
     def number(self, n: int) -> int:
         return self.start + n
 
+    @override
     def page(self, n: int) -> int | None:
         return None if n == 0 and self.bare_first else self.start + n
 

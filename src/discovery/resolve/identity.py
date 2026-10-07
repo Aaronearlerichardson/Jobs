@@ -16,7 +16,9 @@ import asyncio
 import re
 import sys
 from collections.abc import Callable, Sequence
-from typing import TypedDict, Unpack
+from typing import Unpack
+
+from typing_extensions import TypedDict
 
 from src import config, runstate
 from src.ats.board import BOARDS
@@ -238,7 +240,7 @@ def corroborated(url: str, name: str, text: str | None) -> bool:
     return not risky or _corroborates(text, name, risky)
 
 
-class CandidateKw(TypedDict, total=False):
+class CandidateKw(TypedDict, total=False, closed=True):
     """`fetchpool.candidate_urls`' keywords."""
     patterns: list[tuple[str, str]]
     cap: int | None

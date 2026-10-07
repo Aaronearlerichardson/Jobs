@@ -40,7 +40,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from types import ModuleType
-from typing import NamedTuple, TypedDict, cast
+from typing import NamedTuple, TypedDict
 
 from src import config
 from src import store
@@ -178,8 +178,7 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
             # Location-agnostic lightweight ATS sweep (JSON-API boards only;
             # the heavyweight onsite ATSes are only worth fetching scoped).
             for ats, name, slug, thunk in iter_store_sources(rows):
-                # TODO(any-zero): sweep thunks may be None; added as-is, as before.
-                add(name, ats, cast(SourceThunk, thunk), key=(ats, str(slug)))
+                add(name, ats, thunk, key=(ats, str(slug)))
 
     # 3) Forums + aggregator feeds (remote-native boards). Like the ATS
     # registry, the crawl injects the keyword gate here; the fetchers are
@@ -476,9 +475,8 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[SourceSpe
 
     for spec, (jobs, err, snapshot) in zip(specs, fetched):
         c = spec["company"]
-        if c is not None:
-            # TODO(any-zero): a store row's ats may be None; keyed as-is.
-            tally.note_jobs(cast(str, c["ats"]), jobs, err, snapshot)
+        if c is not None and c["ats"]:     # a boardless row is no platform's outcome
+            tally.note_jobs(c["ats"], jobs, err, snapshot)
         label = f"{spec['name']} ({spec['platform']})"
         if c is not None and c.get("id") and commit:
             # Judged on what the BOARD returned, before any of our gating:
@@ -583,8 +581,7 @@ async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, 
         async def _one(j: FetchedJob) -> None:
             res = await score_resume_fit(j["title"], j.get("description", ""),
                                          location=j.get("location") or "")
-            # FitColumns is open (JobIn extends it); a closed job takes no open update.
-            j.update(cast(FetchedJob, res.as_columns()))
+            j.update(res.as_columns())
 
         # `ex.map` re-raised the first failure, so one unscorable posting
         # abandoned the scoring of every other match in the sweep.

@@ -35,8 +35,7 @@ def dig(v: JSON, *keys: str) -> JSON:
     return v
 
 
-class FitColumns(TypedDict, total=False):
-    """The jobs columns one fit score writes (FitResult.as_columns)."""
+class _FitFields(TypedDict, total=False):
     resume_fit_score: float | None
     fit_reason: str | None
     fit_gates: str | None
@@ -47,7 +46,12 @@ class FitColumns(TypedDict, total=False):
     fit_seniority: float | None
 
 
-class JobIn(FitColumns, total=False):
+class FitColumns(_FitFields, total=False, closed=True):
+    """The jobs columns one fit score writes (FitResult.as_columns). Closed,
+    so it unpacks into JobIn and FetchedJob; JobIn extends the open base."""
+
+
+class JobIn(_FitFields, total=False):
     """A job row as upsert_job accepts it; `job_id` is the only required key
     in practice, and a missing key means "leave what is stored"."""
     job_id: str

@@ -24,7 +24,7 @@ import sys
 from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import NotRequired, TextIO, TypedDict
+from typing import NotRequired, TextIO, TypedDict, override
 
 from src import config, runstate
 from src import session_log
@@ -126,6 +126,7 @@ class _Tee(io.TextIOBase):
         self.sink = sink
         self._err = err
 
+    @override
     def write(self, s: str) -> int:
         try:
             self.orig.write(s)
@@ -151,6 +152,7 @@ class _Tee(io.TextIOBase):
                 pass
         return len(s)
 
+    @override
     def flush(self) -> None:
         try:
             self.orig.flush()

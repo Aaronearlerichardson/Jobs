@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import re
-from typing import cast
 from urllib.parse import urljoin
 
 from lxml import etree
@@ -37,16 +36,14 @@ def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | HtmlDecoder, t
     if dec.kind == "jsonld":
         found = jsonld.postings(text, url)
         if found or not dec.cells:
-            # TODO(any-zero): `Posting` is JSON by construction; a TypedDict is not a Mapping[str, JSON].
-            return {"postings": cast(JSON, found)}, None
+            return {"postings": found}, None
         return {"postings": [], "page": _cells(parse_markup(text, url=url), dec.cells)}, None
     if dec.kind == "atom":
         return {"entries": _atom(text, url)}, None
     tree = parse_markup(text, url=url)
     if dec.select == ("$job_links",):
         page = custom.read_page(tree, url, area, hop)
-        # TODO(any-zero): a TypedDict is not a Mapping[str, JSON]; `Page` is JSON by construction.
-        return (None, page["hop"]) if "hop" in page else (cast(JSON, page), None)
+        return (None, page["hop"]) if "hop" in page else (page, None)
     payload: dict[str, JSON] = {"elements": elements(dec, tree, parts, url), "page": text}
     if dec.selects:
         payload["selects"] = [{"name": s.get("name") or "",

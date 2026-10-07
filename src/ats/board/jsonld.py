@@ -17,7 +17,9 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Mapping
-from typing import Protocol, TypedDict, TypeGuard, cast
+from typing import Protocol, TypeGuard
+
+from typing_extensions import TypedDict
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
@@ -32,7 +34,7 @@ class Page(Protocol):
     def text(self) -> str: ...
 
 
-class Posting(TypedDict):
+class Posting(TypedDict, closed=True):
     """A JobPosting's values as `read_posting` reads them."""
 
     title: str
@@ -135,6 +137,8 @@ def read_posting(jp: Mapping[str, JSON], page_url: str = "") -> Posting:
     ...                   "jobLocationType": "TELECOMMUTE"}, "https://x.test/j/7")
     >>> r["title"], r["url"], r["location"], r["key"], r["telecommute"]
     ('Eng', 'https://x.test/j/7', 'Remote', '7', True)
+    >>> read_posting({"title": "E", "description": ["a"]})["description"]
+    ''
     """
     job_url = jp.get("url") or jp.get("mainEntityOfPage") or page_url
     if isinstance(job_url, dict):
@@ -143,11 +147,12 @@ def read_posting(jp: Mapping[str, JSON], page_url: str = "") -> Posting:
     if isinstance(identifier, dict):
         identifier = identifier.get("value", "")
     location = _normalize_location(jp)
+    description = jp.get("description")
     return {
         "title": str(jp.get("title") or jp.get("name") or "").strip(),
         "url": str(job_url) if job_url else page_url,
         "location": "" if location == "Unknown" else location,
-        "description": text_from_html(cast(str, jp.get("description", "") or "")),  # TODO(any-zero): non-str passes as before
+        "description": text_from_html(description if isinstance(description, str) else ""),
         "posted_at": jp.get("datePosted"),
         "key": str(identifier or stable_id(str(job_url))),
         # Structured remote signal: schema.org marks remote roles explicitly.

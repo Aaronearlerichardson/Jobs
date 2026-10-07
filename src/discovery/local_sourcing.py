@@ -820,7 +820,7 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
     hit = detect("", url, leads=False)
     found: Detection | None
     if hit:
-        found = Detection(**pack(hit[1], hit[2], url))
+        found = pack(hit[1], hit[2], url)
     else:
         found = await sniff_ats(name, careers_url=url)
     if not found:

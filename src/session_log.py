@@ -41,7 +41,7 @@ import time
 from collections.abc import Callable, Hashable
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, override
 
 from src import config
 
@@ -53,6 +53,7 @@ KEEP = 200
 class _AppDebugOnly(logging.Filter):
     """Pass every record at INFO+; pass DEBUG only from this app's loggers."""
 
+    @override
     def filter(self, record: logging.LogRecord) -> bool:
         # Logger namespaces whose DEBUG records belong in the file: this
         # application's own. Every other DEBUG source is some dependency's

@@ -21,7 +21,7 @@ import sys
 import time
 from collections.abc import Iterable, Mapping
 from datetime import timedelta
-from typing import TypedDict, Unpack, cast
+from typing import Unpack, cast, override
 
 import aiohttp
 import certifi
@@ -30,6 +30,7 @@ from requests.cookies import RequestsCookieJar
 from requests.sessions import SessionRedirectMixin, merge_setting
 from requests.structures import CaseInsensitiveDict
 from requests.utils import default_headers, get_encoding_from_headers
+from typing_extensions import TypedDict
 from urllib3.util.ssl_ import create_urllib3_context
 from yarl import URL
 
@@ -141,11 +142,8 @@ class SendKw(PrepKw, total=False):
     allow_redirects: bool
 
 
-def _prepare(method: str, url: str, polite: bool = True,
-             headers: Mapping[str, str | None] | None = None,
-             params: Mapping[str, Param | Iterable[Param] | None] | None = None,
-             data: Mapping[str, Param | None] | str | bytes | None = None,
-             json: JSON = None) -> requests.PreparedRequest:
+def _prepare(method: str, url: str, polite: bool = True, **kw: Unpack[PrepKw]
+             ) -> requests.PreparedRequest:
     """The request requests would send: the URL with its params encoded,
     the body, and `headers` over the session's own (a bare requests
     session's, with HEADERS on top when `polite`: the crawler's).
@@ -164,10 +162,10 @@ def _prepare(method: str, url: str, polite: bool = True,
     """
     bare = default_headers()
     p = requests.PreparedRequest()
-    p.prepare(method=method, url=url, params=params or {}, data=data or {},
-              json=json,
+    p.prepare(method=method, url=url, params=kw.get("params") or {},
+              data=kw.get("data") or {}, json=kw.get("json"),
               headers=merge_setting(
-                  headers,
+                  kw.get("headers"),
                   merge_setting(HEADERS, bare, dict_class=CaseInsensitiveDict)
                   if polite else bare,
                   dict_class=CaseInsensitiveDict))
@@ -263,6 +261,7 @@ class _Handshake(ssl.SSLObject):
     """The session's TLS object. Its handshake beginning means the TCP
     connection was made, which it notes for _raised."""
 
+    @override
     def do_handshake(self) -> None:
         began = _HANDSHAKING.get(None)
         if began:
@@ -658,9 +657,8 @@ def note_fill(rows: int, rates: dict[str, float]) -> None:
         acct.fill_sum[k] = acct.fill_sum.get(k, 0.0) + v * rows
 
 
-class Snapshot(TypedDict, total=False):
-    """What `snapshot_info` reports (every key, though partial dicts read
-    the same: a Tally's snap, a harvest's BoardStats, are views of this)."""
+class SnapshotFields(TypedDict, total=False):
+    """Snapshot's keys, open so a harvest's BoardStats can extend them."""
     fetch_errors: int
     incomplete: bool
     capped: bool
@@ -668,6 +666,11 @@ class Snapshot(TypedDict, total=False):
     last_error: str | None
     fill: dict[str, float]
     fill_rows: int
+
+
+class Snapshot(SnapshotFields, total=False, closed=True):
+    """What `snapshot_info` reports (every key, though partial dicts read
+    the same: a Tally's snap, a harvest's BoardStats, are views of this)."""
 
 
 def snapshot_info() -> Snapshot:

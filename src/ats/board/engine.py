@@ -66,7 +66,7 @@ from src.net.parallel import SingleFlight
 from src.net.util import (JSON, cache_dir, clean_field, default_search_text,
                           hashed_cache_path, json_cache_get, json_cache_put, norm_posted_date,
                           origin_key)
-from src.rows import BoardCoords, FetchedJob
+from src.rows import BoardCoords, FetchedJob, Slug
 from . import decode, fields, pager
 from .fields import StrReader
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
@@ -243,20 +243,42 @@ _VARIANTS: Callable[[], dict[tuple[str, str], dict[str, str]]] = runstate.per_ru
 _SETTLING = runstate.per_run(SingleFlight)
 
 
-def _fill(tpl: JSON, lookup: Callable[[str], JSON], vals: Mapping[str, object]) -> JSON:
+def _templated(vals: Vals) -> Mapping[str, JSON]:
+    """The named values a template can read: `vals` less "$area", the
+    pull's regex, which no template names (a template "$area" stays text)."""
+    return {k: v for k, v in vals.items() if v is None or isinstance(v, (str, int, dict))}
+
+
+def _param(v: JSON) -> http.Param | list[http.Param] | None:
+    """A filled request parameter as the client takes it: a scalar as is, a
+    list as its scalars, anything else (a dict, None) as None.
+
+    >>> _param("a"), _param(3), _param(["x", 2, {"y": 1}]), _param({"y": 1}), _param(None)
+    ('a', 3, ['x', 2], None, None)
+    """
+    if isinstance(v, (str, int, float)):
+        return v
+    if isinstance(v, list):
+        return [x for x in v if isinstance(x, (str, int, float))]
+    return None
+
+
+def _fill(tpl: JSON, lookup: Callable[[str], JSON], vals: Mapping[str, JSON]) -> JSON:
     """A request template filled in: "$size"/"$offset" by value (typed),
     every other string as a `fields.fmt` template.
 
     >>> _fill({"top": "$size", "q": "{code}", "f": []}, {"code": "AC"}.get, {"$size": 50})
     {'top': 50, 'q': 'AC', 'f': []}
+    >>> from src.match.locality import NC_RE
+    >>> _fill("$area", {}.get, _templated({"$area": NC_RE}))
+    '$area'
     """
     if isinstance(tpl, dict):
         return {k: _fill(v, lookup, vals) for k, v in tpl.items()}
     if isinstance(tpl, list):
         return [_fill(v, lookup, vals) for v in tpl]
     if isinstance(tpl, str):
-        # TODO(any-zero): a "$" value is read by a str key; Vals holds a regex or None under "$area".
-        return cast(JSON, vals[tpl]) if tpl in vals else fields.fmt(tpl, lookup)
+        return vals[tpl] if tpl in vals else fields.fmt(tpl, lookup)
     return tpl
 
 
@@ -310,8 +332,7 @@ def _row_mapper(fs: Fields, free: JSON = None) -> Callable[[dict[str, str], JSON
         d = dept(entry, ctx)
         r["head"] = f"{t} {d}" if d else t
         if read_free:
-            # TODO(any-zero): the rescue's free grammar may read a non-text value.
-            r["_free"] = cast(str, read_free(entry, ctx) or "")
+            r["_free"] = fields.text(read_free(entry, ctx)) or ""
         return r
     return row
 
@@ -412,7 +433,7 @@ class Board:
         return len(self._columns) > 1
 
     def detect(self, blob: str,
-               accept: Callable[[str], bool]) -> str | tuple[str, ...] | None:
+               accept: Callable[[str], bool]) -> Slug:
         """The handle the first of the spec's `detect` matches in `blob`
         names, or None: the first match of an entry's first regex, every
         other regex matching too, no part in its `blocklist`, and a first
@@ -427,10 +448,11 @@ class Board:
                 raw = [p or "" for p in (*m.groups(), *later)]
                 if blocked and blocked.intersection(p.lower() for p in raw) or not accept(raw[0]):
                     continue
-                # TODO(any-zero): a transform may give a count or None, which the join raises on.
-                parts = [p if t is None else cast(str, fields.TRANSFORMS[t](p))
-                         for p, t in zip(raw, transforms)]
-                return tuple(parts) if self.multi_column else self._sep.join(parts)
+                done = [p if t is None else fields.TRANSFORMS[t](p) for p, t in zip(raw, transforms)]
+                parts = [p for p in done if isinstance(p, (str, int))]
+                if len(parts) != len(done):
+                    continue
+                return tuple(parts) if self.multi_column else self._sep.join(map(str, parts))
         return None
 
     def careers_url(self, slug: JSON, page: str = "") -> str | None:
@@ -458,20 +480,18 @@ class Board:
         followed, once. The answer is decoded off the loop."""
         dec = req.decoder
         vals = {**_NAMED, **(vals or {})}
+        named = _templated(vals)
         kw: http.SendKw = {"headers": {**(JSON_HEADERS if dec.kind == "json" else HEADERS),
                                        **cast(Mapping[str, str | None],
-                                              _fill(req.headers, parts.get, vals))}}
+                                              _fill(req.headers, parts.get, named))}}
         if url is None and req.params:
-            params = {k: v.get(k) if isinstance(v, dict) else v
-                      for k, v in cast(Mapping[str, JSON],
-                                       _fill(req.params, parts.get, vals)).items()}
-            kw["params"] = cast(Mapping[str, http.Param | None],   # TODO(any-zero): JSON values, str|int in practice
-                                {k: v for k, v in params.items() if v is not None})
+            filled = cast(Mapping[str, JSON], _fill(req.params, parts.get, named))
+            params = {k: _param(v.get(k) if isinstance(v, dict) else v) for k, v in filled.items()}
+            kw["params"] = {k: v for k, v in params.items() if v is not None}
         if url is None and req.json_:
-            kw["json"] = _fill(req.json_, parts.get, vals)
+            kw["json"] = _fill(req.json_, parts.get, named)
         if timeout:
             kw["timeout"] = timeout
-        named = cast(Mapping[str, JSON], vals)     # TODO(any-zero): a non-literal key into Vals
         url = url or fields.fmt(req.url, lambda k: parts[k] if k in parts else named.get(f"${k}"))
         if dec.kind == "json":
             status, payload, err = await http.request_json(req.method, url, label, **kw)
@@ -735,9 +755,8 @@ class Board:
                     if not isinstance(v, dict):
                         continue
                     p, label = v.get(sc.param) or param, str(v.get(sc.label) or "")
-                    if v.get(sc.id) and loc_re.search(label):
-                        # TODO(any-zero): a facet's param name is read as text, as at HEAD.
-                        applied.setdefault(cast(str, p), []).append(v[sc.id])
+                    if v.get(sc.id) and isinstance(p, str) and loc_re.search(label):
+                        applied.setdefault(p, []).append(v[sc.id])
                         labels[label] = None
                     walk(v.get(sc.values), p)
             groups = fields.path(payload, sc.facets)
@@ -1128,7 +1147,7 @@ class Board:
         (filled from the URL's `job_ref`) over the shared defaults."""
         headers = self.detail_spec.headers if self.detail_spec else {}
         return {**HEADERS, **cast(Mapping[str, str],
-                                  _fill(headers, (self.job_ref(url) or {}).get, _NAMED))}
+                                  _fill(headers, (self.job_ref(url) or {}).get, _templated(_NAMED)))}
 
     async def probe_job(self, url: str, job_id: str | None = None) -> tuple[bool | None, str]:
         """(is_open, reason) for a stored posting URL: True live, False

@@ -177,18 +177,18 @@ def scan_hit(text: str | None) -> tuple[str, Slug] | None:
     return None
 
 
-def _handle(ats: str, slug: Slug) -> str:
+def _handle(ats: str, slug: Slug) -> str | None:
     """The engine handle for a resolver hit's slug (a tuple where the
-    board spans several columns)."""
-    # TODO(any-zero): handle() is None for empty columns; the old untyped return passed it on.
-    return cast(str, cast(Board, board_for(ats)).handle(coords.columns(ats, slug)))
+    board spans several columns); None when a column is empty."""
+    return cast(Board, board_for(ats)).handle(coords.columns(ats, slug))
 
 
 async def _scan_meta(ats: str, handle: Slug, source_url: str) -> BoardHit:
     """probe_scan's answer for `ats`'s board `handle`, found at
     `source_url`: counted through its listing, `validated` when that
     answered."""
-    ok, n = await cast(Board, board_for(ats)).alive(_handle(ats, handle))
+    h = _handle(ats, handle)
+    ok, n = await cast(Board, board_for(ats)).alive(h) if h else (False, 0)
     return {"ats": ats, "slug": handle, "count": n if ok else 0,
             "validated": ok, "source_url": source_url}
 
@@ -445,7 +445,8 @@ async def nc_count(ats: str, slug: Slug) -> int:
     """Postings on a board that are in your [locality] (`Board.local_count`):
     the count that rejects a slug guess landing on somebody else's board.
     `slug` is a resolver hit's."""
-    return await cast(Board, board_for(ats)).local_count(_handle(ats, slug), NC_RE)
+    h = _handle(ats, slug)
+    return await cast(Board, board_for(ats)).local_count(h, NC_RE) if h else 0
 
 
 async def probe_company(name: str, scan: bool = True) -> BoardHit | None:

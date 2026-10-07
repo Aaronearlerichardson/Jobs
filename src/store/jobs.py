@@ -507,6 +507,11 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
 #  Job status sync, score columns, ranking                                     #
 # --------------------------------------------------------------------------- #
 
+def _str_or_none(v: object) -> str | None:
+    """`v` if it is a string, else None (a row value read through a Mapping)."""
+    return v if isinstance(v, str) else None
+
+
 @sql_function("norm_title", 1)
 def _norm_title(t: str | None) -> str:
     return re.sub(r"\s+", " ", (t or "")).strip().lower()
@@ -727,7 +732,7 @@ def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> lis
 
 
 # Fit columns written together by the rescore path (see update_job_scores).
-_SCORE_COLS = tuple(FitColumns.__annotations__)
+_SCORE_COLS = tuple(sorted(FitColumns.__optional_keys__))
 
 
 def update_job_scores(conn: sqlite3.Connection, job_id: str, cols: FitColumns) -> None:
@@ -797,6 +802,8 @@ def remote_admitted(row: Mapping[str, object], remote_mission_floor: float | Non
     False
     >>> remote_admitted({"mission_score": 0.99}, None)
     False
+    >>> remote_admitted({"mission_score": "n/a"}, 0.85)
+    False
 
     A multi-division conglomerate never qualifies on score — see
     tests/test_store.py::TestRemoteAdmission, which patches the profile
@@ -815,11 +822,10 @@ def remote_admitted(row: Mapping[str, object], remote_mission_floor: float | Non
         return True
     if remote_mission_floor is None:
         return False
-    # TODO(any-zero): ranked_jobs rows are untyped here; narrow with a RankedJob key set.
-    if config.is_multi_division(cast("str | None", row.get("company_name"))):
+    if config.is_multi_division(_str_or_none(row.get("company_name"))):
         return False
-    mission = cast("float | None", row.get("mission_score"))
-    return mission is not None and mission >= remote_mission_floor
+    mission = row.get("mission_score")
+    return isinstance(mission, int | float) and mission >= remote_mission_floor
 
 
 @sql_function("effective_mission", 2)
@@ -1063,9 +1069,7 @@ def _same_posting_cols(url_a: str | None, title_a: str | None,
 
 def _posting_key(r: Mapping[str, object]) -> tuple[str, str]:
     """(_norm_url, _norm_title) of a job row: its identity across id schemes."""
-    # TODO(any-zero): url and title are str | None on every caller's row.
-    return (_norm_url(cast("str | None", r.get("url"))),
-            _norm_title(cast("str | None", r.get("title"))))
+    return _norm_url(_str_or_none(r.get("url"))), _norm_title(_str_or_none(r.get("title")))
 
 
 def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) -> int:

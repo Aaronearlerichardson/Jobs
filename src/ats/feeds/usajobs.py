@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
-from typing import cast
 
 from src import config
 from src.net import http
@@ -203,10 +202,12 @@ def _parse_item(item: JSON) -> FetchedJob | None:
     if not jid or not title:
         return None
 
-    url = descriptor.get("PositionURI") or ""
-    if not url:
+    url = descriptor.get("PositionURI")
+    if not url or not isinstance(url, str):
         apply_uris = descriptor.get("ApplyURI")
         url = apply_uris[0] if apply_uris and isinstance(apply_uris, Sequence) else ""
+        if not isinstance(url, str):
+            url = ""
 
     user_area = descriptor.get("UserArea")
     details = user_area.get("Details") if isinstance(user_area, dict) else None
@@ -222,7 +223,7 @@ def _parse_item(item: JSON) -> FetchedJob | None:
         "id":          f"usajobs_{jid}",
         "company":     strip_html(descriptor.get("OrganizationName")) or "USAJOBS",
         "title":       title,
-        "url":         cast(str, url),  # TODO(any-zero): a non-string URI passes through, as before
+        "url":         url,
         "location":    _locations(descriptor),
         "description": body,
         "posted_at":   norm_posted_date(descriptor.get("PublicationStartDate")),

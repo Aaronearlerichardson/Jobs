@@ -173,8 +173,10 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     c = {k: v for k, v in c.items() if v is not None}
     facts = {k: c.pop(k) for k in MISSION_COLS if k in c}
     review, watch = c.pop("review", None), c.pop("watch", None)
-    # TODO(any-zero): `c` mixes column types; tags.parse takes str | None.
-    named = tags.parse(cast("str | None", c.get("tags")))
+    raw_tags = c.get("tags")
+    if raw_tags is not None and not isinstance(raw_tags, str):
+        raise TypeError(f"company tags must be a string, got {type(raw_tags).__name__}")
+    named = tags.parse(raw_tags)
     prior = (conn.execute("SELECT tags FROM companies WHERE name=?", (c["name"],)).fetchone()
              if isinstance(old, EllipsisType) else old)
     held = named | (tags.parse(cast("str | None", prior["tags"])) if prior else set())
