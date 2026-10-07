@@ -484,7 +484,7 @@ def recent_miss_names(conn: sqlite3.Connection, days: int = 14) -> set[str]:
     """
     if not days:
         return set()
-    cutoff = (datetime.now() - timedelta(days=int(days))).isoformat()
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     return {r["name"] for r in conn.execute(
         "SELECT name FROM companies WHERE miss_reason IS NOT NULL "
         "AND miss_at IS NOT NULL AND miss_at >= ?", (cutoff,)).fetchall()}
@@ -516,7 +516,7 @@ def roster_growth(conn: sqlite3.Connection, days: int = 7) -> int:
     >>> roster_growth(conn, days=7)
     1
     """
-    cutoff = (datetime.now() - timedelta(days=int(days))).isoformat()
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     return cast(int, conn.execute(
         "SELECT COUNT(*) FROM companies "
         "WHERE created_at >= ? AND miss_reason IS NULL",
@@ -768,9 +768,9 @@ def _build_company_index(conn: sqlite3.Connection) -> _CompanyIndex:
         if key is not None:
             by_board[key].append(c)
         for cand in (c.get("careers_url"), c.get("slug")):
-            if not cand or "." not in str(cand):
+            if not cand or "." not in cand:
                 continue
-            if not re.match(r"https?://", str(cand), re.I):
+            if not re.match(r"https?://", cand, re.I):
                 cand = f"https://{cand}"
             chost, cpath = _split_url(cand)
             if not chost:

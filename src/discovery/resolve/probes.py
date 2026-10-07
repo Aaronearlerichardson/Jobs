@@ -253,7 +253,7 @@ class JsScanProbePool:
     """
 
     def __init__(self, size: int) -> None:
-        self.size = max(1, int(size))
+        self.size = max(1, size)
         self._slots = asyncio.Semaphore(self.size)
         self._launching = asyncio.Lock()
         self._stack = AsyncExitStack()

@@ -421,7 +421,7 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
                               company_id=r["company_id"], url=url, origin=closure.probe_origin(url))
                      for r in rows if (url := r["url"])]), "origin")
         ranks = itertools.zip_longest(*(q[:config.CLOSED_PROBE_PER_HOST] for q in hosts.values()))
-        rows = [r for rank in ranks for r in rank if r is not None][:int(limit) if limit else None]
+        rows = [r for rank in ranks for r in rank if r is not None][:limit if limit else None]
         print(f"  probing {len(rows)} open job(s) on "
               f"{len({r['origin'] for r in rows})} host(s) not "
               f"board-verified in {stale_days}+ day(s)"

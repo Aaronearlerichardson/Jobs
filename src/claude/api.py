@@ -282,7 +282,7 @@ async def _claim_prefix(model: str, system_prompt: str) -> asyncio.Event | None:
     return None
 
 
-def _record_usage(usage: Mapping[str, int | None]) -> None:
+def _record_usage(usage: Mapping[str, int | float | str | None]) -> None:
     u = _CALLS().usage
     u["calls"] += 1
     u["uncached_input"] += int(usage.get("input_tokens") or 0)
@@ -616,7 +616,7 @@ async def board_is_own(company: str, board: str, site: str = "",
                 t for t in list(titles)[:8] if t)
         r = await call_claude_json(system, user, max_tokens=150, reply=BoardOwnerReply)
         return None if r is None else r.same_employer
-    key = (str(company).lower(), str(board).lower())
+    key = (company.lower(), board.lower())
     task = _BOARD_OWNER_CACHE.get(key)
     if task is None:
         task = _BOARD_OWNER_CACHE[key] = asyncio.create_task(ask())

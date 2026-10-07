@@ -101,9 +101,9 @@ def slug_text(ats: str | None, slug: Slug | list[str | int]) -> str | None:
     return slug or None
 
 
-def board_slug(company: BoardCoords) -> str:
+def board_slug(company: BoardCoords) -> str | tuple[str | int, ...]:
     """The one string that names this board on its own host, independent of
-    which coordinate column carries it: the first of its handle's columns
+    which coordinate column carries it (a tuple for a hit whose handle spans columns): the first of its handle's columns
     (Workday's `wd_tenant`), else the ordinary `slug`. '' for a
     careers_url-keyed board (custom, successfactors, peopleadmin, wpjson,
     CAPTURE_ATS) that has no slug.
@@ -117,7 +117,8 @@ def board_slug(company: BoardCoords) -> str:
     ''
     """
     first = _handle(company.get("ats"))[0][0]
-    return cast(str, (first != "careers_url" and company.get(first)) or company.get("slug") or "")
+    return cast(str | tuple[str | int, ...],
+                (first != "careers_url" and company.get(first)) or company.get("slug") or "")
 
 
 def slug_title(company: BoardCoords) -> str:
@@ -162,7 +163,7 @@ def slug_named(company: CompanyRow) -> bool:
         and cannot tell.
     """
     return (company.get("source") == SLUG_NAME_SOURCE
-            and name_is_own_slug(company.get("name"), board_slug(company)))
+            and name_is_own_slug(company.get("name"), str(board_slug(company))))
 
 
 def from_hit(hit: BoardCoords, **extra: Unpack[CompanyIn]) -> CompanyIn:

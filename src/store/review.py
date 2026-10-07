@@ -209,7 +209,7 @@ def confirm_company(conn: sqlite3.Connection, cid: int,
             continue
         else:
             on = config.is_active_mission(b["mission_tier"], b["name"])
-        conn.execute("UPDATE companies SET active=? WHERE id=?", (int(on), b["id"]))
+        conn.execute("UPDATE companies SET active=? WHERE id=?", (on, b["id"]))
     _commit(conn)
     from .companies import get_company  # not at module level: see module doc
     return get_company(conn, cid)

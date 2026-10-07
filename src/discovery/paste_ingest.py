@@ -250,7 +250,7 @@ def parse_company_names(blob: str | bytes | list[str] | tuple[str, ...],
         was stored ACTIVE.
     """
     if isinstance(blob, (list, tuple)):
-        lines = [str(x) for x in blob]
+        lines = [x for x in blob]
     else:
         lines = re.split(r"[\r\n]+", str(blob or ""))
 
@@ -448,7 +448,7 @@ async def add_names(names: str | bytes | list[str], use_llm: bool = False,
         names = [n["name"] for n in await preview_names(names, use_llm=use_llm)
                  if n["state"] == "new"]
     else:
-        names = [str(n).strip() for n in (names or []) if str(n).strip()]
+        names = [n.strip() for n in (names or []) if n.strip()]
     if not names:
         print("  no company names to resolve.")
         return []

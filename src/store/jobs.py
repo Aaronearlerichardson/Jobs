@@ -235,7 +235,7 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
     q += " ORDER BY j.company_id, j.first_seen"
     if limit:
         q += " LIMIT ?"
-        args.append(int(limit))
+        args.append(limit)
     return [as_job(r) for r in conn.execute(q, args).fetchall()]
 
 
@@ -497,7 +497,7 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
          j.get("fit_domain"), j.get("fit_function"), j.get("fit_stack"),
          j.get("fit_seniority"), j.get("fit_gates"), j.get("fit_model"),
          j.get("posted_at"), now, now, j.get("status", "open"),
-         j.get("harvested_at"), bool(keep_location)),
+         j.get("harvested_at"), keep_location),
     )
     _commit(conn)
     return new
@@ -732,7 +732,7 @@ def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> lis
 
 
 # Fit columns written together by the rescore path (see update_job_scores).
-_SCORE_COLS = tuple(sorted(FitColumns.__optional_keys__))
+_SCORE_COLS = tuple(FitColumns.__annotations__)
 
 
 def update_job_scores(conn: sqlite3.Connection, job_id: str, cols: FitColumns) -> None:
@@ -1029,7 +1029,7 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         columns=", ".join(f"j.{r['name']}" for r in conn.execute("PRAGMA table_info(jobs)")
                           if with_description or r["name"] != "description"))
     if limit:
-        args.append(int(limit))
+        args.append(limit)
     rows = [dict(r) for r in conn.execute(q, args)]     # RankedJob, once the dup_* keys are set
     if collapse:
         for r in rows:

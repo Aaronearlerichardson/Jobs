@@ -78,7 +78,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -166,7 +166,7 @@ def _track_applies(t: RuntimeTrack, company: CompanyRow) -> bool:
 
 
 @contextmanager
-def _keyword_focus(t: RuntimeTrack) -> Iterator[None]:
+def _keyword_focus(t: RuntimeTrack) -> Generator[None]:
     """apply_keyword_focus for the duration of a block, then put the shared
     lists back (config.keyword_snapshot / restore_keywords)."""
     saved = config.keyword_snapshot()

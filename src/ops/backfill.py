@@ -55,7 +55,7 @@ def stale_body_rows(conn: sqlite3.Connection, where: str,
     recent = [r for r in rows if (r.get("desc_checked_at") or "") >= cutoff]
     rows = [r for r in rows if (r.get("desc_checked_at") or "") < cutoff]
     if limit:
-        rows = rows[:int(limit)]
+        rows = rows[:limit]
     print(f"  backfilling {len(rows)} {label}..."
           + (f" ({len(recent)} skipped: failed in the last {retry_days}d)"
              if recent else ""))

@@ -11,7 +11,7 @@ ranking knobs from it.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Generator, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, overload
@@ -40,7 +40,7 @@ def _t(t: RuntimeTrack | None) -> RuntimeTrack:
 
 @contextmanager
 def track_store(t: RuntimeTrack | None = None, conn: sqlite3.Connection | None = None
-                ) -> Iterator[sqlite3.Connection]:
+                ) -> Generator[sqlite3.Connection]:
     """The track's store, closed on the way out however the block ends --
     or `conn` itself, left open, when the caller already holds one (the
     crawl and the harvest pass hand an op the store they have open, which
@@ -69,7 +69,7 @@ def track_store(t: RuntimeTrack | None = None, conn: sqlite3.Connection | None =
 
 @asynccontextmanager
 async def track_writer(t: RuntimeTrack | None = None, db: store.Writer | Connection | None = None
-                       ) -> AsyncIterator[store.Writer]:
+                       ) -> AsyncGenerator[store.Writer]:
     """`track_store` for async code: the track's store on a store.Writer
     for the block -- or `db` itself when the caller already holds a Writer
     (the crawl, the harvest pass), or a Writer over `db` when it is an open

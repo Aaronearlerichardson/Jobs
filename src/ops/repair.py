@@ -286,8 +286,8 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
     ...     conn, families=("fetch-error", "ats-unsupported")))
     ['Delsys', 'Locus']
     """
-    wanted = {str(n).strip().lower() for n in (names or []) if str(n).strip()}
-    cutoff = ((datetime.now() - timedelta(days=int(days))).isoformat()
+    wanted = {n.strip().lower() for n in (names or []) if n.strip()}
+    cutoff = ((datetime.now() - timedelta(days=days)).isoformat()
               if days else None)
     rows = [store.as_company(r) for r in conn.execute(
         "SELECT * FROM companies_effective WHERE COALESCE(active, 0) = 0 "
@@ -306,7 +306,7 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
     out = [r for r in rows
            if (not wanted or (r["name"] or "").strip().lower() in wanted)
            and not (cutoff and since(r) > cutoff)]
-    return out[:int(limit)] if limit else out
+    return out[:limit] if limit else out
 
 
 async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
@@ -590,7 +590,7 @@ async def rename_slug_boards(db: store.Writer | None = None, t: RuntimeTrack | N
     async with track_writer(t, db) as db:
         rows = await db.run(_slug_named_boards)
         if limit:
-            rows = rows[:int(limit)]
+            rows = rows[:limit]
         if not rows:
             print("  no active Greenhouse/SmartRecruiters board is still "
                   "named after its own slug.")

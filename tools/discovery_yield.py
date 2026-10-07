@@ -115,7 +115,7 @@ def table(rows: list[dict[str, Any]]) -> list[str]:
     """
     if not rows:
         return []
-    cells = [[str(c) for c in rows[0]]] + [["-" if v is None else str(v) for v in r.values()] for r in rows]
+    cells = [list(rows[0])] + [["-" if v is None else str(v) for v in r.values()] for r in rows]
     widths = [max(len(c[i]) for c in cells) for i in range(len(cells[0]))]
     return ["  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip() for row in cells]
 

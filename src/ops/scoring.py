@@ -53,7 +53,7 @@ def _unscored_marker(cause: str, desc_len: int, when: datetime) -> str:
     >>> _unscored_marker("refused", 645, datetime(2026, 1, 1))
     'unscored:refused:645:2026-01-01'
     """
-    return f"unscored:{cause}:{int(desc_len)}:{when.date().isoformat()}"
+    return f"unscored:{cause}:{desc_len}:{when.date().isoformat()}"
 
 
 def _unscored_due(fit_reason: str | None, desc_len: int, now: datetime | None = None) -> bool:
@@ -107,7 +107,6 @@ def _unscored_due(fit_reason: str | None, desc_len: int, now: datetime | None = 
     if not m:
         return True
     cause, marked_len, marked_date = m.group(1), int(m.group(2)), m.group(3)
-    desc_len = int(desc_len)
     if cause == "short":
         return desc_len >= MIN_DESC_CHARS
     if desc_len != marked_len:

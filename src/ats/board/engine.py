@@ -383,9 +383,9 @@ class Board:
         return self._sep.join(vals) if all(vals) else None
 
     def _parts(self, handle: str) -> dict[str, str]:
-        parts = dict(zip(self._part_names, str(handle).split(self._sep)))
+        parts = dict(zip(self._part_names, handle.split(self._sep)))
         if self._hspec.try_ or self._hspec.follow or self._hspec.prelude:
-            parts.update(_VARIANTS().get((self.name, str(handle)), {}))
+            parts.update(_VARIANTS().get((self.name, handle), {}))
         return parts
 
     def origin(self, company: BoardCoords | None = None, url: str | None = None) -> str:
@@ -518,7 +518,7 @@ class Board:
         dropped (a scheme-less template is https). The error, reported
         under `label`, when one does not answer 200; else None. One caller
         per handle settles at a time; one that waited takes what it settled."""
-        key = (self.name, str(handle))
+        key = (self.name, handle)
         for name, tpl in self._hspec.follow.items():
             if name in parts:
                 continue
@@ -545,7 +545,7 @@ class Board:
         unless another caller already settled new ones. The error, reported
         under `label`, when an answer does not settle its parts; else None.
         One caller per request settles at a time, as `_follow` does."""
-        key = (self.name, str(handle))
+        key = (self.name, handle)
         for i, pre in enumerate(self._hspec.prelude):
             settled = _VARIANTS().setdefault(key, {})
             if stale or not all(n in settled for n in pre.set):
@@ -609,7 +609,7 @@ class Board:
         refusal (no answer, 403, 405, 429, 5xx) is the answer: one value's
         404 never outweighs another's timeout. One caller per handle tries
         at a time; one that waited asks once with the value it settled."""
-        key = (self.name, str(handle))
+        key = (self.name, handle)
         if self._unsettled(key):
             async with _SETTLING().hold(key):
                 tries = self._unsettled(key)
@@ -1029,12 +1029,12 @@ class Board:
         handle = self._handle_of(ref)
         entries = await self._listing_entries(handle) or []
         if ref.get("jid"):
-            want = str(ref["jid"]).lower()
+            want = ref["jid"].lower()
             return next((e for e in entries if str(e.get("id", "")).lower() == want), None)
-        parts, want = self._parts(handle), str(job_id or "").lower()
+        parts, want = self._parts(handle), (job_id or "").lower()
         return await asyncio.to_thread(
             lambda: next((e for e in entries
-                          if want and str(self._rows[0](parts, e)["id"] or "").lower() == want),
+                          if want and (self._rows[0](parts, e)["id"] or "").lower() == want),
                          None))
 
     def row_id(self, handle: str, url: str) -> str | None:
@@ -1052,7 +1052,7 @@ class Board:
         request is); `url`, a template, replaces the detail's."""
         handle = self._handle_of(ref)
         own = set(self._part_names) | set(self._hspec.follow)
-        label = " ".join(str(x) for x in (self.name, handle, "job",
+        label = " ".join(x for x in (self.name, handle, "job",
                                           *(v for k, v in ref.items() if k not in own))
                          if x) if report else None
         parts = {**_VARIANTS().get((self.name, handle), {}), **ref}

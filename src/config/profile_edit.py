@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import tomlkit
+import tomlkit.items
 
 from src import config
 from .profile_schema import problems
@@ -54,7 +55,7 @@ def apply_updates(updates: Mapping[str, object]) -> str:
     raw, source = read_raw()
     doc = tomlkit.parse(raw)
     for path, value in updates.items():
-        keys = [k for k in str(path).split(".") if k]
+        keys = [k for k in path.split(".") if k]
         if not keys:
             continue
         node = doc

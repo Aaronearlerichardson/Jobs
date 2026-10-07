@@ -178,7 +178,7 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
             # Location-agnostic lightweight ATS sweep (JSON-API boards only;
             # the heavyweight onsite ATSes are only worth fetching scoped).
             for ats, name, slug, thunk in iter_store_sources(rows):
-                add(name, ats, thunk, key=(ats, str(slug)))
+                add(name, ats, thunk, key=(ats, slug))
 
     # 3) Forums + aggregator feeds (remote-native boards). Like the ATS
     # registry, the crawl injects the keyword gate here; the fetchers are

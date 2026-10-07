@@ -224,7 +224,7 @@ async def _websearch_pass(names: list[str], hits: list[BoardHit],
     earlier uncapped profile blocked ~1271s of a 1726s run inside DDG's
     own retry/backoff (see src.net.ddg).
     """
-    cap = config.DISCOVERY_WEBSEARCH_CAP if cap is None else int(cap)
+    cap = config.DISCOVERY_WEBSEARCH_CAP if cap is None else cap
     todo = _boardless(names, hits)
     if todo and cap > 0:
         async with store.Writer() as db:
@@ -935,7 +935,7 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
                 # means its mission call failed. Dead boards stay off
                 # (prune_dead_boards: the endpoint 404s), and so do rows in
                 # the review queue (reviving them would skip it).
-                if (not str(c.get("notes") or "").startswith("deactivated: dead")
+                if (not (c.get("notes") or "").startswith("deactivated: dead")
                         and c["review"] != "pending"):
                     update["active"] = 1
                     revived = True
@@ -1019,7 +1019,7 @@ async def resolve_leads(max_workers: int = 8,
                 print(f"  skipping {len(skipped_recent)} lead(s) that missed in "
                       f"the last {retry_days}d (--all-leads to retry them)")
         if limit:
-            leads = leads[:int(limit)]
+            leads = leads[:limit]
         if not leads:
             print("  No unresolved leads to resolve"
                   + ("." if all_leads else f" (source in {sources}; --all-leads to widen)."))

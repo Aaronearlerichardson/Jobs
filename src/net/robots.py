@@ -58,7 +58,7 @@ import contextlib
 import logging
 import socket
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 
 from protego import Protego
 
@@ -70,7 +70,7 @@ _log = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
-def quiet() -> Iterator[None]:
+def quiet() -> Generator[None]:
     """Suppress the per-host "unreachable" notice for SPECULATIVE probes.
 
     Discovery guesses hostnames from a company name — `red.io`, `410.co`,

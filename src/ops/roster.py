@@ -46,7 +46,7 @@ async def prune(offmission: bool = False, t: RuntimeTrack | None = None) -> tupl
     from src.ops.repair import prune_dead_boards
     async with track_writer(t) as db:
         n_dead, n_off = await prune_dead_boards(
-            db, deactivate_offmission=bool(offmission))
+            db, deactivate_offmission=offmission)
     print(f"\n  deactivated {n_dead} dead-board compan(ies)"
           + (f" + {n_off} off-mission" if offmission else "") + ".")
     return n_dead, n_off
@@ -104,6 +104,6 @@ async def discover_term(term: str | None, no_report: bool = False,
     print_summary(result)
     if not no_report:
         write_discovery_report(result)
-    for line in await apply_to_store(result, dry_run=bool(dry_run)):
+    for line in await apply_to_store(result, dry_run=dry_run):
         print(line)
     return result

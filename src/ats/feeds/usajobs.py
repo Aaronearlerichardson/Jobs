@@ -259,16 +259,16 @@ def _search_params(keyword: str | None, location: str | None, radius: int | None
     # management, 1550 computer science, 0601 general health science, 0401
     # general biological science.
     default_series = ("2210", "1550", "0601", "0401")
-    codes = [str(s).strip()
+    codes = [s.strip()
              for s in (default_series if series is None else series)
-             if str(s).strip()]
-    params: dict[str, int | str] = {"ResultsPerPage": int(results_per_page)}
+             if s.strip()]
+    params: dict[str, int | str] = {"ResultsPerPage": results_per_page}
     if keyword:
         params["Keyword"] = keyword
     if location:
         params["LocationName"] = location
         if radius:
-            params["Radius"] = int(radius)
+            params["Radius"] = radius
     if codes:
         params["JobCategoryCode"] = ";".join(codes)
     return params
@@ -312,7 +312,7 @@ async def fetch_usajobs(keyword: str | None = None, location: str | None = None,
     jobs: list[FetchedJob] = []
     seen: set[str] = set()
     fetched, total = 0, None
-    for page in range(1, int(max_pages) + 1):
+    for page in range(1, max_pages + 1):
         try:
             r = await http.send("GET", "https://data.usajobs.gov/api/search", headers=headers,
                                 params={**params, "Page": page})
