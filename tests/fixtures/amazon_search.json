@@ -1,0 +1,35 @@
+{
+ "error": null,
+ "hits": 2,
+ "facets": {},
+ "content": {},
+ "jobs": [
+  {
+   "basic_qualifications": "- 1+ years of Microsoft Office products and applications experience<br/>- High School Diploma, or GED<br/>- Experience using the Microsoft Office suite of packages including Outlook, Word, Excel and PowerPoint<br/>- Work a flexible schedule/shift/work area, including weekends, nights, and/or holiday",
+   "description": "We are looking for motivated, customer-focused individuals who want to join our team as a Process Assistant.<br/>   <br/>  Key Responsibilities and Job Elements:<br/> - Support, mentor, and motivate others<br/> - Manage safety, quality, productivity, and customer delivery promises<br/> - Collaborate",
+   "id": "90f46216-f120-4926-b1c9-3031f7e9db0b",
+   "id_icims": "10509450",
+   "job_category": "Fulfillment & Operations Management",
+   "job_path": "/en/jobs/10509450/process-assistant-grocery-fulfillment-centers",
+   "location": "US, NC, Charlotte",
+   "normalized_location": "Charlotte, North Carolina, USA",
+   "posted_date": "August 20, 2026",
+   "preferred_qualifications": "- 1+ years of working in a manufacturing, distribution, warehousing, retail, or grocery environment experience<br/><br/>Amazon is an equal opportunity employer and does not discriminate on the basis of protected veteran status, disability, or other legally protected status.<br/><br/>Our inclusive cu",
+   "title": "Process Assistant, Grocery Fulfillment Centers"
+  },
+  {
+   "basic_qualifications": "- High school or equivalent<br/>- 1+ years of Microsoft Office products and applications experience<br/>- Work a flexible schedule/shift/work area, including weekends, nights, and/or holidays<br/>- Can lift up to 49 pounds, stand/walk during shifts lasting up to 12 hours, and frequently push, pull, ",
+   "description": "We are looking for motivated, customer-focused individuals who want to join our team as a Process Assistant.<br/>   <br/>  Key Responsibilities and Job Elements:<br/> - Support, mentor, and motivate others<br/> - Manage safety, quality, productivity, and customer delivery promises<br/> - Collaborate",
+   "id": "5b23ab7d-6eae-4b5f-ba55-ce266911da12",
+   "id_icims": "10509449",
+   "job_category": "Fulfillment & Operations Management",
+   "job_path": "/en/jobs/10509449/process-assistant-grocery-fulfillment-centers",
+   "location": "US, NC, Charlotte",
+   "normalized_location": "Charlotte, North Carolina, USA",
+   "posted_date": "August 20, 2026",
+   "preferred_qualifications": "- 1+ year working in a like environment (manufacturing/distribution/warehousing/retail)<br/><br/>Amazon is an equal opportunity employer and does not discriminate on the basis of protected veteran status, disability, or other legally protected status.<br/><br/>Our inclusive culture empowers Amazonia",
+   "title": "Process Assistant, Grocery Fulfillment Centers"
+  }
+ ],
+ "job_posting_search_request": "{\"jobPostingSearchRequest\":{\"query\":null,\"excludeFacets\":[{\"name\":\"businessCategory\",\"values\":[{\"name\":\"a-confidential-job\"}]},{\"name\":\"isPostedExternally\",\"values\":[{\"name\":\"0\"}]},{\"name\":\"isUnsearchable\",\"values\":[{\"name\":\"1\"}]}],\"filterFacets\":[],\"start\":\"0\",\"size\":\"2\",\"sort\":{\"sortOrder\":\"DESCENDING\",\"sortType\":\"SCORE\"},\"location\":null,\"accessLevel\":\"EXTERNAL\",\"includeFacets\":[],\"locationFacets\":[[{\"name\":\"normalizedStateName\",\"values\":[{\"name\":\"North Carolina\"}]}]],\"jobTypeFacets\":[],\"contentFilterFacets\":[],\"treatment\":\"OM\"}}"
+}

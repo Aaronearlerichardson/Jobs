@@ -66,6 +66,7 @@ from .paycom import SPEC as PAYCOM
 from .gohire import SPEC as GOHIRE
 from .polymer import SPEC as POLYMER
 from .gusto import SPEC as GUSTO
+from .amazon import SPEC as AMAZON
 
 BOARDS: dict[str, dict[str, JSON]] = {
     "greenhouse": GREENHOUSE,
@@ -109,6 +110,7 @@ BOARDS: dict[str, dict[str, JSON]] = {
     "gohire": GOHIRE,
     "polymer": POLYMER,
     "gusto": GUSTO,
+    "amazon": AMAZON,
 }
 
 #: The spec that reads a careers page itself, no ATS signature on it: the

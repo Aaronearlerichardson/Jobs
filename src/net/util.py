@@ -498,6 +498,12 @@ def norm_posted_date(value: object) -> str | None:
       * relative text — Workday's `postedOn` ("Posted 3 Days Ago",
         "Posted 30+ Days Ago", "Posted Today"). "30+" parses as 30, so
         treat old Workday dates as a floor, not an exact day.
+      * spelled dates — Amazon's "August 20, 2026" and "July  8, 2026"
+
+    >>> norm_posted_date("August 20, 2026"), norm_posted_date("Jul 8, 2026")
+    ('2026-08-20', '2026-07-08')
+    >>> norm_posted_date("Smarch 3, 2026") is None
+    True
     """
     if value is None:
         return None
@@ -523,4 +529,8 @@ def norm_posted_date(value: object) -> str | None:
     m = re.search(r"(\d+)\s*\+?\s*days?\s+ago", low, re.I)
     if m:
         return (datetime.now() - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%d")
+    m = re.match(r"^([a-z]{3})[a-z]*\.?\s+(\d{1,2}),\s*(\d{4})$", low)
+    months = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+    if m and m[1] in months:
+        return f"{m[3]}-{months.index(m[1]) + 1:02d}-{int(m[2]):02d}"
     return None

@@ -1,0 +1,48 @@
+"""The `amazon` board spec."""
+
+from __future__ import annotations
+
+from src.rows import JSON
+
+SPEC: dict[str, JSON] = {
+    # One employer; the handle is the region the search is narrowed to, spelled as the
+    # server spells it ("North Carolina", case-sensitive), so a pull stays small.
+    # The sniffer unescapes HTML entities, so a URL's "&region" reaches `detect` as
+    # the registered sign (\xae) and "ion".
+    "detect": [{"host": "amazon.jobs",
+                "re": [r"(?i)amazon\.jobs/[a-z-]+/search\?[^\s\"'<>#]*?(?:\bregion|\xaeion)="
+                       r"([^&\s\"'<>#]+)"],
+                "transform": ["unquote"]}],
+    "canary": {"name": "Amazon", "handle": "North Carolina", "min_jobs": 100},
+    "eager": True,
+    "job_ref": {"re": r"(?i)^https?://(?:www\.)?amazon\.jobs/[a-z-]+/jobs/(\d+)",
+                "parts": ["id_icims"]},
+    "listing": {
+        "url": "https://www.amazon.jobs/en/search.json",
+        "params": {"region": "{slug}", "result_limit": "$size", "offset": "$offset"},
+        "decoder": {"entries": "jobs"},
+        "pager": {"kind": "offset", "size": 100, "pages": 20, "total": "hits"},
+        "fields": {
+            "id": {"format": "amazon_{id_icims}"},
+            "title": "title",
+            "url": {"format": "https://www.amazon.jobs{job_path}"},
+            "location": {"first": ["normalized_location", "location"], "default": "Unknown"},
+            "posted_at": "posted_date",
+            "description": {"join": ["description", "basic_qualifications",
+                                     "preferred_qualifications"],
+                            "sep": "\n", "transform": "html_text"},
+            "department": "job_category",
+        },
+    },
+    "detail": {
+        "url": "https://www.amazon.jobs/en/search.json",
+        "params": {"base_query": "{id_icims}"},
+        "record": "jobs[0]",
+        "fields": {"description": {"join": ["description", "basic_qualifications",
+                                           "preferred_qualifications"],
+                                   "sep": "\n", "transform": "html_text"}},
+    },
+    "closure": {"open": {"truthy": "id_icims"},
+                "unmatched": "requisition no longer served",
+                "why": "a pulled requisition answers 200 with no jobs, 2026-10"},
+}
