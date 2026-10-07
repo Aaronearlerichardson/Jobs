@@ -2,7 +2,7 @@
 project-includes = ["src", "tools"]
 # tools/ are scripts that import `src` and `tools._harness` by package path.
 search-path = ["."]
-python-version = "3.14"
+#python-version = "3.14"
 # Site-packages come from the `jobs` conda env, so the LSP and a bare `pyrefly check`
 # see third-party imports without that env on PATH. A path, not `conda-environment`:
 # the PyCharm-launched LSP has no `conda` on PATH and fell back to base miniconda.
