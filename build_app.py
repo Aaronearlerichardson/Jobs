@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -262,6 +263,19 @@ HARVEST_LAZY = ["playwright", "ddgs", "fake_useragent", "primp", "duckdb"]
 HARVEST_SKIP = HARVEST_FORBID + HARVEST_LAZY
 
 
+def report_path(name: str | None = None) -> Path:
+    """Where the build's Nuitka report goes: beside the session logs, as
+    build-<target>-<timestamp>.xml.
+
+    The data directory is read the way the apps read it (src.config), so a
+    JOBS_DATA_DIR override moves the reports with the logs.
+    """
+    from src.config.paths import DATA_DIR
+    logs = DATA_DIR / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    return logs / f"build-{name or target()}-{time.strftime('%Y%m%d-%H%M%S')}.xml"
+
+
 def build_command(name: str | None = None) -> list[str]:
     name = name or target()
     entry = TARGETS[name][0]
@@ -270,6 +284,10 @@ def build_command(name: str | None = None) -> list[str]:
            "--assume-yes-for-downloads"]
     # Link-time optimisation of the generated C; the C build takes longer.
     cmd += ["--lto=yes"]
+    # The XML build report (modules, DLLs, data files, timings), kept with
+    # the logs. A --report= on our command line replaces it (below).
+    if not any(a.startswith("--report=") for a in sys.argv[1:]):
+        cmd += [f"--report={report_path(name)}"]
     # -O drops asserts and __debug__ blocks; test_invariants keeps both out.
     cmd += ["--python-flag=-O"]
     # Both targets are plain console apps (Nuitka's default, "force"), so
@@ -404,6 +422,7 @@ def main() -> int:
     out = output_dir() / output_name()
     if rc == 0 and out.exists():
         print(f"\nBuild OK: {out}")
+        print("Report: " + next((a.split("=", 1)[1] for a in cmd if a.startswith("--report=")), "-"))
     else:
         print(f"\nBuild FAILED - expected {out}")
         rc = rc or 1
