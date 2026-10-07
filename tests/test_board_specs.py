@@ -63,6 +63,8 @@ POSTINGS = {
                  lambda: fake_response(text="<html><body>x</body></html>")),
     "manatal": ("manatal", "https://www.careers-page.com/manatal/job/L975Y966",
                 lambda: fake_response(text="<html><body>x</body></html>")),
+    "zohorecruit": ("biotech", "https://biotech.zohorecruit.com/jobs/Careers/474128000070267033",
+                    lambda: fake_response(text=fixture("zohorecruit_job.html"))),
 }
 
 COMEET_POSTING = "https://www.comeet.com/jobs/cheq/65.005/ai-engineer/DD.B6F"
@@ -126,6 +128,8 @@ BOARD_URLS = [
     (POSTINGS["manatal"][1], "manatal", "manatal"),
     ("https://www.comeet.com/jobs/cheq/65.005", "comeet", "cheq|65.005"),
     (COMEET_POSTING, "comeet", "cheq|65.005"),
+    ("https://biotech.zohorecruit.com/jobs/Careers", "zohorecruit", "biotech"),
+    (POSTINGS["zohorecruit"][1], "zohorecruit", "biotech"),
     ("https://acme.icims.com/jobs/search", "icims", "acme"),
     ("https://careers-acme.icims.com/jobs/42423/data-engineer/job", "icims", "careers-acme"),
     ("https://unc.peopleadmin.com/postings/123", "peopleadmin", "unc"),
@@ -157,6 +161,7 @@ VENDOR_URLS = [
     "https://app.breezy.hr/signin", "https://www.recruitee.com/",
     "https://developers.pinpointhq.com/docs", "https://www.jobs.personio.de/",
     "https://join.com/companies/sitemap", "https://www.comeet.com/jobs/sitemap/65.005",
+    "https://www.zohorecruit.com/", "https://accounts.zohorecruit.com/jobs/Careers",
     "https://career4.successfactors.com/career?company=acme",
     "https://acme.successfactors.com/",
     *(f"https://{host}.eightfold.ai/" for host in ("www", "app", "apply", "docs", "support")),

@@ -29,9 +29,21 @@ def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | XmlDecoder | H
     >>> decode(dec, '<select name="loc"><option value="7-Durham"> Durham, NC</select>', {},
     ...        "https://x.test")[0]["selects"]
     [{'name': 'loc', 'options': [{'value': '7-Durham', 'label': 'Durham, NC'}]}]
+
+    JSON held, entity-escaped, in an element's attribute:
+
+    >>> dec = JsonInHtmlDecoder(kind="json_in_html", element="input#jobs")
+    >>> decode(dec, '<input type="hidden" value="[{&#34;id&#34;: &#34;7&#34;}]" id="jobs">', {}, "https://x.test")[0]
+    [{'id': '7'}]
+    >>> decode(dec, '<p>none</p>', {}, "https://x.test")[0] is None
+    True
     """
     if dec.kind == "json_in_html":
-        m = re.search(dec.regex, text)
+        if dec.element is not None:
+            el = first(css(fields.fmt(dec.element, parts.get)), parse_markup(text, url=url))
+            raw = el.get(dec.attribute) if el is not None else None
+            return (json.loads(raw) if raw else None), None
+        m = re.search(dec.regex, text) if dec.regex else None
         return (json.JSONDecoder().raw_decode(text, m.end())[0] if m else None), None
     if dec.kind == "jsonld":
         found = jsonld.postings(text, url)

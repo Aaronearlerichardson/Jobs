@@ -192,7 +192,16 @@ class JsonDecoder(_Json):
 
 class JsonInHtmlDecoder(_Json):
     kind: Literal["json_in_html"] = Field(description="One JSON value on a page")
-    regex: Regex = Field(description="Ends just before the JSON")
+    regex: Regex | None = Field(None, description="Ends just before the JSON in the page text")
+    element: Css | None = Field(None, description="Else: the CSS of the element whose "
+                                                  "`attribute` (entity-decoded) is the JSON")
+    attribute: Str = Field("value", description="The `element` attribute holding the JSON")
+
+    @model_validator(mode="after")
+    def _one_locator(self) -> Self:
+        if (self.regex is None) == (self.element is None):
+            raise ValueError("json_in_html: name exactly one of regex, element")
+        return self
 
 
 class JsonLdDecoder(_Decoder):
