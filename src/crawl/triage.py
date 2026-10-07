@@ -78,11 +78,13 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
+
+from typing_extensions import TypedDict
 
 from src import config
 from src import store
@@ -106,6 +108,16 @@ from src.ops import maintenance as ops
 from src.rows import CompanyRow, FetchedJob, JobRow, is_watched
 
 _log = logging.getLogger(__name__)
+
+type MissionScorer = Callable[[str, str], Awaitable[tuple[str | None, float | None, str | None]]]
+
+
+class Requeue(TypedDict):
+    """One row `requeue_reasons` flags."""
+    reason: str
+    company_name: str | None
+    title: str | None
+    location: str | None
 
 OK = store.TRIAGE_OK
 # Verdict rank: a row's status is the verdict of the track it got FURTHEST
@@ -169,8 +181,7 @@ def _keyword_focus(t: RuntimeTrack) -> Iterator[None]:
 #  Gate 1: mission, once per company                                          #
 # --------------------------------------------------------------------------- #
 
-def _once_per_pass(scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]
-                   ) -> Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]:
+def _once_per_pass(scorer: MissionScorer) -> MissionScorer:
     """`scorer` that answers a company name once and reads as no verdict
     (None, None, None) after: a failed attempt counts, and both of a pass's
     gate phases share it. Exercised end to end by tests/test_triage.py::
@@ -186,7 +197,7 @@ def _once_per_pass(scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]
     """
     asked: set[str] = set()
 
-    async def once(name: str, context: str) -> tuple[Any, Any, Any]:
+    async def once(name: str, context: str) -> tuple[str | None, float | None, str | None]:
         if name in asked:
             return None, None, None
         asked.add(name)
@@ -196,7 +207,7 @@ def _once_per_pass(scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]
 
 async def ensure_mission(db: store.Writer, company: CompanyRow,
                          titles: Iterable[str | None] = (),
-                         scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission
+                         scorer: MissionScorer = score_company_mission
                          ) -> tuple[str | None, float | None]:
     """The company's (tier, score), scoring it ONCE via Claude (`scorer`, a
     coroutine function) when the roster row has neither, with the harvested
@@ -334,7 +345,7 @@ def row_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, cutoff: str) 
 
 
 async def judge(db: store.Writer, company: CompanyRow, jobs: list[JobRow], tracks: list[RuntimeTrack],
-                mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
+                mission_scorer: MissionScorer = score_company_mission,
                 *, cutoff: str) -> dict[str, dict[str, str]]:
     """Gates 1-6 for one company's rows against every applicable track.
     Returns {job_id: {track_label: verdict}} (verdict OK / gate / DEFER).
@@ -403,13 +414,13 @@ def _fetcher_shape(row: JobRow, company: CompanyRow) -> FetchedJob:
 
 
 async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: float | None = None,
-                          backoff_s: float = MISS_BACKOFF_S) -> dict[str, Any]:
+                          backoff_s: float = MISS_BACKOFF_S) -> harvest.BoardStats:
     """Fetch bodies for one company's survivors, serially, within the
     harvester's per-host tolerances. Returns the harvest-style stats, plus
     `tried`: the ids of the rows a detail fetch was attempted on. Exercised
     by tests/test_triage.py::
     test_waiting_reason_tells_a_failed_fetch_from_a_row_over_the_cap."""
-    stats: dict[str, Any] = {"hydrated": 0, "unhydrated": 0}
+    stats: harvest.BoardStats = {"hydrated": 0, "unhydrated": 0}
     stats["tried"] = await hydrate_rows(jobs, company, stats, delay, backoff_s)
     return stats
 
@@ -419,7 +430,7 @@ async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: fl
 # --------------------------------------------------------------------------- #
 
 def _by_company(conn: sqlite3.Connection, rows: list[JobRow]
-                ) -> tuple[dict[Any, list[JobRow]], dict[Any, CompanyRow | None]]:
+                ) -> tuple[dict[int, list[JobRow]], dict[int, CompanyRow | None]]:
     """Rows grouped by company, plus the roster row for each.
 
     Both gate phases work per company, not per row: the mission gate is a
@@ -431,8 +442,8 @@ def _by_company(conn: sqlite3.Connection, rows: list[JobRow]
     return groups, {cid: store.get_company(conn, cid) for cid in groups}
 
 
-async def _judged(db: store.Writer, companies: dict[Any, CompanyRow], groups: dict[Any, list[JobRow]],
-                  tracks: list[RuntimeTrack], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
+async def _judged(db: store.Writer, companies: dict[int, CompanyRow], groups: dict[int, list[JobRow]],
+                  tracks: list[RuntimeTrack], mission_scorer: MissionScorer, cutoff: str
                   ) -> AsyncIterator[tuple[CompanyRow, JobRow, str, str, list[str]]]:
     """Yield (company, row, status, detail, surfaced) for every grouped row.
 
@@ -448,8 +459,8 @@ async def _judged(db: store.Writer, companies: dict[Any, CompanyRow], groups: di
             yield c, r, status, detail, surfaced
 
 
-async def _free_gates(db: store.Writer, companies: dict[Any, CompanyRow], groups: dict[Any, list[JobRow]],
-                      tracks: list[RuntimeTrack], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
+async def _free_gates(db: store.Writer, companies: dict[int, CompanyRow], groups: dict[int, list[JobRow]],
+                      tracks: list[RuntimeTrack], mission_scorer: MissionScorer, cutoff: str
                       ) -> tuple[dict[str, tuple[str, str, CompanyRow, JobRow]], dict[str, tuple[CompanyRow, JobRow, str]]]:
     """Phase 1: the free gates, on the text the rows already have.
 
@@ -510,8 +521,8 @@ def _hydrate_order(survivors: dict[str, tuple[CompanyRow, JobRow, str]]) -> Call
     return key
 
 
-async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]], summary: dict[str, float],
-                   stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[dict[str, Any]]],
+async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]], summary: dict[str, float],
+                   stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[harvest.BoardStats]],
                    cutoff: str) -> dict[str, str]:
     """Phase 2: resolve every survivor company_fetch.needs_detail still
     flags -- a missing body, or a body already but a
@@ -538,7 +549,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors
         time, which both capped the pass and let two companies on one
         shared host (a multi-tenant API) hydrate at once.
     """
-    todo: dict[Any, list[FetchedJob]] = {}
+    todo: dict[int, list[FetchedJob]] = {}
     waiting: dict[str, str] = {}
     for jid, (c, r, status) in survivors.items():
         job = _fetcher_shape(r, c)
@@ -565,7 +576,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors
           f"{len(todo)} board(s) on {len(set(hosts.values()))} host(s), "
           f"one board at a time per host...")
 
-    def _abandoned(cid: Any) -> None:
+    def _abandoned(cid: int) -> None:
         # Nothing stored or stamped: the rows wait for the next pass.
         for j in todo[cid]:
             waiting[j["id"]] = "hydration abandoned past the pass budget"
@@ -606,8 +617,8 @@ async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors
     return waiting
 
 
-async def _body_gates(db: store.Writer, companies: dict[Any, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]],
-                      tracks: list[RuntimeTrack], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, CompanyRow, JobRow]],
+async def _body_gates(db: store.Writer, companies: dict[int, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]],
+                      tracks: list[RuntimeTrack], mission_scorer: MissionScorer, decided: dict[str, tuple[str, str, CompanyRow, JobRow]],
                       summary: dict[str, float], waiting: dict[str, str],
                       cutoff: str) -> dict[str, tuple[CompanyRow, JobRow, list[str], str]]:
     """Phase 3: the same gates again, now with bodies.
@@ -664,7 +675,7 @@ async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], su
     """
     order = sorted(final.values(),
                    key=lambda x: -(x[0].get("mission_score") or 0.0))
-    to_score = order[:score_cap] if fit else []
+    to_score: list[tuple[CompanyRow, JobRow, list[str], str]] = order[:score_cap] if fit else []
     over_cap: set[str] = {x[1]["job_id"] for x in order[score_cap:]} if fit else set()
     scores: dict[str, FitResult] = {}
     if to_score:
@@ -775,10 +786,10 @@ def _print_summary(summary: dict[str, float], bar: str) -> None:
 async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] | None = None,
               limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
               score_cap: int = SCORE_CAP, fit: bool = True, hydrate: bool = True,
-              mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
-              hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[dict[str, Any]]] = hydrate_company,
+              mission_scorer: MissionScorer = score_company_mission,
+              hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[harvest.BoardStats]] = hydrate_company,
               now: datetime | None = None, requeue: bool = False,
-              requeue_apply: bool = False) -> dict[str, Any]:
+              requeue_apply: bool = False) -> Mapping[str, object]:
     """Triage every pending row in the store. Returns the summary dict
     (also printed): harvested/pending N, then a count per gate, hydrated,
     scored, surfaced, and how many rows are left pending.
@@ -830,7 +841,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
         # returning None for one is not handled specially anywhere else
         # either, so this cast matches _by_company's real contract rather
         # than adding new None-handling behaviour here.
-        companies = cast(dict[Any, CompanyRow], companies_or_none)
+        companies = cast(dict[int, CompanyRow], companies_or_none)
         mission_scorer = _once_per_pass(mission_scorer)
         decided, survivors = await _free_gates(db, companies, groups, tracks,
                                                mission_scorer, cutoff)
@@ -886,7 +897,7 @@ def _passed_tracks(detail: str | None) -> set[str]:
 
 
 def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | None = None
-                    ) -> dict[str, dict[str, Any]]:
+                    ) -> dict[str, Requeue]:
     """{job_id: {"reason", "company_name", "title", "location"}} for every
     open triaged row whose verdict the current geo rules would change.
     Both reasons select on `triage_status` (ix_jobs_triage), so a row a
@@ -935,7 +946,7 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | N
         changed, so it is not selected either.
     """
     gated = {t.track for t in roster_tracks(tracks) if t.geo_gate}
-    out: dict[str, dict[str, Any]] = {}
+    out: dict[str, Requeue] = {}
 
     def add(r: sqlite3.Row, reason: str) -> None:
         out[r["job_id"]] = {"reason": reason, "company_name": r["company_name"],
@@ -966,7 +977,7 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | N
 
 async def requeue_rows(db_path: str | Path | None = None, apply: bool = False,
                        sample: int = 10, tracks: Iterable[RuntimeTrack] | None = None
-                       ) -> dict[str, Any]:
+                       ) -> dict[str, object]:
     """Report (the default) or apply a re-queue of rows `requeue_reasons`
     flags -- the CLI/registry surface (run_scraper.py --triage --requeue
     [--requeue-apply], the registry `triage` op's same two params).

@@ -147,7 +147,7 @@ async def fan_out[T, R](items: Iterable[T], fn: Callable[[T], Awaitable[R]],
     items = list(items)
     if not items:
         return
-    what = label if callable(label) else (lambda _item: label)
+    what: Callable[[T], str] = label if callable(label) else (lambda _item: label)
     slots = asyncio.Semaphore(max(1, max_workers))
     hosts: dict[Hashable, asyncio.Lock] = {}
 

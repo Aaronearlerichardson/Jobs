@@ -230,7 +230,7 @@ async def _websearch_pass(names: list[str], hits: list[BoardHit],
             recent = await db.run(store.recent_miss_names, days=retry_days)
         todo = [n for n in todo if n not in recent][:cap]
     else:
-        todo = []
+        todo = list[str]()
     print(f"  websearch-resolving {len(todo)} name(s) without a board "
           f"(cap={cap})...")
     if not todo:
@@ -738,7 +738,7 @@ async def queue_names(db: store.Writer, names: Collection[str], source: str,
     stalled: list[str] = []
 
     async def miss(name: str, reason: str, hit: BoardHit | None = None) -> None:
-        row = {**_miss_row(hit), "source": source} if hit else {"source": source}
+        row: CompanyIn = {**_miss_row(hit), "source": source} if hit else {"source": source}
         await db.run(store.record_miss, name, reason, **row)
         missed.append((name, reason))
 

@@ -96,7 +96,8 @@ async def apply_to_store(result: dict[str, Any], dry_run: bool = False) -> list[
         return [f"  (no confirmed candidates for '{term}')"]
 
     async with store.Writer() as db:
-        added, skipped, summary = 0, 0, []
+        added, skipped = 0, 0
+        summary: list[str] = []
         for c in confirmed:
             # "Can this row be fetched" is board_for, what fetch_company
             # dispatches on and every other caller of the write path trusts.

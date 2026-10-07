@@ -261,7 +261,8 @@ def parse_company_names(blob: str | bytes | list[str] | tuple[str, ...],
     candidates = structured if len(structured) >= 2 else [
         n for n in (_clean_candidate(ln) for ln in lines) if n]
 
-    out, seen = [], set()
+    out: list[str] = []
+    seen: set[str] = set()
     for name in candidates:
         key = name_key(name)
         if key and key not in seen:
@@ -383,7 +384,7 @@ async def preview_names(blob: str | bytes | list[str] | tuple[str, ...],
     """
     if use_llm is None:
         use_llm = have_api_key()
-    names = await extract_names_llm(blob) if use_llm else []
+    names: list[str] = await extract_names_llm(blob) if use_llm else []
     if not names:
         names = parse_company_names(blob)
     async with store.Writer() as db:
@@ -391,7 +392,8 @@ async def preview_names(blob: str | bytes | list[str] | tuple[str, ...],
             {name_key(r["name"]) for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()},
             blocked_keys(conn),
             {name_key(n) for n in store.recent_miss_names(conn)}))
-    out, seen = [], set()
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
     for n in names:
         key = name_key(n)
         if not key or key in seen:

@@ -27,7 +27,8 @@ def _close_stores(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     unaffected; one opened in another thread cannot be closed from here and
     is left as it was.
     """
-    opened, real = [], sqlite3.connect
+    opened: list[sqlite3.Connection] = []
+    real = sqlite3.connect
 
     def tracked(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         conn: sqlite3.Connection = real(*args, **kwargs)

@@ -175,8 +175,8 @@ def parse_job_page(page_html: str | None, board_url: str,
     if (job.get("status") not in (None, "active")
             or job.get("closedAt") or job.get("deactivatedAt")):
         return None
-    org = job.get("organization")
-    org = org if isinstance(org, dict) else {}
+    raw_org = job.get("organization")
+    org: dict[str, Any] = raw_org if isinstance(raw_org, dict) else {}
     locations = list(dict.fromkeys(
         n for n in (strip_html(loc.get("name") if isinstance(loc, dict) else loc)
                     for loc in job.get("locations") or []) if n))

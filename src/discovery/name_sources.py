@@ -311,7 +311,9 @@ async def gather_names(extra: list[str] | None = None) -> list[str]:
     # Every name gathered here that fails to resolve is stored as a miss and
     # retried by reresolve, so junk ("2nd", "8 benefits") is screened out
     # before it can cost a resolve cycle now and on every pass after.
-    names, seen, junk = [], set(), 0
+    names: list[str] = []
+    seen: set[str] = set()
+    junk = 0
     for src in sources:
         for n in src:
             k = name_key(n)

@@ -57,10 +57,12 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
+
+from typing_extensions import TypedDict
 
 from src import config
 from src import digest
@@ -100,11 +102,44 @@ CLOSED_PROBE_STALE_DAYS = 7
 CLOSED_PROBE_LIMIT = 500
 
 
+class PlanStats(TypedDict, total=False):
+    """What `plan` reports about the boards it left out."""
+    offmission_skipped: int
+    offmission_stopped: int
+    min_age_hours: float
+
+
+class _ScoreKw(TypedDict, total=False):
+    score_cap: int
+
+
+class BoardStats(TypedDict, total=False):
+    """One board's harvest stats: the counters plus http.snapshot_info()'s keys."""
+    name: str | None
+    ats: str | None
+    fetched: int
+    new: int
+    hydrated: int
+    unhydrated: int
+    closed: int
+    reopened: int
+    err: str | None
+    secs: float
+    tried: list[str]
+    fetch_errors: int
+    incomplete: bool
+    capped: bool
+    capped_total: int | None
+    last_error: str | None
+    fill: dict[str, float]
+    fill_rows: int
+
+
 # --------------------------------------------------------------------------- #
 #  Planning                                                                    #
 # --------------------------------------------------------------------------- #
 
-def deferred_note(stats: dict[str, Any]) -> str:
+def deferred_note(stats: PlanStats) -> str:
     """The clause naming the boards a plan() `stats` dict left out as
     off-mission and inactive, deferred to the long interval or stopped;
     "" when there are none. run()'s header and harvest.py --list both
@@ -125,7 +160,7 @@ def deferred_note(stats: dict[str, Any]) -> str:
 def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
          names: Iterable[str] | None = None, min_age_hours: float | None = None,
          limit: int | None = None, now: datetime | None = None,
-         stats: dict[str, Any] | None = None) -> list[CompanyRow]:
+         stats: PlanStats | None = None) -> list[CompanyRow]:
     """The boards this run will pull, in run order.
 
     `only` restricts to a set of ATS names, `names` to company names
@@ -295,7 +330,7 @@ def _row(job: FetchedJob, company: CompanyRow, stamp: str) -> JobIn:
     }
 
 
-def _soft_failed(stats: dict[str, Any]) -> bool:
+def _soft_failed(stats: BoardStats) -> bool:
     """A board that answered with an error rather than an empty one: no
     rows, and its own fetch reported failures (net.http.snapshot_info).
 
@@ -330,7 +365,7 @@ def bury_404_board(conn: sqlite3.Connection, company: CompanyRow,
 async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = False,
                         delay: float | None = None, now: datetime | None = None,
                         backoff_s: float = MISS_BACKOFF_S,
-                        progress: Callable[[], object] = lambda: None) -> dict[str, Any]:
+                        progress: Callable[[], object] = lambda: None) -> BoardStats:
     """Fetch, hydrate and store ONE board, its store work on `db` (the
     pass's store.Writer). Returns a stats dict; a fetch failure is
     reported, not raised, and leaves the store untouched (nothing is
@@ -350,7 +385,7 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
     failure fills last_error, never `err`, which means an exception.
     """
     t0 = time.monotonic()
-    stats: dict[str, Any] = {"name": company.get("name"), "ats": company.get("ats"),
+    stats: BoardStats = {"name": company.get("name"), "ats": company.get("ats"),
                              "fetched": 0, "new": 0, "hydrated": 0, "unhydrated": 0,
                              "closed": 0, "reopened": 0, "fetch_errors": 0, "err": None,
                              "incomplete": False, "capped": False, "capped_total": None,
@@ -371,7 +406,8 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
         return stats
     progress()
     stats["fetched"] = len(jobs)
-    stats.update(http.snapshot_info())
+    # TODO(any-zero): mypy rejects a total Snapshot as update() arg of a partial TypedDict.
+    stats.update(cast(BoardStats, http.snapshot_info()))
 
     try:
         # Bodies already in the store (an earlier harvest, or a crawl) are
@@ -407,7 +443,7 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
 
 def _write_board(conn: sqlite3.Connection, jobs: list[FetchedJob],
                  rows: list[tuple[JobIn, bool]], company: CompanyRow,
-                 stats: dict[str, Any], stamp_dt: datetime) -> str | None:
+                 stats: BoardStats, stamp_dt: datetime) -> str | None:
     """One board's snapshot written, inside the caller's store.batch (ONE
     transaction, which is the whole point: a board is one lock
     acquisition, not one per posting); `rows` are its (store row,
@@ -447,7 +483,7 @@ def _write_board(conn: sqlite3.Connection, jobs: list[FetchedJob],
 
 
 async def hydrate_rows(jobs: list[FetchedJob], company: CompanyRow,
-                       stats: dict[str, Any], delay: float | None = None,
+                       stats: BoardStats, delay: float | None = None,
                        backoff_s: float = MISS_BACKOFF_S,
                        progress: Callable[[], object] = lambda: None) -> list[str]:
     """Resolve every row in `jobs` that still needs a detail call
@@ -523,8 +559,9 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
               names: Iterable[str] | None = None, min_age_hours: float | None = None,
               limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
               hydrate: bool = False, max_hours: float | None = None,
-              board_fn: Callable[..., Awaitable[dict[str, Any]]] = harvest_board,
-              triage: bool = True, score_cap: int | None = None) -> dict[str, Any]:
+              board_fn: Callable[..., Awaitable[BoardStats]] = harvest_board,
+              triage: bool = True, score_cap: int | None = None
+              ) -> dict[str, float | Mapping[str, object]]:
     """Harvest every planned board (`pull`), then triage what was stored
     and rewrite every roster track's digest (`_triage`), in that order.
     Returns the summary dict (also printed); the triage summary rides in it
@@ -549,17 +586,18 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
         flagged = await db.run(store.flag_duplicate_jobs)
     if flagged:
         print(f"  {flagged} cross-board duplicate flag(s) changed")
+    out: dict[str, float | Mapping[str, object]] = {**summary}
     if triage:
-        summary["triage"] = await _triage(db_path, max_workers, score_cap)
-    return summary
+        out["triage"] = await _triage(db_path, max_workers, score_cap)
+    return out
 
 
 async def pull(db_path: str | Path, only: Collection[str] | None = None,
                names: Iterable[str] | None = None, min_age_hours: float | None = None,
                limit: int | None = None, hydrate: bool = False,
                max_hours: float | None = None,
-               board_fn: Callable[..., Awaitable[dict[str, Any]]] = harvest_board,
-               stall_s: float = 900.0) -> dict[str, Any]:
+               board_fn: Callable[..., Awaitable[BoardStats]] = harvest_board,
+               stall_s: float = 900.0) -> dict[str, float]:
     """The pull: plan (`plan`), then every board fetched and stored, one
     task per host (Board.origin; per platform while a row's origin is
     unsettled) walking its boards in plan order and every host at once;
@@ -590,7 +628,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
                                "fetched": 0, "new": 0, "hydrated": 0, "closed": 0,
                                "reopened": 0, "retired": 0, "secs": 0.0}
     async with store.Writer(db_path) as db:
-        plan_stats: dict[str, Any] = {}
+        plan_stats: PlanStats = {}
         boards = await db.run(plan, only=only, names=names,
                               min_age_hours=min_age_hours, limit=limit,
                               stats=plan_stats)
@@ -630,9 +668,9 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
                             c, db, hydrate=hydrate,
                             progress=lambda: stall.reschedule(loop.time() + stall_s))
                 except Exception as e:          # noqa: BLE001 - reported
-                    s = {"err": f"{type(e).__name__}: {e}", "fetched": 0,
-                         "new": 0, "hydrated": 0, "closed": 0, "reopened": 0,
-                         "secs": 0.0}
+                    s = BoardStats(err=f"{type(e).__name__}: {e}", fetched=0,
+                                   new=0, hydrated=0, closed=0, reopened=0,
+                                   secs=0.0)
                 del running[id(c)]
                 if stall.expired():
                     print(f"  [!] {c['name']} ({c['ats']}): no progress in "
@@ -679,7 +717,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
     return summary
 
 
-def _report(c: CompanyRow, s: dict[str, Any], summary: dict[str, float]) -> None:
+def _report(c: CompanyRow, s: BoardStats, summary: dict[str, float]) -> None:
     """One finished board's status line, its stats added to `summary`."""
     done = summary["ok"] + summary["err"] + 1
     if s["err"]:
@@ -727,7 +765,7 @@ def _report(c: CompanyRow, s: dict[str, Any], summary: dict[str, float]) -> None
 
 
 async def _triage(db_path: str | Path, max_workers: int,
-                  score_cap: int | None) -> dict[str, Any]:
+                  score_cap: int | None) -> Mapping[str, object]:
     """The pass's second half; returns triage.run's summary.
 
     The gate/hydrate/score pass over everything pending in the store --
@@ -752,7 +790,7 @@ async def _triage(db_path: str | Path, max_workers: int,
     """
     from src.crawl import triage
     since = datetime.now().isoformat()
-    kw: dict[str, Any] = {"score_cap": score_cap} if score_cap is not None else {}
+    kw: _ScoreKw = {"score_cap": score_cap} if score_cap is not None else {}
     result = await triage.run(db_path=db_path, max_workers=max_workers, **kw)
     async with store.Writer(db_path) as db:
         tracks = triage.roster_tracks()

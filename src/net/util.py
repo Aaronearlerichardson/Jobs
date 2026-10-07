@@ -290,7 +290,7 @@ def xpath(expr: str) -> etree.XPath:
     """
     cache = getattr(_local, "xpaths", None)
     if cache is None:
-        cache = _local.xpaths = {}
+        cache = _local.xpaths = dict[str, etree.XPath]()
     xp = cache.get(expr)
     if xp is None:
         xp = cache[expr] = etree.XPath(expr, smart_strings=False)

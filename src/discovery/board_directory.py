@@ -249,7 +249,7 @@ async def _files() -> list[str]:
             manifest = json.loads(await asyncio.to_thread(
                 Path(locate("manifest.json")).read_text, "utf-8"))
         except (OSError, ValueError):
-            manifest = {}
+            manifest = dict[str, JSON]()
     # TODO(any-zero): HEAD trusts the manifest shape; parse it at the edge.
     return list(cast("Iterable[str]", cast("dict[str, JSON]", manifest or {}).get("by_ats", {})))
 
@@ -367,7 +367,8 @@ def classify(conn: sqlite3.Connection, boards: Iterable[DirectoryBoard]
         nk = name_key(b["name"])
         row = by_name.get(nk) or store.company_by_host(conn, b["sample_url"])
         if row:
-            b = {**b, "name": row["name"]}
+            named: DirectoryBoard = {**b, "name": row["name"]}
+            b = named
         plan = store.plan_board(conn, coords.columns(b["ats"], b["handle"], b["careers_url"],
                                                      name=b["name"]))
         if plan.action == "update":

@@ -154,7 +154,8 @@ def _fresh(listed: list[EngineRow], seen: set[str | None]) -> list[EngineRow]:
     gave is dropped, as is one repeating a row of its own page verbatim
     (a page may list a posting once per location; two copies of one row
     are one). `seen` takes the new ids."""
-    new, here = [], set()
+    new: list[EngineRow] = []
+    here: set[str] = set()
     for r in listed:
         rid = r["id"]
         if rid is not None and rid in seen:

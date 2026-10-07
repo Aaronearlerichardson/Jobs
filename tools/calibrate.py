@@ -89,7 +89,8 @@ def main(argv: list[str] | None = None) -> int:
             "SELECT resume_fit_score FROM open_jobs WHERE resume_fit_score IS NOT NULL "
             "AND disposition IS NULL")]
     thresholds = [float(x) for x in args.thresholds.split(",")]
-    new = runstate.run(_rescore([r for r in rows if r["description"]])) if args.rescore else {}
+    new: dict[str, float | None] = (
+        runstate.run(_rescore([r for r in rows if r["description"]])) if args.rescore else {})
 
     print(f"\n  {len(rows)} decided job(s); digest_min_fit is {track.digest_min_fit:.2f}\n")
     print(f"  {'fit':>5} {'now':>5}  {'decision':12} {'company':24} title")

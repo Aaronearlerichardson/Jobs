@@ -16,6 +16,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
+from operator import itemgetter
 from typing import Annotated, Any, NamedTuple
 
 from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
@@ -258,7 +259,7 @@ def prior_lookup(pipeline: Iterable[Mapping[str, Any]]
         exact, role = title_keys(job.get("title"))
         best = max(((1 if e == exact else 0, when(p), p) for e, r, p in rivals
                     if p.get("job_id") != job.get("job_id") and r == role),
-                   key=lambda c: c[:2], default=None)
+                   key=itemgetter(0, 1), default=None)
         if best is None:
             return None
         return Prior("repost" if best[0] else "sibling", best[2].get("title") or "",

@@ -140,6 +140,7 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
 
     # 2) Company store (this track's own DB, optionally tag-scoped).
     if src.store:
+        rows: list[CompanyRow]
         try:
             async with store.Writer(t.db_path) as db:
                 # Not every active row: dormant companies (never-productive,
@@ -302,7 +303,7 @@ class Collected(NamedTuple):
 
 async def _gate_company_board(
         db: store.Writer, t: RuntimeTrack, c: CompanyRow, jobs: list[FetchedJob], commit: bool,
-        snapshot: dict[str, Any] | None = None,
+        snapshot: health.SnapFacts | None = None,
 ) -> tuple[list[FetchedJob], list[FetchedJob], list[tuple[CompanyRow, FetchedJob, bool]], int, int]:
     """One store company's board through the gates, on `db` (the crawl's
     store.Writer).

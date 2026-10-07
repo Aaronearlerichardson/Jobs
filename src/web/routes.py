@@ -27,6 +27,7 @@ from src.crawl import health
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
 from src.match import locality
+from src.net.util import JSON
 from src.ops.maintenance import track_store
 from src.rows import CompanyRow, JobRow, RankedJob, is_watched
 from src.validation import Text, error_lines
@@ -534,6 +535,7 @@ def _config_busy() -> ResponseReturnValue | None:
 @app.get("/api/config")
 def api_config_get() -> ResponseReturnValue:
     raw, source = profile_edit.read_raw()
+    parsed: dict[str, JSON]
     try:
         import tomllib
         parsed = tomllib.loads(raw)

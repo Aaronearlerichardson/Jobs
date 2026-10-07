@@ -131,7 +131,8 @@ def candidate_urls(name: str, careers_url: str = "",
             urls += [base + path for path in dict.fromkeys(p for _, p in patterns)]
     toks = domain_tokens(name)
     urls += [f"https://{host.format(tok=tok)}{path}" for host, path in patterns for tok in toks]
-    seen, out = set(), []
+    seen: set[str] = set()
+    out: list[str] = []
     for u in urls:
         if u and u not in seen:
             seen.add(u)

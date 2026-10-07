@@ -10,12 +10,12 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from src import config, store
 from src.config import RuntimeTrack
 from src.match.locality import geo_mode
 from src.ops.maintenance import track_store
+from src.store.schema import SqlScalar
 
 
 def restamp_geo(commit: bool = False, undo: str = "", t: RuntimeTrack | None = None,
@@ -57,7 +57,7 @@ def restamp_geo(commit: bool = False, undo: str = "", t: RuntimeTrack | None = N
         keep what triage stamped.
     """
     with track_store(t, conn) as conn:
-        def fresh() -> Iterable[tuple[Any, Any, Any, sqlite3.Row]]:
+        def fresh() -> Iterable[tuple[SqlScalar, SqlScalar, SqlScalar, sqlite3.Row]]:
             for r in conn.execute(
                     "SELECT job_id, company_name, title, location, description, geo_mode "
                     "FROM jobs WHERE closed_at IS NULL"):
@@ -91,7 +91,7 @@ def restamp_tiers(commit: bool = False, undo: str = "", t: RuntimeTrack | None =
         (api.score_company_mission); this brings stored ones in line.
     """
     with track_store(t, conn) as conn:
-        def fresh(table: str) -> Iterable[tuple[Any, Any, Any, sqlite3.Row]]:
+        def fresh(table: str) -> Iterable[tuple[SqlScalar, SqlScalar, SqlScalar, sqlite3.Row]]:
             for r in conn.execute(
                     f"SELECT id, name, mission_tier, mission_score FROM {table} "
                     "WHERE mission_score IS NOT NULL"):
@@ -182,7 +182,7 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
             "WHERE c.id IN (SELECT value FROM json_each(?))",
             (json.dumps([i for ids in clusters for i in ids]),))}
 
-        def fresh() -> Iterable[tuple[Any, Any, Any, tuple[str, str]]]:
+        def fresh() -> Iterable[tuple[SqlScalar, SqlScalar, SqlScalar, tuple[str, str]]]:
             for ids in clusters:
                 top = rows[max(ids, key=lambda i: (size[i], -i))]
                 for i in sorted(ids, key=lambda i: (-size[i], i)):
@@ -195,16 +195,16 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
         return counts
 
 
-def _restamp(conn: sqlite3.Connection, commit: bool, undo: str, column: tuple[str, str, str],
-             fresh: Iterable[tuple[Any, Any, Any, Any]],
-             describe: Callable[[Any], str]) -> dict[str, int]:
+def _restamp[Ctx](conn: sqlite3.Connection, commit: bool, undo: str, column: tuple[str, str, str],
+             fresh: Iterable[tuple[SqlScalar, SqlScalar, SqlScalar, Ctx]],
+             describe: Callable[[Ctx], str]) -> dict[str, int]:
     """The shared preview/apply/undo over `column` = (table, key, column):
     `fresh` yields (key, stored value, recomputed value, context), and
     `describe` turns a changed row's context into its sample line."""
     if undo:
         return _undo(conn, Path(undo), commit)
     table, key, col = column
-    changes: dict[str, list[tuple[Any, Any, Any, Any]]] = defaultdict(list)
+    changes: dict[str, list[tuple[SqlScalar, SqlScalar, SqlScalar, Ctx]]] = defaultdict(list)
     n = 0
     for k, old, new, ctx in fresh:
         n += 1
@@ -228,7 +228,7 @@ def _restamp(conn: sqlite3.Connection, commit: bool, undo: str, column: tuple[st
     return counts
 
 
-def _backup(column: tuple[str, str, str], old: list[tuple[Any, Any]]) -> Path:
+def _backup(column: tuple[str, str, str], old: list[tuple[SqlScalar, SqlScalar]]) -> Path:
     """Write the old (key, value) pairs and where they go to a timestamped file."""
     table, key, col = column
     path = config.DATA_DIR / "db_backups" / f"restamp-{col}-{datetime.now():%Y%m%d-%H%M%S}.json"

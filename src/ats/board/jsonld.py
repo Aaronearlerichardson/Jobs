@@ -102,7 +102,8 @@ def _normalize_location(jp: Mapping[str, JSON]) -> str:
     # Durham office read as just "Remote"). Join them all.
     loc = jp.get("jobLocation")
     locs = loc if isinstance(loc, list) else [loc] if loc else []
-    parts, seen = [], set()
+    parts: list[str] = []
+    seen: set[str] = set()
     for l in locs:
         s = _one_location(l)
         if s and s.lower() not in seen:

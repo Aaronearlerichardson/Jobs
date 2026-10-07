@@ -132,7 +132,7 @@ class Canary(_Spec):
     handle: Str = Field(description="The sample board's handle")
     min_jobs: Count = Field(1, description="The fewest postings a healthy board lists")
     min_fill: dict[RowField, Annotated[float, Strict(), Field(ge=0, le=1)]] = Field(
-        {}, description="Per row field, the share of the board's rows that must fill it, "
+        default_factory=dict, description="Per row field, the share of the board's rows that must fill it, "
                         "over pager.FILL_FLOORS")
 
 
@@ -203,8 +203,9 @@ class JsonInHtmlDecoder(_Json):
 class JsonLdDecoder(_Decoder):
     kind: Literal["jsonld"] = Field(description="The page's schema.org JobPostings")
     entries: Paths = Field(("postings",), description="Where the decoded postings sit")
-    cells: dict[Str, Css] = Field({}, description='{name: CSS}: a page naming no posting, as '
-                                                  '"page", the text of each')
+    cells: dict[Str, Css] = Field(default_factory=dict,
+                           description='{name: CSS}: a page naming no posting, as '
+                                       '"page", the text of each')
 
 
 class AtomDecoder(_Decoder):
@@ -222,7 +223,8 @@ class HtmlDecoder(_Decoder):
     context: Literal["parent", "lines"] | tuple[Str, ...] | None = Field(
         None, description="The block around an element: its parent, the nearest of these "
                           "tags, or the nearest holding two lines")
-    cells: dict[Str, Css] = Field({}, description="{name: CSS}: text found in the context")
+    cells: dict[Str, Css] = Field(default_factory=dict,
+                           description="{name: CSS}: text found in the context")
     base: Template | None = Field(None, description="Makes hrefs absolute; default the page")
     selects: Bool = Field(False, description='Also the page\'s <select> fields, as "selects": '
                                              '[{name, options: [{value, label}]}]')
@@ -343,14 +345,15 @@ class _Call(_Spec):
     params: dict[Str, Str] | None = Field(None, description="Query parameters; a None one is "
                                                             "left off")
     json_: dict[Str, Any] | None = Field(None, alias="json", description="A JSON body template")
-    headers: dict[Str, Str] = Field({}, description="Over the shared request headers")
+    headers: dict[Str, Str] = Field(default_factory=dict,
+                                description="Over the shared request headers")
     decoder: Decoder = Field(JsonDecoder(),
                              description="Reads the response body")
 
 
 class _Request(_Call):
-    fields: dict[Str, Grammar] = Field({}, description="Row field (or internal _field) -> "
-                                                       "field spec")
+    fields: dict[Str, Grammar] = Field(default_factory=dict,
+                                description="Row field (or internal _field) -> field spec")
 
     @model_validator(mode="after")
     def _row_fields(self) -> Self:
@@ -382,13 +385,14 @@ class Handle(_Workaround):
     fold: Bool = Field(False, description="The host answers a handle's case alike, so boards "
                                           "differing only in case are one board")
     try_: dict[Str, tuple[Template, ...]] = Field(
-        {}, alias="try", max_length=1,
+        default_factory=dict, alias="try", max_length=1,
         description="One part's templates, tried until an answer `accept` allows; "
                     "settled once per handle")
     accept: Accept = Field(Accept(),
                            description="The answers that settle a `try` value")
-    follow: dict[Str, Template] = Field({}, description="A part that is the redirect target of "
-                                                       "its URL template; settled once per handle")
+    follow: dict[Str, Template] = Field(default_factory=dict,
+                                 description="A part that is the redirect target of "
+                                             "its URL template; settled once per handle")
     prelude: tuple[Prelude, ...] = Field(
         (), description="Requests answering parts a listing or detail request needs (a token "
                         "its own page or API hands out), each part settled once per handle "

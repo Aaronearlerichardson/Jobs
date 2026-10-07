@@ -18,10 +18,21 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from typing_extensions import ReadOnly, TypedDict
+
 from src import config
 from src import store
 from src.ats.board.pager import FILL_FLOORS, fill_rates
 from src.rows import FetchedJob
+
+
+class SnapFacts(TypedDict, total=False):
+    """The keys of net.http.snapshot_info() (or a harvest BoardStats) a Tally reads."""
+    incomplete: ReadOnly[bool]
+    capped: ReadOnly[bool]
+    last_error: ReadOnly[str | None]
+    fill: ReadOnly[dict[str, float]]
+    fill_rows: ReadOnly[int]
 
 
 class Tally:
@@ -43,7 +54,7 @@ class Tally:
             lambda: defaultdict(float))
 
     def note(self, ats: str, n: int, fill: Mapping[str, float], *,
-             err: object, snap: Mapping[str, Any]) -> None:
+             err: object, snap: SnapFacts) -> None:
         """One board's outcome: `n` rows, their `fill` rates, the fetch's
         exception `err` and net.http.snapshot_info() `snap` (any mapping with
         its keys). A failure with no rows is an error, with rows partial."""
@@ -61,7 +72,7 @@ class Tally:
             self._fill[ats][k] += v * weight
 
     def note_jobs(self, ats: str, jobs: list[FetchedJob] | None, err: object,
-                  snap: Mapping[str, Any] | None) -> None:
+                  snap: SnapFacts | None) -> None:
         """`note` for a board whose rows are in hand; the fill is the
         snapshot's (raw listing rows), else the kept `jobs`'.
 

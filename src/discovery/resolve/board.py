@@ -29,6 +29,7 @@ lives here and they live one level up.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from operator import itemgetter
 from typing import Any, cast
 
 from src import config
@@ -143,14 +144,14 @@ async def _directory_hit(name: str, mk: Callable[..., Awaitable[BoardHit | None]
     """The best board (most local postings) `directory.find_boards` gives
     for `name` that `mk` validates, or None (also when the directory could
     not be read)."""
-    hits = []
+    hits: list[BoardHit] = []
     for ats, handle, url in await find_boards(name):
         if await foreign_board(name, ats, handle):
             continue
         hit = await mk(ats, handle, pack(ats, handle, url)["careers_url"], "directory")
         if hit:
             hits.append(hit)
-    return max(hits, key=lambda h: (h["nc"], h["count"]), default=None)
+    return max(hits, key=itemgetter("nc", "count"), default=None)
 
 
 async def resolve_board_sniff_first(name: str, careers_url: str = "",

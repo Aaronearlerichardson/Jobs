@@ -801,7 +801,8 @@ class Board:
         rescue = self._rescue_spec
         fill = rescue.fields if rescue else ()
         cap = (rescue.cap if rescue else 0) if cap is None else cap
-        spent, out = 0, []
+        spent = 0
+        out: list[EngineRow] = []
         for row in rows:
             listed, free = row.get("location") or "", row.get("_free") or ""
             vague = bool(unknown and unknown.search(listed) and self.owns_url(row.get("url")))
@@ -978,7 +979,7 @@ class Board:
         req = listing.model_copy(update={"url": listing.probe_url or listing.url})
         _parts, _s, payload, err = await self._page(req, handle, page_vals(self._pager, 0, 1),
                                                     timeout=config.PROBE_TIMEOUT)
-        entries = [] if err else decode.entries(payload, listing.decoder)
+        entries: list[dict[str, JSON]] = [] if err else decode.entries(payload, listing.decoder)
         return str(fields.value(spec, entries[0]) or "").strip() if entries else ""
 
     # --- one posting -------------------------------------------------------

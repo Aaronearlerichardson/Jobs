@@ -178,41 +178,49 @@ def _loc_text(v: JSON) -> str | None:
     return m.group(0).strip() if m else None
 
 
-TRANSFORMS: dict[str, Transform] = {
+_UNARY: dict[str, Callable[[JSON], str | int | None]] = {
     "html_text": lambda v: text_from_html(_text(v)),
     # A JSON string holding "&lt;p&gt;..." has no markup to strip until it
     # is unescaped: stripped first, the tags come back as TEXT.
     "unescape_html_text": lambda v: text_from_html(html.unescape(_text(v))),
-    "date": norm_posted_date,
-    "ymd": _ymd,
-    "after_marker": _after,
-    "before": lambda v, marker: str(v).split(marker, 1)[0].strip(),
-    "colon_location": _colon_location,
     # The whole host as one id-safe token: tenants on their own domains
     # share a first label.
     "host_key": lambda v: re.sub(r"[^a-z0-9]+", "_", _host(v).lower()).strip("_"),
     "host_label": lambda v: _host(v).split(".", 1)[0],
-    "host": _host_part,
     "origin": lambda v: origin_of(str(v)),
     # The site's origin without its scheme or a leading "www.".
     "host_nowww": lambda v: re.sub(r"^https?://(www\.)?", "", origin_of(str(v))),
-    "group": _group,
     "dash_space": lambda v: str(v).replace("-", " "),
     "underscore": lambda v: str(v).replace("-", "_"),
     "lower": lambda v: str(v).lower(),
     "unquote": lambda v: unquote(str(v)),
     "rstrip_slash": lambda v: str(v).rstrip("/"),
-    "one_line": clean_field,
-    "int": _int,
+}
+
+_ARGUED: dict[str, Callable[[JSON, str], str | int | None]] = {
+    "before": lambda v, marker: str(v).split(marker, 1)[0].strip(),
     "alnum_tail": lambda v, n: re.sub(r"[^a-z0-9]+", "", str(v).lower())[-int(n):],
-    "snippet": location_snippet,
-    "place": lambda v: location_snippet(v, ""),
-    "loc_text": _loc_text,
-    "cut_date_tail": _cut_date_tail,
-    "strip_labels": _strip_labels,
     # The last n characters lowercased, each run of anything but letters
     # and digits one "-".
     "url_key": lambda v, n: re.sub(r"[^a-z0-9]+", "-", str(v).lower())[-int(n):],
+}
+
+TRANSFORMS: dict[str, Transform] = {
+    **_UNARY,
+    **_ARGUED,
+    "date": norm_posted_date,
+    "ymd": _ymd,
+    "after_marker": _after,
+    "colon_location": _colon_location,
+    "host": _host_part,
+    "group": _group,
+    "one_line": clean_field,
+    "int": _int,
+    "snippet": location_snippet,
+    "place": functools.partial(location_snippet, default=""),
+    "loc_text": _loc_text,
+    "cut_date_tail": _cut_date_tail,
+    "strip_labels": _strip_labels,
     # A stable id for an entry the listing gives none: never hash(),
     # which Python salts per process.
     "stable_id": stable_id,
@@ -321,7 +329,8 @@ def fmt(template: str, lookup: Callable[[str], JSON], strict: bool = False) -> s
     >>> fmt("{t}/{t|underscore}", {"t": "vhr-unither"}.get)
     'vhr-unither/vhr_unither'
     """
-    out, empty = [], False
+    out: list[str] = []
+    empty = False
     for literal, name, n, transform in _template(template):
         out.append(literal)
         if name is None:
@@ -480,8 +489,9 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
                    if name is not None}
 
         def form(entry: JSON, ctx: Mapping[str, JSON]) -> str | None:
-            return fmt(template, lambda k: ctx[k] if ctx and k in ctx else getters[k](entry),
-                       strict)
+            def get(k: str) -> JSON:
+                return ctx[k] if ctx and k in ctx else getters[k](entry)
+            return fmt(template, get, strict)
         return form
     if "const" in spec:
         const = spec["const"]

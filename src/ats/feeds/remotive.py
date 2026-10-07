@@ -39,7 +39,7 @@ async def fetch_remotive(category: str | None = None, max_jobs: int | None = Non
 
 def _jobs(data: Any, max_jobs: int | None, gate: Callable[..., bool] | None) -> list[FetchedJob]:
     """The feed's payload `data` as fetch_remotive's job dicts."""
-    entries = (data.get("jobs") or []) if isinstance(data, dict) else []
+    entries: list[Any] = (data.get("jobs") or []) if isinstance(data, dict) else []
     if max_jobs is not None:
         entries = entries[:max_jobs]
 

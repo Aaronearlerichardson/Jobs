@@ -35,7 +35,8 @@ BUSY_TIMEOUT_S = 30.0
 # A module declares one with @sql_function beside the Python rule it wraps,
 # so a rule lives in one place whether a row loop or a query applies it, and
 # connect() installs every one on each new connection.
-type SqlFn = Callable[..., str | bytes | int | float | None]
+type SqlScalar = str | int | float | None
+type SqlFn = Callable[..., SqlScalar | bytes]
 SQL_FUNCTIONS: dict[str, tuple[int, SqlFn]] = {}
 
 

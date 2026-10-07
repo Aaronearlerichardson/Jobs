@@ -920,7 +920,7 @@ def verify_model() -> str:
 # --------------------------------------------------------------------------- #
 
 # name: (axes dict, failed gates, hand_score, note)
-_ANCHORS = {
+_ANCHORS: dict[str, tuple[dict[str, float], list[str], float, str]] = {
     "Sphere DS Biomedical Signal":  (dict(domain=.85, function=.85, stack=.60, seniority=1.0), [], .70, "remote biosignal ML, his lane"),
     "Zyphra Research Eng BCI":      (dict(domain=.95, function=.80, stack=.55, seniority=.90), [], .66, "EEG+PyTorch; gen-model/multinode gap"),
     "Bandwidth AI Eng R&D":         (dict(domain=.30, function=.78, stack=.68, seniority=1.0), [], .60, "R&D generalist; non-health domain"),

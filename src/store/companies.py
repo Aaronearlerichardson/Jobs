@@ -30,7 +30,7 @@ from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Annotated, Any, Literal, NamedTuple, Unpack, cast
+from typing import Annotated, Literal, NamedTuple, TypedDict, Unpack, cast
 
 from pydantic import AfterValidator, BeforeValidator, ConfigDict, TypeAdapter
 
@@ -153,7 +153,7 @@ def upsert_company(conn: sqlite3.Connection, company: CompanyIn) -> int | None:
 
 def _write_company(conn: sqlite3.Connection, company: CompanyIn,
                    employer_id: int | None = None, *,
-                   old: Mapping[str, Any] | None | EllipsisType = ...) -> int | None:
+                   old: Mapping[str, object] | None | EllipsisType = ...) -> int | None:
     """upsert_company's write: insert or update by name, whatever the row
     already holds. `employer_id` places a NEW row under that employer (the
     insert trigger gives it one of its own otherwise).
@@ -163,7 +163,7 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     verdict is set_board_mission's, never an upsert's. The two legacy tag
     tokens of the last two are converted here, once, and never stored. `old` is
     the row already named so (None: there is none); left out, it is looked up."""
-    c: dict[str, Any] = {**company, "last_probed": company.get("last_probed")
+    c: dict[str, object] = {**company, "last_probed": company.get("last_probed")
                          or datetime.now().isoformat()}
     c.setdefault("created_at", datetime.now().isoformat())
     # Drop None-valued keys: an upsert must never erase an existing value
@@ -172,10 +172,11 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     c = {k: v for k, v in c.items() if v is not None}
     facts = {k: c.pop(k) for k in MISSION_COLS if k in c}
     review, watch = c.pop("review", None), c.pop("watch", None)
-    named = tags.parse(c.get("tags"))
+    # TODO(any-zero): `c` mixes column types; tags.parse takes str | None.
+    named = tags.parse(cast("str | None", c.get("tags")))
     prior = (conn.execute("SELECT tags FROM companies WHERE name=?", (c["name"],)).fetchone()
              if isinstance(old, EllipsisType) else old)
-    held = named | (tags.parse(prior["tags"]) if prior else set())
+    held = named | (tags.parse(cast("str | None", prior["tags"])) if prior else set())
     if scope := held - tags.FACT_TOKENS:
         c["tags"] = tags.join(scope)
     else:
@@ -226,7 +227,7 @@ def _employer_id(conn: sqlite3.Connection, company: CompanyIn,
     key = _name_key(company["name"])
     found = _company_index(conn)["employer_ids"].get(key) if key else None
     if found:
-        return cast(int, found)
+        return found
     host_row = company_by_host(conn, company.get("careers_url"))
     return host_row["employer_id"] if host_row else None
 
@@ -335,7 +336,7 @@ def _write_sibling(conn: sqlite3.Connection, company: CompanyIn, employer_id: in
     while conn.execute("SELECT 1 FROM companies WHERE name=?", (name,)).fetchone():
         n += 1
         name = f"{base} ({label} {n})"
-    row: dict[str, Any] = {k: v for k, v in company.items() if v is not None}
+    row: dict[str, object] = {k: v for k, v in company.items() if v is not None}
     if has_verdict:
         for k in MISSION_COLS:
             row.pop(k, None)
@@ -619,7 +620,34 @@ def _board_columns(ats: str) -> tuple[HandleColumn, ...]:
                 "columns", config.DEFAULT_HANDLE_COLUMNS))
 
 
-def board_key(r: BoardCoords) -> tuple[Any, ...] | None:
+type BoardKey = tuple[str, *tuple[object, ...]]
+
+
+class _CompanyIndex(TypedDict):
+    """What _build_company_index returns, key by key."""
+    rows: list[CompanyRow]
+    by_board: defaultdict[BoardKey, list[CompanyRow]]
+    by_host: defaultdict[str, list[tuple[CompanyRow, str]]]
+    by_domain: defaultdict[str, list[tuple[CompanyRow, str]]]
+    employer_ids: dict[str, int]
+
+
+class _Duplicate(TypedDict):
+    """One dedup_companies window row: `shared` columns plus the ranking."""
+    id: int
+    name: str
+    tags: str | None
+    active: int | None
+    mission_tier: str | None
+    review: str | None
+    watch: int | None
+    board: str
+    g: int
+    rn: int
+    any_active: int
+
+
+def board_key(r: BoardCoords) -> BoardKey | None:
     """The identity of a company row's BOARD, independent of its name:
     (ats, *the values of the columns its spec's handle names), a
     careers_url lowercased with no trailing "/". None when the row has no
@@ -672,11 +700,11 @@ def _domain(host: str) -> str:
 
 
 #: This run's company index per connection: conn -> (store stamp, index).
-_INDEXES: Callable[[], dict[sqlite3.Connection, tuple[tuple[int, int], dict[str, Any]]]] = (
-    per_run(dict))
+_Memo = dict[sqlite3.Connection, tuple[tuple[int, int], _CompanyIndex]]
+_INDEXES: Callable[[], _Memo] = per_run(dict)
 
 
-def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
+def _company_index(conn: sqlite3.Connection) -> _CompanyIndex:
     """The roster scanned once for the identity lookups (company_by_host,
     _employer_id, dedup_companies), held per connection for the run. A write
     through this connection (`total_changes`) or another (`PRAGMA
@@ -710,6 +738,7 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
     {'a': 1, 'b': 2}
     """
     stamp = (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+    memo: _Memo
     try:
         memo = _INDEXES()
     except RuntimeError:                  # no run (a doctest, a script): nothing holds it
@@ -723,11 +752,11 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
     return idx
 
 
-def _build_company_index(conn: sqlite3.Connection) -> dict[str, Any]:
+def _build_company_index(conn: sqlite3.Connection) -> _CompanyIndex:
     """One scan of the roster for _company_index."""
     rows = [as_company(r) for r in
             conn.execute("SELECT * FROM companies_effective ORDER BY id").fetchall()]
-    by_board: defaultdict[tuple[Any, ...], list[CompanyRow]] = defaultdict(list)
+    by_board: defaultdict[BoardKey, list[CompanyRow]] = defaultdict(list)
     by_host: defaultdict[str, list[tuple[CompanyRow, str]]] = defaultdict(list)
     by_domain: defaultdict[str, list[tuple[CompanyRow, str]]] = defaultdict(list)
     for c in rows:
@@ -801,7 +830,7 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
     shared = [[c["id"], json.dumps(key)]
               for key, rows in _company_index(conn)["by_board"].items() if len(rows) > 1
               for c in rows]
-    groups: dict[int, list[dict[str, Any]]] = {}
+    groups: dict[int, list[_Duplicate]] = {}
     for r in conn.execute("""
             WITH shared AS (
               SELECT c.id, c.name, c.tags, c.active, c.mission_tier, c.review, c.watch, k.board
@@ -819,9 +848,9 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
                    ON n.company_id = s.id
             WINDOW same AS (PARTITION BY s.board)
             ORDER BY g, rn""", (json.dumps(shared),)):
-        groups.setdefault(r["g"], []).append(dict(r))
+        groups.setdefault(r["g"], []).append(cast(_Duplicate, dict(r)))
 
-    def carry_over(keep: dict[str, Any], losers: list[dict[str, Any]]) -> None:
+    def carry_over(keep: _Duplicate, losers: list[_Duplicate]) -> None:
         merged = {t for m in [keep, *losers] for t in tags.parse(m.get("tags"))}
         # Rename as well as re-point: jobs.company_name is the grouping key
         # (ranked_jobs, the digest).
@@ -895,7 +924,7 @@ def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     return len(rows)
 
 
-def _unwritten(row: Any) -> Any:
+def _unwritten(row: object) -> object:
     """The row without the columns an upsert never writes (id, the crawl
     schedule); anything else it holds is left for validation to judge."""
     skip = CompanyRow.__annotations__.keys() - CompanyIn.__annotations__.keys()
@@ -992,7 +1021,7 @@ def get_companies(conn: sqlite3.Connection, active_only: bool = True,
     tier(s) and scope `tag`."""
     q = "SELECT * FROM companies_effective"
     conds: list[str] = []
-    args: list[Any] = []
+    args: list[str] = []
     if active_only:
         conds.append("active = 1")
     if missions:
@@ -1086,7 +1115,7 @@ def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     now = datetime.now()
     stamp = now.isoformat()
     streak = row["empty_streak"] or 0
-    sets: dict[str, Any] = {"last_crawled_at": stamp}
+    sets: dict[str, object] = {"last_crawled_at": stamp}
 
     open_on_file = conn.execute(
         "SELECT 1 FROM jobs WHERE company_id = ? AND COALESCE(status, 'open') = 'open' "
@@ -1305,7 +1334,7 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     fetch_error = "fetch-error:harvest"
     now_dt = now or datetime.now()
     stamp = now_dt.isoformat()
-    sets: dict[str, Any] = {"last_harvested_at": stamp}
+    sets: dict[str, object] = {"last_harvested_at": stamp}
     if not soft_fail:
         sets["total_job_count"] = n_jobs
         if n_jobs:
@@ -1316,7 +1345,7 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
                        "WHERE id=?", (company_id,)).fetchone()
     cur_reason = row["miss_reason"] if row else None
     promoted = None
-    miss: dict[str, Any] = {}
+    miss: dict[str, object] = {}
     if soft_fail:
         if cur_reason is None:
             miss = {"miss_reason": fetch_error, "miss_at": stamp}

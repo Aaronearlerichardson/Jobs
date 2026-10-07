@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urljoin
 
 from src import config
-from src.net.util import (first, host_of, jsonld_scripts, links, node_text, parse_markup,
+from src.net.util import (JSON, first, host_of, jsonld_scripts, links, node_text, parse_markup,
                           stable_id, strip_html, xpath)
 from src.rows import FetchedJob
 
@@ -344,7 +344,7 @@ def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
             org = jp.get("hiringOrganization") or {}
             loc = jp.get("jobLocation") or {}
             if isinstance(loc, list):
-                loc = loc[0] if loc else {}
+                loc = loc[0] if loc else dict[str, JSON]()
             addr = (loc.get("address") or {}) if isinstance(loc, dict) else {}
             location = ", ".join(x for x in (addr.get("addressLocality"),
                                              addr.get("addressRegion")) if x)
@@ -544,6 +544,7 @@ def parse_page(url: str, html: str) -> tuple[list[FetchedJob], str]:
 
     by_id: dict[str, FetchedJob] = {}
     for layer in layers:
+        found: list[FetchedJob]
         try:
             found = layer(tree, url)
         except Exception as e:

@@ -19,13 +19,13 @@ import re
 import sqlite3
 from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import TypedDict, cast
 
 from src import config
 from src.match.locality import LocationRE
 from src.net.util import clean_url
 from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob
-from .schema import (_commit, apply_update, as_job, batch,  # noqa: F401 (doctests)
+from .schema import (SqlScalar, _commit, apply_update, as_job, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups, sql, sql_function)
 
 
@@ -98,9 +98,10 @@ def join_tracks(tracks: Iterable[str | None]) -> str | None:
     return ",".join(sorted(t for t in tracks if t)) or None
 
 
+
 def open_in_track_clause(track: str | None = None, *, alias: str = "",
                          include_closed: bool = False,
-                         include_dispositioned: bool = False) -> tuple[list[str], list[Any]]:
+                         include_dispositioned: bool = False) -> tuple[list[str], list[SqlScalar]]:
     """The baseline "a job that could still surface" filter, as
     (conditions, args) for any query over the jobs table.
 
@@ -134,7 +135,7 @@ def open_in_track_clause(track: str | None = None, *, alias: str = "",
     """
     p = f"{alias}." if alias else ""
     conds: list[str] = []
-    args: list[Any] = []
+    args: list[SqlScalar] = []
     if track:
         conds.append(f"(',' || COALESCE({p}track,'') || ',') LIKE ?")
         args.append(f"%,{track},%")
@@ -226,7 +227,7 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
          "JOIN companies c ON j.company_id = c.id "
          "WHERE j.triage_status IS NULL AND j.dup_of IS NULL "
          "AND COALESCE(j.track,'') = ''")
-    args: list[Any] = []
+    args: list[int] = []
     if company_id is not None:
         q += " AND j.company_id = ?"
         args.append(company_id)
@@ -255,7 +256,7 @@ def record_triage(conn: sqlite3.Connection, job_id: str, status: str, detail: st
     ...  r["description"], r["resume_fit_score"])
     ('ok', 'y=ok', ['x', 'y'], 'body', 0.5)
     """
-    sets: dict[str, Any] = {"triage_status": status, "triage_detail": detail,
+    sets: dict[str, object] = {"triage_status": status, "triage_detail": detail,
                             "triaged_at": (now or datetime.now()).isoformat()}
     if tracks:
         prev = conn.execute("SELECT track FROM jobs WHERE job_id=?",
@@ -382,7 +383,7 @@ def triage_counts(conn: sqlite3.Connection, days: float | None = None) -> dict[s
     """
     q = ("SELECT triage_status AS s, COUNT(*) AS n FROM jobs "
          "WHERE triage_status IS NOT NULL")
-    args: list[Any] = []
+    args: list[str] = []
     if days:
         q += " AND triaged_at >= ?"
         args.append((datetime.now() - timedelta(days=days)).isoformat())
@@ -628,7 +629,7 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
     # Posting dates piggyback on the sync: every matched row gets its NULL
     # posted_at backfilled from the live snapshot, so the whole store gains
     # real posting dates over normal crawls with zero extra HTTP.
-    posted: dict[str, Any] = {}
+    posted: dict[str, str] = {}
     for j in fetched_jobs:
         p = j.get("posted_at")
         if not p:
@@ -689,7 +690,7 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
     return (n_reopened, n_closed)
 
 
-def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> list[tuple[Any, ...]]:
+def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> list[tuple[str, int]]:
     """Close the open postings of every board the harvester has stopped
     reading (harvestable_companies that config.offmission_inactive calls
     "stopped"), all at one `now` (default: the clock), except the ones
@@ -768,7 +769,7 @@ def backfill_axis_columns(conn: sqlite3.Connection) -> int:
     return n
 
 
-def remote_admitted(row: Mapping[str, Any], remote_mission_floor: float | None) -> bool:
+def remote_admitted(row: Mapping[str, object], remote_mission_floor: float | None) -> bool:
     """Whether an out-of-area REMOTE `row` (a ranked_jobs row) is still
     worth showing in a location-scoped view.
 
@@ -813,9 +814,10 @@ def remote_admitted(row: Mapping[str, Any], remote_mission_floor: float | None) 
         return True
     if remote_mission_floor is None:
         return False
-    if config.is_multi_division(row.get("company_name")):
+    # TODO(any-zero): ranked_jobs rows are untyped here; narrow with a RankedJob key set.
+    if config.is_multi_division(cast("str | None", row.get("company_name"))):
         return False
-    mission = row.get("mission_score")
+    mission = cast("float | None", row.get("mission_score"))
     return mission is not None and mission >= remote_mission_floor
 
 
@@ -1036,7 +1038,7 @@ _SURVIVOR_ORDER = """disposition IS NULL, COALESCE(NULLIF(status, ''), 'open') !
                      COALESCE(first_seen, ''), id"""
 
 
-def same_posting(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+def same_posting(a: Mapping[str, object], b: Mapping[str, object]) -> bool:
     """Whether two job rows name one posting: the same URL modulo scheme,
     query and fragment (_norm_url), and the same normalized title.
 
@@ -1058,9 +1060,11 @@ def _same_posting_cols(url_a: str | None, title_a: str | None,
     return same_posting({"url": url_a, "title": title_a}, {"url": url_b, "title": title_b})
 
 
-def _posting_key(r: Mapping[str, Any]) -> tuple[str, str]:
+def _posting_key(r: Mapping[str, object]) -> tuple[str, str]:
     """(_norm_url, _norm_title) of a job row: its identity across id schemes."""
-    return _norm_url(r.get("url")), _norm_title(r.get("title"))
+    # TODO(any-zero): url and title are str | None on every caller's row.
+    return (_norm_url(cast("str | None", r.get("url"))),
+            _norm_title(cast("str | None", r.get("title"))))
 
 
 def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) -> int:
@@ -1089,7 +1093,7 @@ def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) 
     keep, losers = rows[0], rows[1:]
     if not all(same_posting(keep, l) for l in losers):
         raise ValueError(f"job rows {sorted(row_ids)} are not one posting")
-    fill: dict[str, Any] = {}
+    fill: dict[str, object] = {}
     for col, mine in keep.items():
         if col in ("id", "job_id", "closed_at"):
             continue
@@ -1107,6 +1111,14 @@ def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) 
     conn.executemany("DELETE FROM jobs WHERE id=?", [(l["id"],) for l in losers])
     apply_update(conn, "jobs", "id", keep["id"], {**fill, "job_id": job_id})
     return cast(int, keep["id"])
+
+
+class _Twin(TypedDict):
+    """One dedup_jobs row: a member of a same-posting group, ranked."""
+    job_id: str
+    title: str | None
+    g: int
+    rn: int
 
 
 def dedup_jobs(conn: sqlite3.Connection) -> int:
@@ -1138,7 +1150,7 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
     # Group = (company, posting key, requisition tail): the tail is the id
     # after its last "_" (the whole id when none). Members come back
     # best-first (_SURVIVOR_ORDER), groups in first-row order.
-    groups: dict[int, list[dict[str, Any]]] = {}
+    groups: dict[int, list[_Twin]] = {}
     for r in conn.execute(f"""
             WITH keyed AS (
               SELECT id, job_id, title, disposition, status, first_seen, company_id,
@@ -1153,7 +1165,7 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
                      ordered AS (same ORDER BY {_SURVIVOR_ORDER})
             )
             SELECT job_id, title, g, rn FROM ranked WHERE n > 1 ORDER BY g, rn"""):
-        groups.setdefault(r["g"], []).append(dict(r))
+        groups.setdefault(r["g"], []).append(cast(_Twin, dict(r)))
 
     return dedup_groups(
         conn, "jobs", "job_id", groups, rank=lambda r: r["rn"],

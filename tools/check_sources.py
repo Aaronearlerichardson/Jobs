@@ -544,7 +544,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
 async def _probe_all(wanted: list[str], args: argparse.Namespace) -> list[dict[str, Any]]:
     """Every wanted section's results, each printed as it lands, then the
     roster's when asked for."""
-    all_results = []
+    all_results: list[dict[str, Any]] = []
     for key in wanted:
         title, fn = SECTIONS[key]
         try:

@@ -229,7 +229,7 @@ def sql_piece(expr: str) -> str:
 @scan()
 def sql(repo: Repo) -> Iterator[str]:
     """Pieces interpolated into SQL text, by how each is made; a variable wants a human read."""
-    kinds, variables = Counter[str](), []
+    kinds, variables = Counter[str](), list[str]()
     for rel, tree in repo.trees("src"):
         for n in ast.walk(tree):
             if not (isinstance(n, ast.Call) and name_of(n) in SQL_CALLS and n.args):

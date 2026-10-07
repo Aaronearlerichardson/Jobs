@@ -126,13 +126,13 @@ def elements(dec: HtmlDecoder, tree: etree._Element, parts: dict[str, str],
     >>> elements(dec, parse_markup(page), {"slug": "acme"}, "https://x.test/acme")
     [{'text': 'Data Engineer', 'raw': 'Data Engineer', 'href': '/acme/job/1', 'url': 'https://x.test/acme/job/1', 'context': 'Data Engineer Durham, NC', 'loc': 'Durham, NC'}]
     """
-    found = []
+    found: list[etree._Element] = []
     for sel in dec.select:
         found = xpath(css(fields.fmt(sel, parts.get)))(tree)
         if found:
             break
     base = fields.fmt(dec.base, parts.get) if dec.base else url
-    out = []
+    out: list[dict[str, JSON]] = []
     for el in found:
         href = el.get("href") or ""
         e: dict[str, JSON] = {"text": node_text(el), "raw": node_text(el, " ", strip=False),
@@ -170,7 +170,8 @@ def _context(el: etree._Element,
     (['Research', 'Data Engineer', 'Durham, NC'], 'li')
     """
     if how == "lines":
-        node, lines = el.getparent(), []
+        node = el.getparent()
+        lines: list[str] = []
         for _ in range(8):
             if node is None:
                 break

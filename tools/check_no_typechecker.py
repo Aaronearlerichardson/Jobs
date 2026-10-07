@@ -7,6 +7,8 @@ charset_normalizer ship legitimate *__mypyc runtime modules, while a type
 checker's own hash-named blob is attributed to its distribution.
 """
 
+from __future__ import annotations
+
 import sys
 import xml.etree.ElementTree as ET
 

@@ -68,7 +68,10 @@ def pick_domain(name: str, suggestions: Iterable[tuple[str | None, str | None]]
     want = _words(name)
     found = [d for label, dom in suggestions
              if want and _words(label) == want and (d := _bare(dom))]
-    return min(found, key=lambda d: not d.endswith(generic), default=None)
+
+    def specific_first(d: str) -> bool:
+        return not d.endswith(generic)
+    return min(found, key=specific_first, default=None)
 
 
 async def _suggested(name: str) -> tuple[str | None, bool]:
@@ -105,7 +108,7 @@ async def _wikidata(name: str) -> tuple[str | None, bool]:
     if not isinstance(found, dict):
         return None, False
     search = found.get("search")
-    labels = {str(e["id"]): _str(e.get("label")) for e in search
+    labels: dict[str, str | None] = {str(e["id"]): _str(e.get("label")) for e in search
               if isinstance(e, dict) and e.get("id")} if isinstance(search, list) else {}
     if not any(_words(lbl) == _words(name) for lbl in labels.values()):
         return None, True

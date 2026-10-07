@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from functools import partial
 from typing import Any
 
@@ -33,7 +33,7 @@ from src.match.locality import NC_RE
 from src.match.names import SLUG_NAME_SOURCE
 from src.net import ddg
 from src.net.parallel import fan_out
-from src.rows import BoardHit
+from src.rows import BoardHit, FetchedJob
 
 
 def _or_group(terms: Sequence[str], n: int = 8) -> str:
@@ -196,7 +196,7 @@ async def _live_board(cand: BoardHit, require_live: bool) -> BoardHit | None:
         try:
             jobs = await company_fetch.fetch_company(comp, NC_RE, validate=True)
         except Exception:
-            jobs = []
+            jobs = list[FetchedJob]()
         total = nc = len(jobs)
         # Add even with 0 current NC openings IF we can confirm an NC HQ/office
         # (so a daily run catches their next NC posting) -- but not otherwise,
@@ -245,8 +245,8 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
             if store.plan_board(conn, coords.from_hit(c, name=c["name"])).action != "update"])
         skipped = {"already tracked": len(named) - len(todo), "no live local posting": 0,
                    "same board under another name": 0, "over the limit": 0}
-        origin = ((lambda c: company_fetch.board_origin(coords.from_hit(c)))
-                  if require_live else None)
+        origin: Callable[[BoardHit], str | None] | None = (
+            (lambda c: company_fetch.board_origin(coords.from_hit(c))) if require_live else None)
         added = 0
         while todo and (limit is None or added < limit):
             size = 30 if limit is None else min(30, 2 * (limit - added))

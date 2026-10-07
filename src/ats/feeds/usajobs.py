@@ -39,7 +39,7 @@ from typing import Any
 from src import config
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
-from src.net.util import norm_posted_date, strip_html
+from src.net.util import JSON, norm_posted_date, strip_html
 from src.rows import FetchedJob
 
 
@@ -205,7 +205,7 @@ def _parse_item(item: Any) -> FetchedJob | None:
     user_area = descriptor.get("UserArea")
     details = user_area.get("Details") if isinstance(user_area, dict) else None
     if not isinstance(details, dict):
-        details = {}
+        details = dict[str, JSON]()
 
     body = _describe(details, descriptor)
     department = strip_html(descriptor.get("DepartmentName"))
@@ -327,7 +327,8 @@ async def fetch_usajobs(keyword: str | None = None, location: str | None = None,
             except (TypeError, ValueError):
                 total = 0
 
-        for job in await asyncio.to_thread(list, map(_parse_item, items)):
+        parsed: list[FetchedJob | None] = await asyncio.to_thread(lambda: [_parse_item(i) for i in items])
+        for job in parsed:
             if not job or job["id"] in seen:
                 continue
             seen.add(job["id"])

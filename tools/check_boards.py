@@ -83,7 +83,8 @@ async def check_board(board: Board) -> dict[str, Any]:
             note = "the board request failed"
         # Id-less rows are the shell's own links, not postings: no fill to judge.
         posts = [r for r in rows or [] if r["id"] is not None]
-        misses = fill_misses(posts, {k: v for k, v in canary.min_fill.items()}) if ok else []
+        misses: list[str] = (fill_misses(posts, {k: v for k, v in canary.min_fill.items()})
+                             if ok else [])
         if ok and n >= floor and not misses:
             status, detail = "ok", ""
         elif ok and n >= floor:
