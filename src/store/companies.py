@@ -425,12 +425,31 @@ def record_miss(conn: sqlite3.Connection, name: str, reason: str, /,
     False
     >>> [c["name"] for c in get_companies(conn, active_only=True)]
     ['Locus']
+
+    A transient failure (`fetch-error:*`) is no verdict on the board: it
+    keeps a recorded dead or missing board's reason, restamping only when:
+
+    >>> record_miss(conn, "Chiesi USA", "fetch-error:stalled")
+    True
+    >>> [c["miss_reason"] for c in get_companies(conn, active_only=False)
+    ...  if c["name"] == "Chiesi USA"]
+    ['board-dead']
+
+    Notes:
+        The 2026-10-07 reresolve stalled on every name and stamped 50
+        board-dead rows `fetch-error:stalled`, which the harvester reads
+        as a live board: it pulled their dead slugs again that night.
     """
-    row = conn.execute("SELECT active FROM companies_effective WHERE name=?",
+    row = conn.execute("SELECT active, miss_reason FROM companies_effective WHERE name=?",
                        (name,)).fetchone()
     if row and row["active"]:
         return False
     now = datetime.now().isoformat()
+    if (row and reason.startswith("fetch-error")
+            and (row["miss_reason"] or "").startswith(("board-dead", "no-board-found"))):
+        conn.execute("UPDATE companies SET miss_at=? WHERE name=?", (now, name))
+        _commit(conn)
+        return True
     upsert_company(conn, {**fields, "name": name, "active": 0,
                           "miss_reason": reason, "miss_at": now})
     # upsert_company clears the miss columns whenever an `ats` is written (a

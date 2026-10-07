@@ -28,6 +28,7 @@ from src.match.names import domain_tokens, name_key, risky_domain_tokens
 from src.net import http
 from src.net.http import HEADERS
 from src.net.robots import FETCH_ERRORS
+from src.net.util import host_of
 from src.rows import FetchedJob
 from .fetchpool import Page
 
@@ -364,8 +365,9 @@ async def nc_hq_signal(name: str, careers_url: str = "",
                  f"https://www.{tok}.com/locations", f"https://www.{tok}.com/",
                  f"https://www.{tok}.com/company"]
     seen = set()
+    unreachable: set[str] = set()       # hosts whose connection failed: their other paths would too
     for u in urls[:8]:
-        if u in seen:
+        if u in seen or host_of(u) in unreachable:
             continue
         seen.add(u)
         try:
@@ -376,4 +378,6 @@ async def nc_hq_signal(name: str, careers_url: str = "",
                 return True
         except FETCH_ERRORS as e:
             _log.debug("hq probe %s: %s", u, type(e).__name__)
+            if isinstance(e, http.Unreachable):
+                unreachable.add(host_of(u))
     return False

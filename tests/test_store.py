@@ -725,6 +725,19 @@ class TestClosedLifecycle:
         store.sync_job_statuses(db, company, snap, track="local-tech")
         assert status_of("linkedin_aaa")["status"] == "closed"
 
+    def test_stale_alias_of_a_stored_posting_closes(self, db, company, add_job,
+                                                    status_of):
+        # phenom_R-1 (a retired id scheme, retitled since) shares its URL
+        # with the live gh_acme_2 row: the URL no longer shields it.
+        snap = self._seed(add_job)
+        add_job("phenom_R-1", "ML Eng", 0.5, url="https://acme.io/gh_acme_2")
+        db.execute("UPDATE jobs SET first_seen='2020-01-01T00:00:00', "
+                   "last_seen='2020-01-01T00:00:00' WHERE job_id='phenom_R-1'")
+        db.commit()
+        store.sync_job_statuses(db, company, snap, track="local-tech")
+        assert status_of("phenom_R-1")["status"] == "closed"
+        assert status_of("gh_acme_2")["status"] == "open"
+
     def test_reappearance_reopens(self, db, company, add_job, status_of):
         snap = self._seed(add_job)
         store.sync_job_statuses(db, company, snap, track="local-tech")

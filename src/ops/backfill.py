@@ -84,15 +84,14 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
     """One-shot: fill in full JD text for stored jobs missing it (any
     company-linked row whose description is shorter than min_len chars —
     the default matches src.claude.fit.MIN_DESC_CHARS), via each company's
-    own ATS board. Batched per company so a board with several stale rows is
-    fetched once. Safe to re-run: a row that failed within the last
+    own ATS board: its URL first, the board pulled at most once per company
+    for the rows that leave no body. Safe to re-run: a row that failed within the last
     `retry_days` days is skipped (its desc_checked_at stamp), so reruns
     don't re-fetch every board to fail on the same vanished postings
     (retry_days=0 retries everything).
 
-    Companies are fetched CONCURRENTLY (`max_workers`). A row the board
-    pull does not cover is hydrated through its company's engine
-    (`company_fetch.hydrate_description`).
+    Companies are fetched CONCURRENTLY (`max_workers`); each row is
+    hydrated through its company's engine (`company_fetch.hydrate_description`).
 
     Notes:
         This function once advertised max_workers=8 and walked one company
@@ -135,24 +134,31 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
             await db.batch(_save_bodies, [(r["job_id"], None) for r in boardless])
 
         async def _bodies(group: tuple[CompanyRow, list[StaleRow]]) -> list[tuple[str, str | None]]:
-            """One company's fetching: the batched board pull for the common
-            case (one fetch per company), then per-job-URL hydration for the
-            rows that pull didn't cover. Boards we can't pull simply yield
-            no title matches, so every row falls through to hydration either
-            way. Returns [(job_id, description_or_None)] to write."""
+            """One company's fetching: each row hydrated from its own URL,
+            the board pulled (once) only for a row that left no body, and
+            matched by title. Returns [(job_id, description_or_None)] to
+            write.
+
+            Notes:
+                The board went first until 2026-10-07: a Workday listing
+                has no bodies, so its 146-page walk (Thermo Fisher) or
+                85 pages for one Amgen row bought a title match whose
+                body came from the same detail read the URL gives.
+            """
             company, rs = group
-            index = await board_index(company)
+            index: dict[str, FetchedJob] | None = None
             out: list[tuple[str, str | None]] = []
             for r in rs:
-                match = await board_match(index, r["title"])
-                desc = match.get("description") if match else None
-                if not desc and r.get("url"):
-                    # Board didn't cover this row — hydrate from the job's own
-                    # detail page (JSON-LD / career-site markup).
+                desc = None
+                if r.get("url"):
                     stub: FetchedJob = {"title": r["title"] or "", "url": r["url"],
-                            "ats": company.get("ats"), "description": ""}
+                                        "ats": company.get("ats"), "description": ""}
                     await company_fetch.hydrate_description(stub, company)
                     desc = stub.get("description")
+                if not desc:
+                    index = await board_index(company) if index is None else index
+                    match = await board_match(index, r["title"])
+                    desc = match.get("description") if match else None
                 out.append((r["job_id"], desc))
             return out
 

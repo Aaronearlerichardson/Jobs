@@ -652,11 +652,18 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
     rows = conn.execute(
         "SELECT job_id, url, title, track, status, first_seen, last_seen "
         "FROM jobs WHERE company_id=?", (company_id,)).fetchall()
+    # An external row whose URL names a posting stored as its own row is
+    # that row's stale alias (a retired id scheme, the posting retitled
+    # since, so upsert_job's re-key passed it by): not matched by the URL.
+    stored = {r["job_id"] for r in rows}
+    twin = {u: j["id"] for j in fetched_jobs
+            if j.get("id") in stored and (u := _norm_url(j.get("url")))}
     for r in rows:
         board_native = r["job_id"].startswith(prefixes)
+        u = _norm_url(r["url"])
         present = (r["job_id"] in ids
                    or (not board_native
-                       and (_norm_url(r["url"]) in urls
+                       and (u in urls and twin.get(u, r["job_id"]) == r["job_id"]
                             or _norm_title(r["title"]) in titles)))
         if present:
             if (r["status"] or "open") != "open":
