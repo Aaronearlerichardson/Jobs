@@ -206,8 +206,8 @@ class TestSchema:
         conn = store.connect(path)
         view = next(s for s in _statements((MIGRATIONS_DIR / "0006_view_own_tags.sql").read_text())
                     if "CREATE VIEW companies_effective" in s)
-        for stmt in ("DROP VIEW companies_effective", "ALTER TABLE companies DROP COLUMN handle",
-                     view, "PRAGMA user_version = 7"):
+        for stmt in ("DROP VIEW companies_effective", "DROP INDEX ix_companies_board_handle",
+                     "ALTER TABLE companies DROP COLUMN handle", view, "PRAGMA user_version = 7"):
             conn.execute(stmt)
         conn.executemany("INSERT INTO companies (name, ats, slug, wd_tenant, wd_pod, wd_site) "
                          "VALUES (?, ?, ?, ?, ?, ?)",

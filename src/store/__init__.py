@@ -40,7 +40,7 @@ from .companies import (  # noqa: F401
     company_by_host, company_id_by_name, crawlable_companies,
     deactivate_company, dedup_companies, export_companies, get_companies,
     HARVEST_DEAD_AFTER_DAYS, get_company, harvestable_companies,
-    import_companies, mark_harvested,
+    import_companies, mark_harvest_attempted, mark_harvested,
     miss_counts, miss_family, reactivate_company, recent_miss_names,
     record_crawl_outcome, record_miss, roster_growth, set_company_tag,
     upsert_company,

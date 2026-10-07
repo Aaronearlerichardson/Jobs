@@ -660,6 +660,11 @@ async def test_run_budget_cancels_the_pass(tmp_path, capsys):
     assert sorted(pulled) == ["Quick", "Wedged"]
     assert (s["ok"], s["abandoned"]) == (1, 1)
     assert "Wedged (greenhouse): run out of time - abandoned" in capsys.readouterr().out
+    # The board the budget never started leads its host's walk next pass.
+    pulled.clear()
+    await harvest.run(db_path=db, board_fn=make_board_fn(before=pull),
+                      max_hours=0.3 / 3600, triage=False)
+    assert pulled.index("Queued") < pulled.index("Wedged")
 
 
 async def test_a_silent_board_is_cut_off_and_closes_nothing(tmp_path, serve, monkeypatch,

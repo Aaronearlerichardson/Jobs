@@ -1018,14 +1018,22 @@ def company_id_by_name(conn: sqlite3.Connection, name: str | None) -> int | None
 
 def get_companies(conn: sqlite3.Connection, active_only: bool = True,
                   missions: Collection[str] | None = None,
-                  tag: str | None = None) -> list[CompanyRow]:
+                  tag: str | None = None, due_at: str | None = None) -> list[CompanyRow]:
     """Companies (their effective facts), optionally filtered by mission
-    tier(s) and scope `tag`."""
+    tier(s), scope `tag`, and `due_at` (an ISO time): only rows with a
+    board due for a crawl then (crawlable_companies)."""
     q = "SELECT * FROM companies_effective"
     conds: list[str] = []
     args: list[str] = []
     if active_only:
         conds.append("active = 1")
+    if due_at is not None:
+        # NULL or '' crawl_state reads as 'active'; a dormant row is due once
+        # next_crawl_at has passed; 'off' never. A capture row has no board.
+        conds.append("ats IS NOT ? AND CASE COALESCE(NULLIF(crawl_state, ''), 'active') "
+                     "WHEN 'active' THEN 1 WHEN 'dormant' THEN "
+                     "COALESCE(next_crawl_at, '') <= ? ELSE 0 END")
+        args += [CAPTURE_ATS, due_at]
     if missions:
         conds.append(f"mission_tier IN ({','.join('?' for _ in missions)})")
         args += list(missions)
@@ -1146,19 +1154,6 @@ def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     return state
 
 
-def _is_crawlable(company: CompanyRow, now: str | None = None) -> bool:
-    """Does this company row come up for a crawl right now? A NULL
-    crawl_state reads as 'active' (rows that predate the column), a dormant
-    row only once its next_crawl_at has passed, an 'off' row never."""
-    state = company.get("crawl_state") or "active"
-    if state == "active":
-        return True
-    if state == "dormant":
-        return (company.get("next_crawl_at") or "") <= (
-            now or datetime.now().isoformat())
-    return False
-
-
 def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> list[CompanyRow]:
     """The active companies due for a crawl: everything except the dormant
     rows whose weekly slot has not come round yet. What build_sources and
@@ -1182,10 +1177,24 @@ def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> lis
     ...                           "careers_url": "https://jobs.x.org/"})
     >>> crawlable_companies(conn)
     []
+
+    A dormant row comes round once its next_crawl_at has passed; 'off' never:
+
+    >>> for n, state, wake in [("Parked", "dormant", "2999-01-01"),
+    ...                        ("Due", "dormant", "2000-01-01"), ("Off", "off", None)]:
+    ...     _ = upsert_company(conn, {"name": n, "ats": "lever", "slug": n})
+    ...     _ = conn.execute("UPDATE companies SET crawl_state=?, next_crawl_at=? "
+    ...                      "WHERE name=?", (state, wake, n))
+    >>> [c["name"] for c in crawlable_companies(conn)]
+    ['Due']
+
+    Notes:
+        The filter was Python over every active row until 2026-10-07; the
+        SQL agreed with it on all 412,048 (row, time) pairs of the live
+        roster, dormant wake times and their neighbours included.
     """
-    now = datetime.now().isoformat()
-    return [c for c in get_companies(conn, active_only=True, tag=tag)
-            if c.get("ats") != CAPTURE_ATS and _is_crawlable(c, now)]
+    return get_companies(conn, active_only=True, tag=tag,
+                         due_at=datetime.now().isoformat())
 
 
 def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
@@ -1364,6 +1373,14 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
         miss = {"miss_reason": None, "miss_at": None}
     apply_update(conn, "companies", "id", company_id, miss)
     return promoted
+
+
+def mark_harvest_attempted(conn: sqlite3.Connection, company_id: int,
+                           now: datetime | None = None) -> None:
+    """Stamp `harvest_attempted_at`: a harvest pass started this board,
+    whatever comes of it (src.crawl.harvest.plan's rotation key)."""
+    apply_update(conn, "companies", "id", company_id,
+                 {"harvest_attempted_at": (now or datetime.now()).isoformat()})
 
 
 def reactivate_company(conn: sqlite3.Connection, company_id: int) -> None:

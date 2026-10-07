@@ -44,8 +44,9 @@ Wall clock is the only thing this trades away: the whole roster is on the
 order of 20,000 postings, and even the listings alone take a while at
 polite pacing (with --hydrate, every posting's detail GET on top of that
 is hours). The pull (`pull`) is one coroutine: one task per host walks
-that host's boards one at a time, largest first, and every host runs at
-once, so a board's host never sees two of the pass's boards at a time.
+that host's boards one at a time, least recently attempted first, and every
+host runs at once, so a board's host never sees two of the pass's boards at
+a time.
 Ctrl+C or the pass budget cancels it: committed boards stay, a board
 still being written rolls back, and no queued board starts.
 A board that makes no progress for pull's `stall_s` is cut off alone.
@@ -158,9 +159,11 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
 
     `only` restricts to a set of ATS names, `names` to company names
     (case-insensitive); boards harvested within `min_age_hours` are skipped
-    unless named explicitly. Largest boards first (their last known
-    total_job_count): each host walks its boards in this order, and its
-    longest walk is what the pass waits for.
+    unless named explicitly. Least recently ATTEMPTED first
+    (harvest_attempted_at, which pull stamps as each board starts; never
+    attempted first), then largest, then by name: each host walks its boards
+    in this order, so the boards a budget or `limit` left out lead the next
+    pass.
 
     A board config.offmission_inactive calls "deferred" (inactive, never
     mission-scored) waits the longer config.HARVEST_OFFMISSION_HOURS
@@ -247,6 +250,23 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
     >>> "Parked" in [c["name"] for c in plan(conn, min_age_hours=0, now=now)]
     True
 
+    A pass that fits k boards takes the k stalest, the next pass the next
+    k, so every board is attempted within ceil(n/k) passes:
+
+    >>> conn = store.connect(":memory:")
+    >>> for i, at in enumerate(["2026-09-05", None, "2026-09-01", "2026-09-03", None]):
+    ...     _ = store.upsert_company(conn, {"name": f"B{i}", "ats": "lever", "slug": f"b{i}"})
+    ...     _ = conn.execute("UPDATE companies SET harvest_attempted_at=? WHERE name=?",
+    ...                      (at, f"B{i}"))
+    >>> for p in range(3):
+    ...     batch = plan(conn, min_age_hours=0, limit=2, now=now)
+    ...     print([c["name"] for c in batch])
+    ...     for c in batch:
+    ...         store.mark_harvest_attempted(conn, c["id"], now + timedelta(hours=p))
+    ['B1', 'B4']
+    ['B2', 'B3']
+    ['B0', 'B1']
+
     Notes:
         The 2026-09-17 audit counted 289 off-mission inactive boards
         holding 51,134 stored jobs, against 288 active ones (any tier)
@@ -256,7 +276,9 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
 
         Until 2026-09-25 the cheap sweep platforms went first, then the
         smaller boards, for a thread pool that banked the most boards per
-        minute; per-host walks finish soonest largest first.
+        minute; then largest first until 2026-10-07, which left the same
+        small boards at the tail of every walk a budget cut short. A host's
+        walk is sequential, so its order never changes its length.
     """
     now = now or datetime.now()
     # The sentinel, per the docstring: only an unset min_age_hours lets the
@@ -296,7 +318,8 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
             if last > board_cutoff:
                 continue
         rows.append(c)
-    rows.sort(key=lambda c: (-(c.get("total_job_count") or 0),
+    rows.sort(key=lambda c: (c.get("harvest_attempted_at") or "",
+                             -(c.get("total_job_count") or 0),
                              (c.get("name") or "").lower()))
     if stats is not None:
         stats["offmission_skipped"] = offmission_skipped
@@ -594,7 +617,8 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
     task per host (Board.origin; per platform while a row's origin is
     unsettled) walking its boards in plan order and every host at once;
     the store work on one store.Writer. Returns the summary dict (also
-    printed).
+    printed). Each board's harvest_attempted_at is stamped as its walk
+    starts it (plan's rotation key).
 
     `max_hours` is the pass budget. Past it, or on Ctrl+C, the walks are
     cancelled: the boards committed stay, a board being written rolls
@@ -656,6 +680,10 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
                 stall = asyncio.timeout(stall_s)
                 try:
                     async with stall:
+                        # Stamped as it starts, so a board that fails, wedges
+                        # or runs into the budget rotates back; one never
+                        # started keeps its place at the front (plan).
+                        await db.run(store.mark_harvest_attempted, c["id"])
                         s = await board_fn(
                             c, db, hydrate=hydrate,
                             progress=lambda: stall.reschedule(loop.time() + stall_s))

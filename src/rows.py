@@ -295,6 +295,7 @@ class CompanyRow(TypedDict, closed=True):
     last_nonempty_at: str | None
     next_crawl_at: str | None
     last_harvested_at: str | None
+    harvest_attempted_at: str | None
     employer_id: int | None
     review: str | None
     watch: int | None
