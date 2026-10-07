@@ -34,10 +34,17 @@ class TestPersonio:
         serve(fake_response(text=fixture("personio_feed.xml")))
         rows = await PERSONIO.listing("clark")
         assert [(r["id"], r["location"]) for r in rows][:2] == [
-            ("personio_clark_2415353", "Berlin"), ("personio_clark_2377588", "Remote")]
+            ("personio_clark_2415353", "Berlin; Frankfurt am Main"),("personio_clark_2377588", "Remote")]
         assert rows[0]["title"] == "(Senior) CRM Manager (m/w/d)"
         assert rows[0]["url"] == "https://clark.jobs.personio.de/job/2415353"
         assert rows[0]["head"].endswith("Group - Marketing")
+
+    async def test_a_description_is_every_section_headed_by_its_name(self, serve):
+        serve(fake_response(text=fixture("personio_feed.xml")))
+        rows = await PERSONIO.listing("clark")
+        description = rows[0]["description"]
+        assert description.startswith("Wer wir sind\n") and "Deine Aufgaben\n" in description
+        assert "<" not in description and "CDATA" not in description
 
     def test_a_posting_url_names_its_tenant_and_id(self):
         assert PERSONIO.job_ref("https://clark.jobs.personio.de/job/2415353?language=en") == {

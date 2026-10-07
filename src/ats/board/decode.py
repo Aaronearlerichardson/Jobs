@@ -14,10 +14,10 @@ from src.match.locality import LocationRE
 from src.net.util import JSON, css, first, named, node_text, parse_markup, xpath
 from . import custom, fields, jsonld
 from .spec import (AtomDecoder, Decoder, Detail, HtmlDecoder, JsonInHtmlDecoder,
-                   JsonLdDecoder)
+                   JsonLdDecoder, XmlDecoder)
 
 
-def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | HtmlDecoder, text: str,
+def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | XmlDecoder | HtmlDecoder, text: str,
            parts: dict[str, str], url: str, area: LocationRE | None = None,
            hop: bool = True) -> tuple[JSON, str | None]:
     """A non-JSON response body (to `url`) as (data, hop): data None when it
@@ -40,6 +40,8 @@ def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | HtmlDecoder, t
         return {"postings": [], "page": _cells(parse_markup(text, url=url), dec.cells)}, None
     if dec.kind == "atom":
         return {"entries": _atom(text, url)}, None
+    if dec.kind == "xml":
+        return {"records": xml_records(text, dec.select, dec.lists, url)}, None
     tree = parse_markup(text, url=url)
     if dec.select == ("$job_links",):
         page = custom.read_page(tree, url, area, hop)
@@ -89,17 +91,38 @@ def _atom(text: str, url: str = "") -> list[dict[str, JSON]]:
     return [{**_xml_record(e), "feed": feed} for e in named(root, "entry")]
 
 
-def _xml_record(el: etree._Element, skip: str | None = None) -> dict[str, JSON]:
+def xml_records(text: str, select: str, lists: tuple[str, ...] = (),
+                url: str = "") -> list[dict[str, JSON]]:
+    """The elements of local name `select` in an XML document, each an
+    `_xml_record` (CDATA is text; the children named in `lists` are lists).
+
+    >>> feed = ('<jobs><job><id>7</id><office>A</office><more><office>B</office></more>'
+    ...         '<body><part><name>Role</name><value><![CDATA[<p>Hi</p>]]></value></part></body></job></jobs>')
+    >>> xml_records(feed, "job", ("office", "part"))
+    [{'id': '7', 'office': ['A'], 'more': {'office': ['B']}, 'body': {'part': [{'name': 'Role', 'value': '<p>Hi</p>'}]}}]
+    """
+    return [_xml_record(e, lists=lists) for e in named(parse_markup(text, xml=True, url=url), select)]
+
+
+def _xml_record(el: etree._Element, skip: str | None = None,
+                lists: tuple[str, ...] = ()) -> dict[str, JSON]:
     """An XML element's children as a dict, the first of each local name
-    (but `skip`): a child holding elements as its own record, else its
-    text; each attribute as "<name>@<attribute>"."""
+    (but `skip`; every one of a name in `lists`, as a list): a child
+    holding elements as its own record, else its text; each attribute as
+    "<name>@<attribute>"."""
     out: dict[str, JSON] = {}
     for child in el.iterchildren(etree.Element):
         name = etree.QName(child).localname
-        if name in out or name == skip:
+        if (name in out and name not in lists) or name == skip:
             continue
-        out[name] = (_xml_record(child) if next(child.iterchildren(etree.Element), None) is not None
-                     else node_text(child))
+        one = (_xml_record(child, lists=lists) if next(child.iterchildren(etree.Element), None) is not None
+               else node_text(child))
+        if name in lists:
+            listed = out.setdefault(name, [])
+            if isinstance(listed, list):
+                listed.append(one)
+        else:
+            out[name] = one
         for attr, v in child.attrib.items():
             out[f"{name}@{etree.QName(attr).localname}"] = v
     return out

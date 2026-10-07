@@ -65,6 +65,8 @@ POSTINGS = {
                 lambda: fake_response(text="<html><body>x</body></html>")),
 }
 
+COMEET_POSTING = "https://www.comeet.com/jobs/cheq/65.005/ai-engineer/DD.B6F"
+
 #: a board's own URLs, each resolving to (ats, handle)
 BOARD_URLS = [
     ("https://jobs.gem.com/resprop", "gem", "resprop"),
@@ -122,6 +124,8 @@ BOARD_URLS = [
     (POSTINGS["personio"][1], "personio", "clark"),
     ("https://www.careers-page.com/manatal", "manatal", "manatal"),
     (POSTINGS["manatal"][1], "manatal", "manatal"),
+    ("https://www.comeet.com/jobs/cheq/65.005", "comeet", "cheq|65.005"),
+    (COMEET_POSTING, "comeet", "cheq|65.005"),
     ("https://acme.icims.com/jobs/search", "icims", "acme"),
     ("https://careers-acme.icims.com/jobs/42423/data-engineer/job", "icims", "careers-acme"),
     ("https://unc.peopleadmin.com/postings/123", "peopleadmin", "unc"),
@@ -152,7 +156,7 @@ VENDOR_URLS = [
     "https://www.recruiterbox.com/", "https://app.hire.trakstar.com/",
     "https://app.breezy.hr/signin", "https://www.recruitee.com/",
     "https://developers.pinpointhq.com/docs", "https://www.jobs.personio.de/",
-    "https://join.com/companies/sitemap",
+    "https://join.com/companies/sitemap", "https://www.comeet.com/jobs/sitemap/65.005",
     "https://career4.successfactors.com/career?company=acme",
     "https://acme.successfactors.com/",
     *(f"https://{host}.eightfold.ai/" for host in ("www", "app", "apply", "docs", "support")),

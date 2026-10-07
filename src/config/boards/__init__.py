@@ -70,6 +70,7 @@ from .amazon import SPEC as AMAZON
 from .joincom import SPEC as JOINCOM
 from .personio import SPEC as PERSONIO
 from .manatal import SPEC as MANATAL
+from .comeet import SPEC as COMEET
 
 BOARDS: dict[str, dict[str, JSON]] = {
     "greenhouse": GREENHOUSE,
@@ -117,6 +118,7 @@ BOARDS: dict[str, dict[str, JSON]] = {
     "joincom": JOINCOM,
     "personio": PERSONIO,
     "manatal": MANATAL,
+    "comeet": COMEET,
 }
 
 #: The spec that reads a careers page itself, no ATS signature on it: the

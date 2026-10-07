@@ -208,6 +208,15 @@ class AtomDecoder(_Decoder):
     entries: Paths = Field(("entries",), description="Where the decoded entries sit")
 
 
+class XmlDecoder(_Decoder):
+    kind: Literal["xml"] = Field(description="One record per XML element of a local name "
+                                             "(decode.xml_records); CDATA is text")
+    entries: Paths = Field(("records",), description="Where the decoded records sit")
+    select: Str = Field(description="The local name of the record elements")
+    lists: tuple[Str, ...] = Field((), description="Child names read as a list of every "
+                                                   "occurrence, however many there are")
+
+
 class HtmlDecoder(_Decoder):
     kind: Literal["html"] = Field(description="One entry per selected element (decode.elements)")
     entries: Paths = Field(("elements",), description="Where the decoded elements sit")
@@ -236,6 +245,7 @@ Decoder = Annotated[Union[Annotated[JsonDecoder, Tag("json")],
                           Annotated[JsonInHtmlDecoder, Tag("json_in_html")],
                           Annotated[JsonLdDecoder, Tag("jsonld")],
                           Annotated[AtomDecoder, Tag("atom")],
+                          Annotated[XmlDecoder, Tag("xml")],
                           Annotated[HtmlDecoder, Tag("html")]],
                     Discriminator(_decoder_kind)]
 
