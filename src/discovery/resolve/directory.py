@@ -8,7 +8,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from src import config
@@ -17,13 +17,17 @@ from src.ats.signatures import detect, pack
 from src.match.names import name_key
 from src.net.util import cache_dir
 from src.runstate import per_run
-from .probes import slug_keyed
+from .probes import Slug, slug_keyed
+
+
+#: One directory row: text columns, NULL as None.
+type Row = tuple[str | None, ...]
 
 
 class Detected(NamedTuple):
     kind: str                   # "fetchable" or "lead"
     ats: str
-    handle: Any
+    handle: Slug
     careers_url: str | None
 
 
@@ -74,9 +78,9 @@ def cache_path(rel: str) -> Path:
     return cache_dir("board_directory", rel.replace("/", "_"))
 
 
-def query(src: str, sql: str, args: Sequence[str], remote: bool) -> list[tuple[Any, ...]]:
+def query(src: str, sql: str, args: Sequence[str], remote: bool) -> list[Row]:
     """The rows of `sql` over the parquet file or URL `src` (`?` in `sql`
-    is `src`, then `args`)."""
+    is `src`, then `args`); every column the directory selects is text."""
     import duckdb
     con = duckdb.connect()
     try:
@@ -90,7 +94,7 @@ def query(src: str, sql: str, args: Sequence[str], remote: bool) -> list[tuple[A
 class Companies(NamedTuple):
     """companies.parquet, indexed."""
     named: list[tuple[Detected, str]]                    # each fetchable board, its name
-    by_name: dict[str, list[tuple[str, Any, str]]]       # name_key -> (ats, handle, url)
+    by_name: dict[str, list[tuple[str, Slug, str]]]       # name_key -> (ats, handle, url)
 
 
 def _load_companies() -> Companies:
@@ -105,12 +109,12 @@ def _load_companies() -> Companies:
         print(f"    [!] board directory companies: {str(e).splitlines()[0][:100]}")
         return Companies([], {})
     named: list[tuple[Detected, str]] = []
-    by_name: defaultdict[str, list[tuple[str, Any, str]]] = defaultdict(list)
+    by_name: defaultdict[str, list[tuple[str, Slug, str]]] = defaultdict(list)
     for label, name, slug, url in rows:
         found = board_of(url, label or "", slug or "")
         if name and found and found.kind == "fetchable":
             named.append((found, name))
-            by_name[name_key(name)].append((found.ats, found.handle, url))
+            by_name[name_key(name)].append((found.ats, found.handle, url or ""))
     return Companies(named, dict(by_name))
 
 
@@ -118,7 +122,7 @@ def _load_companies() -> Companies:
 index = per_run(_load_companies)
 
 
-def lookup_name(name: str) -> list[tuple[str, Any, str]]:
+def lookup_name(name: str) -> list[tuple[str, Slug, str]]:
     """(ats, handle, url) of each board the directory lists under exactly
     `name` (`name_key`, suffixes kept), for a caller to validate: some are
     other companies that share the name. The first call of a run reads
@@ -135,7 +139,7 @@ def lookup_name(name: str) -> list[tuple[str, Any, str]]:
 _building = per_run(asyncio.Lock)
 
 
-async def find_boards(name: str) -> list[tuple[str, Any, str]]:
+async def find_boards(name: str) -> list[tuple[str, Slug, str]]:
     """`lookup_name` for the event loop: the index builds once per run, in a
     thread, while concurrent callers wait.
 

@@ -519,7 +519,7 @@ async def get_json(url: str, label: str | None, default: JSON = None, **kw: Unpa
 
     Notes:
         Nine fetchers wrote this out, three of them having already named
-        it (`api._get_board`, `hnhiring._get_json`, `company._get_json`).
+        it (`api._get_board`, `hnhiring._get_item`, `company._get_json`).
     """
     _status, data, err = await request_json("GET", url, label, **kw)
     return default if err else data

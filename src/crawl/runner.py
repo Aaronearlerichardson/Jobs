@@ -40,7 +40,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from types import ModuleType
-from typing import Any, NamedTuple, cast
+from typing import NamedTuple, TypedDict, cast
 
 from src import config
 from src import store
@@ -64,7 +64,7 @@ from src.rows import CompanyRow, FetchedJob, RankedJob, is_watched
 track_for_engine = config.track_for_engine
 
 
-def apply_keyword_focus(cfg: Any, t: RuntimeTrack) -> None:
+def apply_keyword_focus(cfg: ModuleType, t: RuntimeTrack) -> None:
     """Point the shared keyword filter at this track's focus. Mutates the
     live list objects in place so filters.is_relevant (which imported them
     at load time) sees the change without a re-import. "extend" adds the
@@ -88,7 +88,7 @@ def apply_keyword_focus(cfg: Any, t: RuntimeTrack) -> None:
                          (cfg.SKILL_KEYWORDS, skill)):
             have = {k.lower() for k in dst}
             dst.extend(k for k in add if k.lower() not in have)
-    cfg.ACCEPT_REMOTE = t.accept_remote
+    setattr(cfg, "ACCEPT_REMOTE", t.accept_remote)
 
 
 def core_anchor(title: str, description: str = "") -> str | None:
@@ -102,8 +102,20 @@ def core_anchor(title: str, description: str = "") -> str | None:
                      SHORT_KEYWORD)
 
 
+type SourceThunk = Callable[[], Awaitable[list[FetchedJob] | None]]
+
+
+class SourceSpec(TypedDict):
+    """One source of a pass: `thunk()` fetches it; `company` is its store row
+    (None for a sweep source)."""
+    name: str
+    platform: str
+    thunk: SourceThunk
+    company: CompanyRow | None
+
+
 async def build_sources(cfg: ModuleType, t: RuntimeTrack,
-                        include_websearch: bool | None = None) -> list[dict[str, Any]]:
+                        include_websearch: bool | None = None) -> list[SourceSpec]:
     """Assemble the track's source specs from its `sources` config table.
     Returns a list of dicts {name, platform, thunk, company}: `thunk()` is
     the source's fetch coroutine; `company` is
@@ -117,11 +129,11 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
 
     src = t.sources
     use_ws = src.websearch if include_websearch is None else include_websearch
-    specs: list[dict[str, Any]] = []
+    specs: list[SourceSpec] = []
     used: set[tuple[str, str]] = set()
 
     # A thunk may carry what it closes over as a defaulted parameter.
-    def add(name: str, platform: str, thunk: Callable[..., Awaitable[Any]],
+    def add(name: str, platform: str, thunk: SourceThunk,
             company: CompanyRow | None = None, key: tuple[str, str] | None = None) -> None:
         k = key or (platform, name.lower())
         if k in used:
@@ -166,7 +178,8 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
             # Location-agnostic lightweight ATS sweep (JSON-API boards only;
             # the heavyweight onsite ATSes are only worth fetching scoped).
             for ats, name, slug, thunk in iter_store_sources(rows):
-                add(name, ats, cast(Callable[..., Any], thunk), key=(ats, str(slug)))
+                # TODO(any-zero): sweep thunks may be None; added as-is, as before.
+                add(name, ats, cast(SourceThunk, thunk), key=(ats, str(slug)))
 
     # 3) Forums + aggregator feeds (remote-native boards). Like the ATS
     # registry, the crawl injects the keyword gate here; the fetchers are
@@ -250,7 +263,7 @@ def _short(text: str, n: int) -> str:
 def _diversify(matches: list[FetchedJob], n: int) -> list[FetchedJob]:
     """Up to n samples spread round-robin across companies so the precision
     sanity-check isn't dominated by one prolific employer."""
-    by_company: defaultdict[Any, deque[FetchedJob]] = defaultdict(deque)
+    by_company: defaultdict[object, deque[FetchedJob]] = defaultdict(deque)
     for j in matches:
         by_company[j.get("company") or j.get("company_name")].append(j)
     picked: list[FetchedJob] = []
@@ -440,8 +453,9 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[Fet
     return out, anchor_here, tech_here, surfaced
 
 
-async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str, Any]],
-                        fetched: list[tuple[Any, Any, Any]], commit: bool) -> Collected:
+async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[SourceSpec],
+                        fetched: list[tuple[list[FetchedJob], BaseException | None, Snapshot | None]],
+                        commit: bool) -> Collected:
     """Every fetched source through its gates, in SOURCE order, on `db`
     (the crawl's store.Writer).
 
@@ -463,7 +477,8 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str,
     for spec, (jobs, err, snapshot) in zip(specs, fetched):
         c = spec["company"]
         if c is not None:
-            tally.note_jobs(c["ats"], jobs, err, snapshot)
+            # TODO(any-zero): a store row's ats may be None; keyed as-is.
+            tally.note_jobs(cast(str, c["ats"]), jobs, err, snapshot)
         label = f"{spec['name']} ({spec['platform']})"
         if c is not None and c.get("id") and commit:
             # Judged on what the BOARD returned, before any of our gating:
@@ -569,7 +584,7 @@ async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, 
             res = await score_resume_fit(j["title"], j.get("description", ""),
                                          location=j.get("location") or "")
             # FitColumns is open (JobIn extends it); a closed job takes no open update.
-            j.update(cast(Any, res.as_columns()))
+            j.update(cast(FetchedJob, res.as_columns()))
 
         # `ex.map` re-raised the first failure, so one unscorable posting
         # abandoned the scoring of every other match in the sweep.

@@ -15,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
-from typing import Any
+
+from pydantic import BaseModel, ConfigDict
 
 from src.match.names import strip_parentheticals
 from src.net import http
@@ -67,9 +68,22 @@ def _is_location(s: str) -> bool:
         r"san\s+francisco|sf\b|nyc\b)\b", s, re.I)) and not _ROLE_HINT_RE.search(s)
 
 
-async def _get_json(url: str) -> Any:
+class _Item(BaseModel):
+    """A Firebase item or user; `object` fields pass through uncoerced."""
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    id: object = None
+    title: str | None = ""
+    text: str | None = ""
+    kids: list[object] | None = None
+    submitted: list[object] | None = None
+    deleted: object = None
+    dead: object = None
+
+
+async def _get_item(url: str) -> _Item | None:
     """One Firebase item, or None (reported). net.http.get_json."""
-    return await http.get_json(url, f"HN {url}")
+    data = await http.get_json(url, f"HN {url}")
+    return _Item.model_validate(data) if data else None
 
 
 def _parse_post(text: str) -> tuple[str, str, str, str]:
@@ -131,18 +145,18 @@ def _parse_post(text: str) -> tuple[str, str, str, str]:
     return company, role, location, url
 
 
-async def _find_hiring_threads(submitted_ids: list[Any], max_threads: int = 2,
-                               lookback: int = 30) -> list[dict[str, Any]]:
+async def _find_hiring_threads(submitted_ids: list[object], max_threads: int = 2,
+                               lookback: int = 30) -> list[_Item]:
     """
     Walk the newest submissions from `whoishiring` until we have
     `max_threads` "Who is hiring?" posts.
     """
-    found = []
+    found: list[_Item] = []
     for tid in submitted_ids[:lookback]:
-        item = await _get_json(f"{BASE}/item/{tid}.json")
+        item = await _get_item(f"{BASE}/item/{tid}.json")
         if not item:
             continue
-        title = item.get("title") or ""
+        title = item.title or ""
         if re.search(r"^Ask HN:\s*Who is hiring\??", title, re.I):
             found.append(item)
             if len(found) >= max_threads:
@@ -157,11 +171,11 @@ async def fetch_hnhiring(max_threads: int = 2, max_comments_per_thread: int = 40
     Scan the latest N "Ask HN: Who is hiring?" threads, return top-level
     job comments (those passing `gate(role, text)` when a gate is given).
     """
-    user = await _get_json(f"{BASE}/user/whoishiring.json")
+    user = await _get_item(f"{BASE}/user/whoishiring.json")
     if not user:
         return []
 
-    submitted = user.get("submitted") or []
+    submitted = user.submitted or []
     threads = await _find_hiring_threads(submitted, max_threads=max_threads)
     if not threads:
         print("    [!] No 'Who is hiring?' threads found in latest submissions.")
@@ -169,17 +183,17 @@ async def fetch_hnhiring(max_threads: int = 2, max_comments_per_thread: int = 40
 
     jobs: list[FetchedJob] = []
     for thread in threads:
-        tid       = thread.get("id")
-        title     = thread.get("title", "")
-        kids      = (thread.get("kids") or [])[:max_comments_per_thread]
+        tid       = thread.id
+        title     = thread.title
+        kids      = (thread.kids or [])[:max_comments_per_thread]
         print(f"    -> {title} (id {tid}, {len(kids)} top-level posts)")
 
         for cid in kids:
-            comment = await _get_json(f"{BASE}/item/{cid}.json")
+            comment = await _get_item(f"{BASE}/item/{cid}.json")
             await asyncio.sleep(0.02)        # gentle on Firebase
-            if not comment or comment.get("deleted") or comment.get("dead"):
+            if not comment or comment.deleted or comment.dead:
                 continue
-            text = strip_html(comment.get("text", ""))
+            text = strip_html(comment.text)
             if not text:
                 continue
 

@@ -17,7 +17,7 @@ import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from operator import itemgetter
-from typing import Annotated, Any, NamedTuple
+from typing import Annotated, NamedTuple, TypedDict
 
 from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
                       ValidationError)
@@ -157,7 +157,7 @@ def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
         return None, f"{ref!r} is ambiguous ({len(matches)} matches):\n{opts}"
     row = matches[0]
     now = datetime.now().isoformat()
-    sets: dict[str, Any] = {"disposition": None if clearing else d,
+    sets: dict[str, object] = {"disposition": None if clearing else d,
                             "disposition_note": None if clearing else note,
                             "disposition_at": None if clearing else now}
     if reason:
@@ -222,8 +222,12 @@ def title_keys(title: str | None) -> tuple[str, str]:
     return " ".join(words), " ".join(role or words)
 
 
-def prior_lookup(pipeline: Iterable[Mapping[str, Any]]
-                 ) -> Callable[[Mapping[str, Any]], Prior | None]:
+def _str(v: object) -> str | None:
+    return v if isinstance(v, str) else None
+
+
+def prior_lookup(pipeline: Iterable[Mapping[str, object]]
+                 ) -> Callable[[Mapping[str, object]], Prior | None]:
     """A function from a job row to the application it repeats, or None,
     over `pipeline` (get_pipeline's rows; only the ones that went out count:
     APPLIED_DISPOSITIONS). A job repeats an application at the same company
@@ -243,27 +247,27 @@ def prior_lookup(pipeline: Iterable[Mapping[str, Any]]
     >>> look({"job_id": "a", "company_name": "Acme Inc", "title": "Algorithm Engineer"}) is None
     True
     """
-    by_company: dict[str, list[tuple[str, str, Mapping[str, Any]]]] = {}
+    by_company: dict[str, list[tuple[str, str, Mapping[str, object]]]] = {}
     for p in pipeline:
         if p.get("disposition") in APPLIED_DISPOSITIONS:
-            exact, role = title_keys(p.get("title"))
-            by_company.setdefault(name_key(p.get("company_name")), []).append((exact, role, p))
+            exact, role = title_keys(_str(p.get("title")))
+            by_company.setdefault(name_key(_str(p.get("company_name"))), []).append((exact, role, p))
 
-    def when(p: Mapping[str, Any]) -> str:
-        return (p.get("applied_at") or p.get("disposition_at") or "")[:10]
+    def when(p: Mapping[str, object]) -> str:
+        return (_str(p.get("applied_at")) or _str(p.get("disposition_at")) or "")[:10]
 
-    def look(job: Mapping[str, Any]) -> Prior | None:
-        rivals = by_company.get(name_key(job.get("company_name")))
+    def look(job: Mapping[str, object]) -> Prior | None:
+        rivals = by_company.get(name_key(_str(job.get("company_name"))))
         if not rivals:
             return None
-        exact, role = title_keys(job.get("title"))
+        exact, role = title_keys(_str(job.get("title")))
         best = max(((1 if e == exact else 0, when(p), p) for e, r, p in rivals
                     if p.get("job_id") != job.get("job_id") and r == role),
                    key=itemgetter(0, 1), default=None)
         if best is None:
             return None
-        return Prior("repost" if best[0] else "sibling", best[2].get("title") or "",
-                     best[2].get("disposition") or "", best[1])
+        return Prior("repost" if best[0] else "sibling", _str(best[2].get("title")) or "",
+                     _str(best[2].get("disposition")) or "", best[1])
     return look
 
 
@@ -277,7 +281,7 @@ def get_pipeline(conn: sqlite3.Connection) -> list[JobRow]:
 
 
 def update_pipeline_fields(conn: sqlite3.Connection, job_id: str,
-                           **fields: Any) -> tuple[JobRow | None, str | None]:
+                           **fields: object) -> tuple[JobRow | None, str | None]:
     """Write the given application-tracking columns (PipelineFields) on one
     job. Returns (row, error) like set_disposition: the updated job on
     success, otherwise a printable message with one 'field: problem' per
@@ -336,7 +340,19 @@ def _fit_band(score: float | None) -> str:
     return FIT_BANDS[0][0] if score < FIT_BANDS[0][1] else FIT_BANDS[-1][0]
 
 
-def conversion_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+class ConversionRow(TypedDict):
+    """One conversion_report row."""
+    band: str
+    geo_mode: str
+    applications: int
+    applied: int
+    interviewing: int
+    rejected: int
+    interviews: int
+    interview_rate: float
+
+
+def conversion_report(conn: sqlite3.Connection) -> list[ConversionRow]:
     """Where applications actually convert, sliced by fit band and geo_mode.
 
     One dict per (band, geo_mode) that has at least one application, ordered
@@ -357,23 +373,23 @@ def conversion_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         f"FROM jobs WHERE disposition IN ({ph})",
         APPLIED_DISPOSITIONS).fetchall()
     order = [name for name, _, _ in FIT_BANDS] + ["unscored"]
-    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    counts: dict[tuple[str, str], dict[str, int]] = {}
     for r in rows:
         key = (_fit_band(r["resume_fit_score"]), r["geo_mode"] or "unknown")
-        bucket = buckets.setdefault(key, {
-            "band": key[0], "geo_mode": key[1], "applications": 0,
-            "applied": 0, "interviewing": 0, "rejected": 0, "interviews": 0})
-        bucket["applications"] += 1
-        bucket[r["disposition"]] += 1
+        n = counts.setdefault(key, dict.fromkeys(
+            ("applications", "applied", "interviewing", "rejected", "interviews"), 0))
+        n["applications"] += 1
+        n[r["disposition"]] += 1
         if (r["disposition"] == "interviewing"
                 or r["outcome_reason"] == "rejected-interview"):
-            bucket["interviews"] += 1
-    out = sorted(buckets.values(),
-                 key=lambda x: (order.index(x["band"]), x["geo_mode"]))
-    for bucket in out:
-        bucket["interview_rate"] = round(
-            bucket["interviews"] / bucket["applications"], 3)
-    return out
+            n["interviews"] += 1
+    return [ConversionRow(
+        band=band, geo_mode=geo, applications=n["applications"],
+        applied=n["applied"], interviewing=n["interviewing"],
+        rejected=n["rejected"], interviews=n["interviews"],
+        interview_rate=round(n["interviews"] / n["applications"], 3))
+        for (band, geo), n in sorted(
+            counts.items(), key=lambda kv: (order.index(kv[0][0]), kv[0][1]))]
 
 
 def followups_due(conn: sqlite3.Connection, today: str | None = None) -> list[JobRow]:

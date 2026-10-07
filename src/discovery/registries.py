@@ -15,7 +15,10 @@ import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import date
-from typing import Any, NamedTuple, cast
+from collections.abc import Mapping
+from typing import NamedTuple
+
+from pydantic import BaseModel
 
 from src import config, store
 from src.match.names import junk_name_reason, name_key, strip_suffixes
@@ -92,13 +95,18 @@ def _named(rows: Iterable[tuple[str | None, str | None, str | None]], label: str
     return list(out.values())
 
 
-def _results(payload: Any) -> list[dict[str, Any]]:
+def _results(payload: JSON) -> list[Mapping[str, JSON]]:
     """The dict entries of a registry reply's `results`, [] when it has none."""
-    results = payload.get("results") if isinstance(payload, dict) else None
-    return [r for r in results or [] if isinstance(r, dict)]
+    results = payload.get("results") if isinstance(payload, Mapping) else None
+    return [r for r in results or [] if isinstance(r, Mapping)] if isinstance(results, list) else []
 
 
-def nih_rows(payload: Any) -> list[tuple[str | None, str | None, str | None]]:
+def _text(v: JSON) -> str | None:
+    """`v` when it is text, else None."""
+    return v if isinstance(v, str) else None
+
+
+def nih_rows(payload: JSON) -> list[tuple[str | None, str | None, str | None]]:
     """(organization, city, project title) of each project in a RePORTER reply.
 
     >>> nih_rows({"results": [{"project_title": "T",
@@ -108,17 +116,21 @@ def nih_rows(payload: Any) -> list[tuple[str | None, str | None, str | None]]:
     []
     """
     field = config.REGISTRIES["nih_sbir"]["blurb_field"]
-    return [((o := r.get("organization") or {}).get("org_name"), o.get("org_city"),
-             r.get(field)) for r in _results(payload)]
+    rows = []
+    for r in _results(payload):
+        org = r.get("organization")
+        o = org if isinstance(org, Mapping) else {}
+        rows.append((_text(o.get("org_name")), _text(o.get("org_city")), _text(r.get(field))))
+    return rows
 
 
-def fda_rows(payload: Any) -> list[tuple[str | None, str | None, str | None]]:
+def fda_rows(payload: JSON) -> list[tuple[str | None, str | None, str | None]]:
     """(establishment, None, None) of each term in an openFDA count reply.
 
     >>> fda_rows({"results": [{"term": "Acme Medical LLC", "count": 3}]})
     [('Acme Medical LLC', None, None)]
     """
-    return [(r.get("term"), None, None) for r in _results(payload)]
+    return [(_text(r.get("term")), None, None) for r in _results(payload)]
 
 
 def fda_search(state: str, specialties: Sequence[str]) -> str:
@@ -134,6 +146,15 @@ def fda_search(state: str, specialties: Sequence[str]) -> str:
     clauses = [cfg["specialty_search"].format(value=v.replace('"', " ")) for v in specialties]
     base = cfg["search"].format(state=state)
     return f"{base} AND ({' OR '.join(clauses)})" if clauses else base
+
+
+class _Meta(BaseModel):
+    total: int | None = None
+
+
+class _Reply(BaseModel):
+    """The part of a RePORTER reply the pager reads."""
+    meta: _Meta | None = None
 
 
 async def nih_sbir(state: str) -> list[NamedSource]:
@@ -153,10 +174,8 @@ async def nih_sbir(state: str) -> list[NamedSource]:
         page = nih_rows(data)
         rows += page
         offset += cfg["page"]
-        meta: JSON = (data.get("meta") or {}) if isinstance(data, dict) else {}
-        # TODO(any-zero): parse `total` through a typed model at the edge; a non-number raises.
-        total = cast(float, (meta.get("total") if isinstance(meta, dict) else 0) or 0)
-        if not page or offset >= total:
+        meta = _Reply.model_validate(data if isinstance(data, Mapping) else {}).meta
+        if not page or offset >= ((meta and meta.total) or 0):
             break
     return _named(rows, "nih_sbir")
 

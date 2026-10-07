@@ -40,7 +40,8 @@ import json
 import re
 from collections import deque
 from collections.abc import Callable
-from typing import Any
+
+from pydantic import BaseModel, ConfigDict
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
@@ -137,7 +138,30 @@ def parse_sitemap(xml: str | None, origin: str = "") -> tuple[list[dict[str, str
     return jobs, children
 
 
-def _current_job(page_html: str | None) -> dict[str, Any] | None:
+class _Org(BaseModel):
+    """A job's employer; `object` fields pass through uncoerced."""
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    name: object = None
+    domain: str | None = None
+    slug: str | None = None
+
+
+class _Job(BaseModel):
+    """The embedded ``currentJob`` record; `object` fields pass through uncoerced."""
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    id: object = None
+    title: object = None
+    status: object = None
+    closedAt: object = None
+    deactivatedAt: object = None
+    organization: object = None
+    locations: list[object] | None = None
+    url: str | None = None
+    description: str | None = None
+    postedAt: object = None
+
+
+def _current_job(page_html: str | None) -> _Job | None:
     """The ``currentJob`` record embedded in a job page, or None."""
     m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', page_html or "", re.S)
     if not m:
@@ -148,7 +172,7 @@ def _current_job(page_html: str | None) -> dict[str, Any] | None:
                ["currentJob"])
     except (ValueError, KeyError, TypeError):
         return None
-    return job if isinstance(job, dict) else None
+    return _Job.model_validate(job) if isinstance(job, dict) else None
 
 
 def parse_job_page(page_html: str | None, board_url: str,
@@ -165,35 +189,34 @@ def parse_job_page(page_html: str | None, board_url: str,
     job = _current_job(page_html)
     if not job:
         return None
-    jid = job.get("id")
+    jid = job.id
     # strip_html for the one-line fields, text_from_html for the body: the
     # embedded record carries HTML in both, and a title is not a place for
     # the paragraph breaks a JD needs (src/net/util.py owns both).
-    title = strip_html(job.get("title"))
+    title = strip_html(job.title)
     if not jid or not title:
         return None
-    if (job.get("status") not in (None, "active")
-            or job.get("closedAt") or job.get("deactivatedAt")):
+    if job.status not in (None, "active") or job.closedAt or job.deactivatedAt:
         return None
-    raw_org = job.get("organization")
-    org: dict[str, Any] = raw_org if isinstance(raw_org, dict) else {}
+    org = (_Org.model_validate(job.organization)
+           if isinstance(job.organization, dict) else _Org())
     locations = list(dict.fromkeys(
         n for n in (strip_html(loc.get("name") if isinstance(loc, dict) else loc)
-                    for loc in job.get("locations") or []) if n))
+                    for loc in job.locations or []) if n))
     host = board_host(board_url)
     return {
         "id":          f"getro_{jid}",
-        "company":     strip_html(org.get("name")) or host,
+        "company":     strip_html(org.name) or host,
         "title":       title,
-        "url":         job.get("url") or page_url,
+        "url":         job.url or page_url,
         "location":    "; ".join(locations),
-        "description": text_from_html(job.get("description")),
-        "posted_at":   norm_posted_date(job.get("postedAt")),
+        "description": text_from_html(job.description),
+        "posted_at":   norm_posted_date(job.postedAt),
         # What attribute_employers needs to find (or queue) the employer.
         "_employer": {
-            "name":     strip_html(org.get("name")),
-            "domain":   (org.get("domain") or "").strip().lower(),
-            "slug":     org.get("slug") or "",
+            "name":     strip_html(org.name),
+            "domain":   (org.domain or "").strip().lower(),
+            "slug":     org.slug or "",
             "board":    host,
             "page_url": page_url,
         },

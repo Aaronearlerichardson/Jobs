@@ -15,9 +15,12 @@ op reached a different store depending on which front end asked for it.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from src.config import RuntimeTrack
+
+if TYPE_CHECKING:
+    from src.discovery.pipeline import DiscoveryResult
 
 
 def dedup(t: RuntimeTrack | None = None) -> tuple[int, int]:
@@ -87,7 +90,7 @@ async def dork_sweep() -> tuple[int, int]:
 
 
 async def discover_term(term: str | None, no_report: bool = False,
-                        dry_run: bool = False) -> dict[str, Any] | None:
+                        dry_run: bool = False) -> DiscoveryResult | None:
     """Free-text sector discovery: ask Claude for likely employers matching
     `term`, probe each against the ATS registry, and (apply-by-default)
     queue the confirmed ones unless `dry_run`. Returns the discovery

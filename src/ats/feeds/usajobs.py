@@ -33,8 +33,8 @@ Notes:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import cast
 
 from src import config
 from src.net import http
@@ -43,7 +43,7 @@ from src.net.util import JSON, norm_posted_date, strip_html
 from src.rows import FetchedJob
 
 
-def _salary_text(remuneration: Any) -> str:
+def _salary_text(remuneration: JSON) -> str:
     """The advertised pay band from a ``PositionRemuneration`` list.
 
     >>> _salary_text([{"MinimumRange": "99908", "MaximumRange": "129878",
@@ -59,22 +59,27 @@ def _salary_text(remuneration: Any) -> str:
     >>> _salary_text(None)
     ''
     """
-    for pay in remuneration or []:
+    if not isinstance(remuneration, Sequence):
+        return ""
+    for pay in remuneration:
         if not isinstance(pay, dict):
             continue
         interval = strip_html(pay.get("Description") or pay.get("RateIntervalCode"))
+        bounds = [v for v in (pay.get("MinimumRange"), pay.get("MaximumRange"))
+                  if v not in (None, "")]
+        numeric = [v for v in bounds if isinstance(v, (str, int, float))]
+        if len(numeric) != len(bounds):
+            continue
         try:
-            amounts = [f"${float(v):,.0f}"
-                       for v in (pay.get("MinimumRange"), pay.get("MaximumRange"))
-                       if v not in (None, "")]
-        except (TypeError, ValueError):
+            amounts = [f"${float(v):,.0f}" for v in numeric]
+        except ValueError:
             continue
         if amounts:
             return " ".join([" - ".join(amounts), interval]).strip()
     return ""
 
 
-def _locations(descriptor: dict[str, Any]) -> str:
+def _locations(descriptor: Mapping[str, JSON]) -> str:
     """Every duty station on the announcement, joined with "; ".
 
     >>> _locations({"PositionLocation": [{"LocationName": "Durham, NC"},
@@ -94,14 +99,15 @@ def _locations(descriptor: dict[str, Any]) -> str:
         what lets the locality gate see the local one instead of whichever
         station the agency happened to list first.
     """
+    places = descriptor.get("PositionLocation")
     names = dict.fromkeys(
         n for n in (strip_html(loc.get("LocationName") or loc.get("CityName"))
-                    for loc in descriptor.get("PositionLocation") or []
+                    for loc in (places if isinstance(places, Sequence) else [])
                     if isinstance(loc, dict)) if n)
     return "; ".join(names) or strip_html(descriptor.get("PositionLocationDisplay"))
 
 
-def _describe(details: dict[str, Any], descriptor: dict[str, Any]) -> str:
+def _describe(details: Mapping[str, JSON], descriptor: Mapping[str, JSON]) -> str:
     """The scoreable body of an announcement: summary, duties, quals, pay.
 
     ``MajorDuties`` is a list of paragraphs and is flattened in order:
@@ -136,7 +142,7 @@ def _describe(details: dict[str, Any], descriptor: dict[str, Any]) -> str:
     return " ".join(c for c in chunks if c).strip()
 
 
-def _parse_item(item: Any) -> FetchedJob | None:
+def _parse_item(item: JSON) -> FetchedJob | None:
     """One ``SearchResultItem`` as a crawler job dict, or None if unusable.
 
     The id is namespaced by source, and the company is the hiring
@@ -199,8 +205,8 @@ def _parse_item(item: Any) -> FetchedJob | None:
 
     url = descriptor.get("PositionURI") or ""
     if not url:
-        apply_uris = descriptor.get("ApplyURI") or []
-        url = apply_uris[0] if apply_uris else ""
+        apply_uris = descriptor.get("ApplyURI")
+        url = apply_uris[0] if apply_uris and isinstance(apply_uris, Sequence) else ""
 
     user_area = descriptor.get("UserArea")
     details = user_area.get("Details") if isinstance(user_area, dict) else None
@@ -216,7 +222,7 @@ def _parse_item(item: Any) -> FetchedJob | None:
         "id":          f"usajobs_{jid}",
         "company":     strip_html(descriptor.get("OrganizationName")) or "USAJOBS",
         "title":       title,
-        "url":         url,
+        "url":         cast(str, url),  # TODO(any-zero): a non-string URI passes through, as before
         "location":    _locations(descriptor),
         "description": body,
         "posted_at":   norm_posted_date(descriptor.get("PublicationStartDate")),

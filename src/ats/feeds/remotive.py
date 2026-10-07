@@ -14,11 +14,31 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import Any
+
+from pydantic import BaseModel, ConfigDict
 
 from src.net import http
 from src.net.util import strip_html
 from src.rows import FetchedJob
+
+
+class _Entry(BaseModel):
+    """One listing; `object` fields pass through uncoerced."""
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    id: object = None
+    title: str | None = None
+    company_name: str | None = None
+    url: str | None = None
+    candidate_required_location: str | None = None
+    description: str | None = ""
+    tags: list[object] | None = None
+    category: str | None = None
+
+
+class _Feed(BaseModel):
+    """The payload; a wrong shape raises ValidationError."""
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    jobs: list[_Entry] | None = None
 
 
 async def fetch_remotive(category: str | None = None, max_jobs: int | None = None,
@@ -37,24 +57,24 @@ async def fetch_remotive(category: str | None = None, max_jobs: int | None = Non
     return await asyncio.to_thread(_jobs, data, max_jobs, gate)
 
 
-def _jobs(data: Any, max_jobs: int | None, gate: Callable[..., bool] | None) -> list[FetchedJob]:
+def _jobs(data: object, max_jobs: int | None, gate: Callable[..., bool] | None) -> list[FetchedJob]:
     """The feed's payload `data` as fetch_remotive's job dicts."""
-    entries: list[Any] = (data.get("jobs") or []) if isinstance(data, dict) else []
+    entries: list[_Entry] = (_Feed.model_validate(data).jobs or []) if isinstance(data, dict) else []
     if max_jobs is not None:
         entries = entries[:max_jobs]
 
     jobs: list[FetchedJob] = []
     for entry in entries:
-        jid      = entry.get("id")
-        title    = entry.get("title") or ""
-        company  = entry.get("company_name") or "Remotive"
-        jurl     = entry.get("url") or ""
-        location = entry.get("candidate_required_location") or "Remote"
-        desc     = strip_html(entry.get("description", ""))
+        jid      = entry.id
+        title    = entry.title or ""
+        company  = entry.company_name or "Remotive"
+        jurl     = entry.url or ""
+        location = entry.candidate_required_location or "Remote"
+        desc     = strip_html(entry.description)
 
-        tags     = entry.get("tags") or []
+        tags     = entry.tags or []
         tag_text = " ".join(str(t) for t in tags if t)
-        cat      = entry.get("category") or ""
+        cat      = entry.category or ""
 
         if gate is not None and not gate(title, desc + " " + tag_text + " " + cat):
             continue

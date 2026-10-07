@@ -10,7 +10,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TypedDict, cast
 
 from src import config
 from src import store
@@ -204,7 +204,30 @@ def _probe_tally_lines(counts: Mapping[str, Counter[str]],
     return out
 
 
-def _dead_board_open_rows(conn: sqlite3.Connection, days: int) -> list[dict[str, Any]]:
+class DeadBoardRow(TypedDict):
+    """An open job at a company whose board is dead."""
+    job_id: str
+    title: str | None
+    company_id: int
+    company_name: str | None
+    miss_reason: str
+
+
+class OpenRow(TypedDict):
+    """An open job the closed-job probe selects."""
+    job_id: str
+    title: str | None
+    company_name: str | None
+    company_id: int | None
+    url: str | None
+
+
+class ProbeRow(OpenRow):
+    """An OpenRow with its URL's host."""
+    origin: str
+
+
+def _dead_board_open_rows(conn: sqlite3.Connection, days: int) -> list[DeadBoardRow]:
     """OPEN rows at a company whose CURRENT miss_reason is in the
     'board-dead' family (store.miss_family) and whose last board-verified
     sighting (last_seen, or first_seen for a row a board never re-confirmed)
@@ -263,7 +286,7 @@ def _dead_board_open_rows(conn: sqlite3.Connection, days: int) -> list[dict[str,
     ['j1']
     """
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-    rows = [dict(r) for r in conn.execute(
+    rows = [cast(DeadBoardRow, dict(r)) for r in conn.execute(
         "SELECT j.job_id, j.title, j.company_id, j.company_name, "
         "c.miss_reason FROM open_jobs j JOIN companies c ON c.id = j.company_id "
         "WHERE c.miss_reason IS NOT NULL "
@@ -375,7 +398,7 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
     """
     async with track_writer(t, db) as db:
         cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
-        rows = await db.run(lambda conn: [dict(r) for r in conn.execute(
+        rows = await db.run(lambda conn: [cast(OpenRow, dict(r)) for r in conn.execute(
             "SELECT job_id, title, company_name, company_id, url FROM open_jobs "
             "WHERE COALESCE(last_seen, first_seen, '') < ? "
             "AND COALESCE(probe_streak, 0) < ? "
@@ -384,7 +407,7 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
         # The harvester's OWN view of which boards it walks and when
         # (store.harvestable_companies, companies.last_harvested_at), not a
         # second copy of that rule.
-        walked = {c["id"]: (c.get("last_harvested_at") or "")
+        walked: dict[int | None, str] = {c["id"]: (c.get("last_harvested_at") or "")
                   for c in await db.run(store.harvestable_companies)}
         n_rows = len(rows)
         # "" covers both "no board the harvester walks" and "walked none
@@ -392,8 +415,9 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
         rows = [r for r in rows if not walked.get(r["company_id"])
                 or walked[r["company_id"]] > cutoff]
         n_deferred, n_queued = n_rows - len(rows), len(rows)
+        # TODO(any-zero): url may be None; probe_origin gets it as-is.
         hosts = group_by_company(await asyncio.to_thread(
-            lambda: [{**r, "origin": closure.probe_origin(r["url"])} for r in rows]), "origin")
+            lambda: [ProbeRow(**r, origin=closure.probe_origin(cast(str, r["url"]))) for r in rows]), "origin")
         ranks = itertools.zip_longest(*(q[:config.CLOSED_PROBE_PER_HOST] for q in hosts.values()))
         rows = [r for rank in ranks for r in rank if r is not None][:int(limit) if limit else None]
         print(f"  probing {len(rows)} open job(s) on "
@@ -404,7 +428,7 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
               + (f", {n_queued - len(rows)} left for later passes"
                  if n_queued > len(rows) else "") + "...")
 
-        async def _probe(r: dict[str, Any]) -> tuple[bool | None, str | None]:
+        async def _probe(r: ProbeRow) -> tuple[bool | None, str | None]:
             # A probe that RAISES is not a failure to report and skip, it
             # is an unverifiable row -- the third outcome this op counts.
             # So it is caught here rather than left to fan_out, which would
@@ -423,7 +447,7 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
         reasons: defaultdict[str, Counter[str]] = defaultdict(Counter)
         # An abandoned probe is never yielded, so it closes nothing and
         # records no outcome: the row waits for the next pass as it was.
-        abandoned: list[dict[str, Any]] = []
+        abandoned: list[ProbeRow] = []
         async for r, (is_open, reason) in fan_out(
                 rows, _probe,
                 lambda r: f"probe {r['company_name']}: {(r['title'] or '')[:40]}",

@@ -14,9 +14,9 @@ import json
 import sqlite3
 import statistics
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Any
+from typing import TypedDict, cast
 
 
 from src import config
@@ -24,6 +24,22 @@ from src import store
 from src.ats.board.pager import FILL_FLOORS, fill_rates
 from src.net.http import Snapshot
 from src.rows import FetchedJob
+
+
+class Counts(TypedDict):
+    """The board counts of one platform's pass."""
+    boards: int
+    errors: int
+    empty: int
+
+
+class HealthRow(Counts):
+    """A `platform_health` row; `fill` is JSON."""
+    pass_at: str
+    ats: str
+    partial: int
+    jobs: int
+    fill: str
 
 
 class Tally:
@@ -76,7 +92,7 @@ class Tally:
         fill = snap.get("fill") or (fill_rates(jobs) if jobs else {})
         self.note(ats, len(jobs), fill, err=err, snap=snap)
 
-    def rows(self, pass_at: str) -> list[dict[str, Any]]:
+    def rows(self, pass_at: str) -> list[HealthRow]:
         """The `platform_health` rows of the pass, `fill` as JSON."""
         return [{"pass_at": pass_at, "ats": ats, "boards": c["boards"], "errors": c["errors"],
                  "partial": c["partial"], "empty": c["empty"], "jobs": c["jobs"],
@@ -95,12 +111,12 @@ def floors(ats: str) -> dict[str, float]:
     return FILL_FLOORS | dict(canary.get("min_fill", {}))
 
 
-def _bad(r: Mapping[str, Any]) -> float:
+def _bad(r: Counts) -> float:
     return (r["errors"] + r["empty"]) / r["boards"] if r["boards"] else 0.0
 
 
-def flags(row: Mapping[str, Any], history: list[Mapping[str, Any]],
-          policy: Mapping[str, Any] | None = None) -> list[str]:
+def flags(row: HealthRow, history: Sequence[Counts],
+          policy: Mapping[str, float] | None = None) -> list[str]:
     """Why `row` (one platform's pass) is unhealthy, given its earlier `history`.
 
     >>> past = [{"boards": 10, "errors": 0, "empty": 1}] * 3
@@ -116,7 +132,7 @@ def flags(row: Mapping[str, Any], history: list[Mapping[str, Any]],
     if row["boards"] < p["min_boards"]:
         return []
     out = []
-    base = [_bad(h) for h in history[:p["window"]] if h["boards"] >= p["min_boards"]]
+    base = [_bad(h) for h in history[:int(p["window"])] if h["boards"] >= p["min_boards"]]
     if len(base) >= p["min_passes"] and _bad(row) - statistics.median(base) >= p["margin"]:
         out.append(f"error+empty {_bad(row):.0%} of {row['boards']} boards, "
                    f"was {statistics.median(base):.0%}")
@@ -146,14 +162,14 @@ def record(conn: sqlite3.Connection, tally: Tally, now: datetime | None = None) 
     stamp = (now or datetime.now()).isoformat()
     rows = tally.rows(stamp)
     lines = [f"platform {r['ats']}: {why}" for r in rows for why in flags(
-        r, [dict(h) for h in store.platform_health_history(
+        r, [cast(Counts, dict(h)) for h in store.platform_health_history(
             conn, r["ats"], config.PLATFORM_HEALTH["window"], stamp)])]
-    store.record_platform_health(conn, rows)
+    store.record_platform_health(conn, [dict(r) for r in rows])
     return lines
 
 
 def alerts(conn: sqlite3.Connection) -> list[str]:
     """The flags of every platform's latest pass (the status view)."""
     return [f"{r['ats']}: {why}" for r in store.latest_platform_health(conn)
-            for why in flags(dict(r), [dict(h) for h in store.platform_health_history(
+            for why in flags(cast(HealthRow, dict(r)), [cast(Counts, dict(h)) for h in store.platform_health_history(
                 conn, r["ats"], config.PLATFORM_HEALTH["window"], r["pass_at"])])]

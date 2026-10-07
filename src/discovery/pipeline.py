@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TypedDict, cast
 
 from src.ats import coords
 from src.ats.board import board_for
@@ -72,7 +72,14 @@ class Candidate:
     ats_lead: str = ""
 
 
-def candidate_from_dict(d: dict[str, Any]) -> Candidate:
+class DiscoveryResult(TypedDict):
+    """What `discover` and `discover_companies` return."""
+    term: str
+    companies: list[Candidate]
+    gated_sites: list[dict[str, str]]       # `GatedSite` dumps
+
+
+def candidate_from_dict(d: Mapping[str, object]) -> Candidate:
     """A Candidate from a discovery-shaped dict: an entry of Claude's reply,
     a seed, or a directory name. The model's `slug_guess` is kept as
     given, apart from `slug`, the handle the resolver settles on.
@@ -216,20 +223,21 @@ async def validate_candidate(c: Candidate, delay: float = 0.3,
     return c
 
 
-def _merge_seeds(claude_raw: list[dict[str, Any]], seeds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_seeds(claude_raw: Sequence[Mapping[str, object]], seeds: Sequence[Mapping[str, object]]
+                 ) -> list[Mapping[str, object]]:
     """
     Append seed candidates to Claude's output, deduping by normalized
     name. Claude's entry wins when both sources have the same company
     (its ats may be more accurate than the seed's 'unknown').
     """
-    seen = {strip_suffixes(c.get("name") or "").lower() for c in claude_raw}
+    seen = {strip_suffixes(str(c.get("name") or "")).lower() for c in claude_raw}
     return list(claude_raw) + [
         s for s in seeds
-        if strip_suffixes(s["name"]).lower() not in seen
+        if strip_suffixes(str(s["name"])).lower() not in seen
     ]
 
 
-async def discover(term: str) -> dict[str, Any]:
+async def discover(term: str) -> DiscoveryResult:
     print(f"  > Asking Claude for companies in: {term!r}")
     payload = await call_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000,
                                      reply=DiscoverReply)
@@ -260,7 +268,7 @@ async def discover(term: str) -> dict[str, Any]:
     }
 
 
-async def _validate_all(candidate_dicts: list[dict[str, Any]], use_js: bool = True,
+async def _validate_all(candidate_dicts: Sequence[Mapping[str, object]], use_js: bool = True,
                         websearch: bool = True) -> list[Candidate]:
     """Validate candidate dicts concurrently; return Candidate objects in
     input order. Shared by Claude-driven discover() and name-list-driven
@@ -281,7 +289,7 @@ async def _validate_all(candidate_dicts: list[dict[str, Any]], use_js: bool = Tr
     total     = len(candidate_dicts)
     validated: list[Candidate | None] = [None] * total
 
-    async def _worker(irc: tuple[int, dict[str, Any]]) -> tuple[Candidate, list[str]]:
+    async def _worker(irc: tuple[int, Mapping[str, object]]) -> tuple[Candidate, list[str]]:
         cand = candidate_from_dict(irc[1])
         buf: list[str] = []
         # Small inter-step delay: each resolution step hits a different host,
@@ -303,7 +311,7 @@ async def _validate_all(candidate_dicts: list[dict[str, Any]], use_js: bool = Tr
 
     # A candidate whose validation raises is counted and kept, marked
     # with its error, rather than silently skipped.
-    def raised(irc: tuple[int, dict[str, Any]], e: Exception) -> None:
+    def raised(irc: tuple[int, Mapping[str, object]], e: Exception) -> None:
         nonlocal done
         done += 1
         cand = candidate_from_dict(irc[1])
@@ -315,7 +323,7 @@ async def _validate_all(candidate_dicts: list[dict[str, Any]], use_js: bool = Tr
     try:
         async for (idx, _rc), (cand, buf) in fan_out(
                 list(enumerate(candidate_dicts)), _worker,
-                lambda irc: (irc[1].get("name") or "").strip(),
+                lambda irc: str(irc[1].get("name") or "").strip(),
                 _DISCOVERY_WORKERS, with_item=True, on_error=raised,
                 stall_s=RESOLVE_STALL_S):
             done += 1
@@ -343,8 +351,8 @@ async def _validate_all(candidate_dicts: list[dict[str, Any]], use_js: bool = Tr
     return cast(list[Candidate], validated)
 
 
-async def discover_companies(candidate_dicts: list[dict[str, Any]], term: str,
-                             use_js: bool = False) -> dict[str, Any]:
+async def discover_companies(candidate_dicts: Sequence[Mapping[str, object]], term: str,
+                             use_js: bool = False) -> DiscoveryResult:
     """Resolve an explicit list of candidate dicts (e.g. harvested from the
     BCIWiki directory) to crawlable boards — no Claude call. Returns the
     same result shape as discover().
@@ -366,7 +374,7 @@ async def discover_companies(candidate_dicts: list[dict[str, Any]], term: str,
 
 # ─── Report ──────────────────────────────────────────────────────────────
 
-def write_discovery_report(result: dict[str, Any]) -> Path:
+def write_discovery_report(result: DiscoveryResult) -> Path:
     REPORT_DIR.mkdir(exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
     slug = "".join(c if c.isalnum() else "_" for c in result["term"].lower())[:40]
@@ -435,7 +443,7 @@ def write_discovery_report(result: dict[str, Any]) -> Path:
     return path
 
 
-def print_summary(result: dict[str, Any]) -> None:
+def print_summary(result: DiscoveryResult) -> None:
     companies = result["companies"]
     confirmed = [c for c in companies if c.confirmed]
     w = 62

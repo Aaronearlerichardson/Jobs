@@ -28,7 +28,7 @@ from src.rows import BoardHit, CompanyIn, FetchedJob
 if TYPE_CHECKING:
     import sqlite3
 
-    from .pipeline import Candidate
+    from .pipeline import Candidate, DiscoveryResult
 
 
 def _candidate_hit(c: Candidate) -> BoardHit | None:
@@ -65,7 +65,7 @@ def _candidate_hit(c: Candidate) -> BoardHit | None:
     return hit if store.board_key(coords.from_hit(hit)) else None
 
 
-async def apply_to_store(result: dict[str, Any], dry_run: bool = False) -> list[str]:
+async def apply_to_store(result: DiscoveryResult, dry_run: bool = False) -> list[str]:
     """Mission-score confirmed candidates and write them to the companies
     table; return summary lines. `dry_run=True` reports without writing —
     and without paying for a mission call.

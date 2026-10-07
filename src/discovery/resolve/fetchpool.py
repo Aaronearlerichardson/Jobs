@@ -18,7 +18,7 @@ import logging
 import socket
 import time
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from src import config, runstate
@@ -27,6 +27,16 @@ from src.match.names import domain_tokens
 from src.net import http
 from src.net.http import HEADERS, HostBreaker, Unreachable
 from src.net.util import host_of, origin_of
+
+class Page(Protocol):
+    """The part of a fetched response the resolvers read (`requests.Response`'s)."""
+    @property
+    def url(self) -> str: ...
+    @property
+    def text(self) -> str: ...
+    @property
+    def content(self) -> bytes: ...
+
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.fetchpool")
@@ -64,7 +74,7 @@ ROOT_PATTERNS = [p for p in _URL_PATTERNS if p == ("www.{tok}.com", "/")]
 
 def candidate_urls(name: str, careers_url: str = "",
                    patterns: list[tuple[str, str]] = _URL_PATTERNS,
-                   cap: int = 12, locale_paths: Sequence[str] | None = None
+                   cap: int | None = 12, locale_paths: Sequence[str] | None = None
                    ) -> list[str]:
     """Careers-page URLs to fetch for `name`, best first, `cap` at most:
     each is a speculative GET, and a miss pays every one of them.
@@ -161,11 +171,11 @@ _DEAD_HOSTS = runstate.per_run(functools.partial(HostBreaker, ttl=_DEAD_HOST_TTL
 # intertek.com, and a 403ing infosys.com in the 2026-09-01 add-names runs).
 # Same URL, same run, same answer: hand back the first one. Bounded (see
 # _memo_put) so a long discovery run can't hoard page bodies.
-_PAGE_MEMO: Callable[[], dict[str, tuple[float, Any]]] = \
+_PAGE_MEMO: Callable[[], dict[str, tuple[float, Page | None]]] = \
     runstate.per_run(dict)
 
 
-def _memo_get(url: str) -> tuple[bool, Any]:
+def _memo_get(url: str) -> tuple[bool, Page | None]:
     memo = _PAGE_MEMO()
     hit = memo.get(url)
     if hit is None:
@@ -176,7 +186,7 @@ def _memo_get(url: str) -> tuple[bool, Any]:
     return True, hit[1]
 
 
-def _memo_put(url: str, resp: Any) -> None:
+def _memo_put(url: str, resp: Page | None) -> None:
     """Remember `url`'s outcome: 512 URLs at most, the oldest dropped
     first, and no body over 2 MB."""
     if resp is not None and len(resp.content or b"") > 2 * 1024 * 1024:
@@ -189,7 +199,7 @@ def _memo_put(url: str, resp: Any) -> None:
 
 async def _fetch_page(url: str,
                       timeout: float | tuple[float, float] = PROBE_TIMEOUT
-                      ) -> Any:
+                      ) -> Page | None:
     """GET one careers-page candidate. Short timeout: most are speculative
     domain/path guesses that 404 or don't resolve; a real careers page
     answers fast. Returns the Response on 200 with real content (its text
@@ -288,7 +298,7 @@ async def _drop_unresolvable(urls: list[str], timeout: float = 4.0) -> list[str]
             if host_of(u) not in slow and not dead.dead(u)]
 
 
-async def _fetch_all(urls: list[str]) -> dict[str, Any]:
+async def _fetch_all(urls: list[str]) -> dict[str, Page | None]:
     """Fetch candidates concurrently (a miss otherwise pays ~12 sequential
     GETs — the dominant per-candidate latency in a bulk run); results are
     evaluated in priority order regardless of completion order. Every
@@ -307,7 +317,7 @@ async def _fetch_all(urls: list[str]) -> dict[str, Any]:
         return out
     slots = asyncio.Semaphore(8)
 
-    async def fetch(url: str) -> Any:
+    async def fetch(url: str) -> Page | None:
         async with slots:
             return await _fetch_page(url)
 

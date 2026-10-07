@@ -16,7 +16,7 @@ import asyncio
 import re
 import sys
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TypedDict, Unpack
 
 from src import config, runstate
 from src.ats.board import BOARDS
@@ -25,6 +25,7 @@ from src.match.names import domain_tokens, name_key, risky_domain_tokens
 from src.net import http
 from src.net.http import HEADERS
 from src.rows import FetchedJob
+from .fetchpool import Page
 
 
 # ─── Truncated-domain corroboration ───────────────────────────────────────
@@ -103,13 +104,13 @@ def _corroborates(text: str | None, name: str | None, skip_token: str = "") -> b
 _FOREIGN_ANNOUNCED: Callable[[], set[tuple[str, str, str]]] = runstate.per_run(set)
 
 
-def _words(parts: Sequence[Any]) -> list[str]:
+def _words(parts: Sequence[object]) -> list[str]:
     """A handle's parts that can name an employer: the numeric ones (a
     server pod) dropped."""
     return [str(p) for p in parts if p is not None and not str(p).isdigit()]
 
 
-def _affinity(name: str, parts: Sequence[Any]) -> bool:
+def _affinity(name: str, parts: Sequence[object]) -> bool:
     """True if a detected handle's `parts` share an identity token with the
     company name: any part, either direction, or a 4+-char shared prefix
     (tenants abbreviate: 'vhr-unither').
@@ -156,7 +157,7 @@ def _affinity(name: str, parts: Sequence[Any]) -> bool:
     return False
 
 
-async def foreign_board(name: str, ats: str, handle: Any) -> bool:
+async def foreign_board(name: str, ats: str, handle: str | Sequence[object] | None) -> bool:
     """True when `handle`, a board of `ats` detected for `name`, should NOT
     be attributed to it: `ats`'s spec says a board can be a parent
     company's (`discovery.shared`), the handle's parts share no identity
@@ -237,8 +238,15 @@ def corroborated(url: str, name: str, text: str | None) -> bool:
     return not risky or _corroborates(text, name, risky)
 
 
-async def candidate_responses(name: str, careers_url: str = "", **kw: Any
-                              ) -> list[tuple[str, Any]]:
+class CandidateKw(TypedDict, total=False):
+    """`fetchpool.candidate_urls`' keywords."""
+    patterns: list[tuple[str, str]]
+    cap: int | None
+    locale_paths: Sequence[str] | None
+
+
+async def candidate_responses(name: str, careers_url: str = "", **kw: Unpack[CandidateKw]
+                              ) -> list[tuple[str, Page | None]]:
     """`name`'s candidate URLs paired with what each one answered, in
     candidate-priority order. `None` where a URL did not answer at all.
     `kw` goes to `candidate_urls` (patterns, cap).
@@ -262,8 +270,8 @@ async def candidate_responses(name: str, careers_url: str = "", **kw: Any
     return [(u, responses.get(u)) for u in urls]
 
 
-async def candidate_pages(name: str, careers_url: str = "", **kw: Any
-                          ) -> list[Any]:
+async def candidate_pages(name: str, careers_url: str = "", **kw: Unpack[CandidateKw]
+                          ) -> list[Page]:
     """The responses from `name`'s candidate URLs, best first, with the
     ones that did not answer and the ones that do not corroborate (judged
     off the loop) already dropped. `kw` goes to `candidate_urls`

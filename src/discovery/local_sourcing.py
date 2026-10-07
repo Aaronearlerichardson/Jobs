@@ -32,7 +32,7 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import cast
 
 from src import config
 from src import store
@@ -47,6 +47,7 @@ from src.store.companies import BoardPlan
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
 from .resolve.probes import nc_count, probe_company
+from .resolve.sniffer import Detection
 from .resolve.websearch_board import websearch_board
 
 
@@ -68,7 +69,7 @@ def _boardless(names: list[str], hits: Iterable[BoardHit],
     return [n for n in names if name_key(n) not in have]
 
 
-async def _hit_from_detection(name: str, det: dict[str, Any]) -> BoardHit:
+async def _hit_from_detection(name: str, det: Detection) -> BoardHit:
     """A sniff/websearch DETECTION turned into a hit, by asking the board
     how many LOCAL jobs it actually holds.
 
@@ -239,7 +240,8 @@ async def _websearch_pass(names: list[str], hits: list[BoardHit],
 
     async def _websearch_one(n: str) -> BoardHit:
         w = await websearch_board(n)
-        return await _hit_from_detection(n, w) if w else {
+        # TODO(any-zero): websearch_board still returns dict[str, Any]; type it as Detection.
+        return await _hit_from_detection(n, Detection(**w)) if w else {
             "name": n, "reason": "no-board-found"}
 
     await _resolve_pass(todo, _websearch_one, "[WEBSEARCH]", hits, misses,
@@ -269,7 +271,7 @@ def _reduce_hits(names: list[str], hits: list[BoardHit], pass_misses: list[Board
 
     # De-dup by resolved board (same slug/triple reached via different
     # names, e.g. "BioAgilytix" vs "BioAgilytix Labs"); keep the shorter.
-    by_board: dict[tuple[Any, str], BoardHit] = {}
+    by_board: dict[tuple[str, str], BoardHit] = {}
     for h in hits:
         key = (h["ats"], str(h["slug"]))
         if key not in by_board or len(h["name"]) < len(by_board[key]["name"]):
@@ -621,7 +623,7 @@ def _print_scored(name: str, row: CompanyRow | CompanyIn, flag: str) -> None:
 
 async def populate_companies(extra_names: list[str] | None = None,
                              include_missions: list[str] | None = None,
-                             dork: bool = True) -> list[dict[str, Any]]:
+                             dork: bool = True) -> list[dict[str, object]]:
     """
     Full sourcing pass → SQL store: discover NC-local boards, score each
     company's MISSION once (cached), and upsert into the `companies` table.
@@ -647,7 +649,7 @@ async def populate_companies(extra_names: list[str] | None = None,
         tracked = await db.run(_productive_keys)
     confirmed, _, misses = await discover_local(extra_names, tracked=tracked)
     async with store.Writer() as db:
-        written = []
+        written: list[dict[str, object]] = []
 
         # Misses first: they are pure local writes, so the roster's failure
         # record survives even if the mission-scoring pass below is interrupted.
@@ -763,7 +765,7 @@ async def queue_names(db: store.Writer, names: Collection[str], source: str,
     return queued, missed
 
 
-async def add_board(name: str, url: str, capture: bool = False) -> dict[str, Any] | None:
+async def add_board(name: str, url: str, capture: bool = False) -> Detection | None:
     """Register a board the user already knows — no guessing. `url` may be
     the ATS board itself (myworkdayjobs / greenhouse / lever / ...) or the
     company's careers page; coordinates are detected, the board NC-counted,
@@ -817,9 +819,9 @@ async def add_board(name: str, url: str, capture: bool = False) -> dict[str, Any
         return {"ats": store.CAPTURE_ATS, "careers_url": url}
 
     hit = detect("", url, leads=False)
-    found: dict[str, Any] | None
+    found: Detection | None
     if hit:
-        found = pack(hit[1], hit[2], url)
+        found = Detection(**pack(hit[1], hit[2], url))
     else:
         found = await sniff_ats(name, careers_url=url)
     if not found:

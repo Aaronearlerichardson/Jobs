@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TypedDict
 
 from src import config
 from src.ats import coords
@@ -33,7 +33,20 @@ from .probes import SCANNED, confirm, slug_keyed
 _log = logging.getLogger("src.discovery.resolve.sniffer")
 
 
-async def _scan_root(name: str, careers_url: str = "") -> dict[str, Any] | None:
+#: A detected handle: a slug, or Workday's (tenant, pod, site).
+type Handle = str | tuple[str | int, ...] | None
+
+
+class Detection(TypedDict, total=False):
+    """A detected board, as `signatures.pack` writes it: the handle under
+    `triple` where it spans columns, else `slug`."""
+    ats: str
+    careers_url: str
+    slug: Handle
+    triple: Handle
+
+
+async def _scan_root(name: str, careers_url: str = "") -> Detection | None:
     """Fetch the bare homepage(s) (candidate_urls with ROOT_PATTERNS) and
     return the first fetchable ATS hit (packed like sniff_ats), else None.
 
@@ -52,18 +65,18 @@ async def _scan_root(name: str, careers_url: str = "") -> dict[str, Any] | None:
         if hit:
             if await foreign_board(name, hit[1], hit[2]):
                 continue
-            return pack(hit[1], hit[2], r.url)
+            return Detection(**pack(hit[1], hit[2], r.url))
     return None
 
 
 # ─── Public API ──────────────────────────────────────────────────────────
 
-async def sniff_ats(name: str, careers_url: str = "") -> dict[str, Any] | None:
+async def sniff_ats(name: str, careers_url: str = "") -> Detection | None:
     """Raw detection: first fetchable ATS found, else a custom self-hosted
     board, else None. Shape:
     {"ats", "slug"|"triple", "careers_url"}. Each page is read off the
     loop."""
-    custom = None
+    custom: Detection | None = None
     n_pages = 0
     for r in await candidate_pages(name, careers_url):
         n_pages += 1
@@ -75,7 +88,7 @@ async def sniff_ats(name: str, careers_url: str = "") -> dict[str, Any] | None:
             else:               # still capture the company's OWN listings
                 _log.debug("sniff %s: %s %r found on %s",
                            name, hit[1], hit[2], r.url)
-                return pack(hit[1], hit[2], r.url)
+                return Detection(**pack(hit[1], hit[2], r.url))
         if custom is None:
             # Custom board: resolve to the page that actually holds the
             # listings (this page, or the openings page one hop away).
@@ -96,8 +109,8 @@ async def sniff_ats(name: str, careers_url: str = "") -> dict[str, Any] | None:
     return custom
 
 
-async def _confirmed(ats: str, slug: Any, page_url: str,
-                     tried: dict[Any, int | None]) -> int | None:
+async def _confirmed(ats: str, slug: Handle, page_url: str,
+                     tried: dict[tuple[str, str | None], int | None]) -> int | None:
     """A live posting count for a detection on `page_url` (probes.confirm),
     or None. Asked once per board (`tried` memoizes it), at the careers URL
     `pack` gives, and only where no other probe counts the board and the
@@ -120,7 +133,7 @@ async def sniff_careers_ats(name: str, careers_url: str = "") -> BoardHit | None
     (`_confirmed`); otherwise surface the highest-priority detection as a
     lead."""
     lead: BoardHit | None = None  # first (highest-priority) unconfirmable detection seen
-    tried: dict[Any, int | None] = {}
+    tried: dict[tuple[str, str | None], int | None] = {}
     for r in await candidate_pages(name, careers_url):
         hit = await asyncio.to_thread(lambda: detect(r.text, r.url))
         if not hit:

@@ -34,8 +34,8 @@ import functools
 import html
 import re
 import time
-from collections.abc import Callable, Mapping
-from typing import Any, Literal, cast, overload
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Literal, cast, overload
 from urllib.parse import unquote
 
 from src.match.locality import MONTH_ABBRS, location_snippet
@@ -369,7 +369,7 @@ def _transform(name: str) -> Callable[[JSON], JSON]:
     return lambda v: TRANSFORMS[t](v)
 
 
-def value(spec: Any, entry: JSON, ctx: Mapping[str, JSON] | None = None,
+def value(spec: JSON, entry: JSON, ctx: Mapping[str, JSON] | None = None,
           strict: bool = False) -> JSON:
     """The value `spec` names in `entry`. `ctx` holds the handle parts and
     any "_" fields already computed, which "format" templates read first.
@@ -407,7 +407,7 @@ def value(spec: Any, entry: JSON, ctx: Mapping[str, JSON] | None = None,
     return reader(spec, strict)(entry, ctx or {})
 
 
-def str_reader(spec: Any, strict: bool = False) -> StrReader:
+def str_reader(spec: JSON, strict: bool = False) -> StrReader:
     """`reader(spec)` for a row field that holds text (id, title, url,
     location, description, posted_at, remote_hint)."""
     # TODO(any-zero): a spec can name a list or dict here, and the reader
@@ -415,7 +415,7 @@ def str_reader(spec: Any, strict: bool = False) -> StrReader:
     return cast(StrReader, reader(spec, strict))
 
 
-def reader(spec: Any, strict: bool = False) -> Reader:
+def reader(spec: JSON, strict: bool = False) -> Reader:
     """Field spec `spec` read once: a callable (entry, ctx) -> the value
     `value` would give. The engine builds one per spec field when a board
     is built, so a row costs no spec interpretation."""
@@ -423,10 +423,11 @@ def reader(spec: Any, strict: bool = False) -> Reader:
         return lambda entry, ctx: None
     if isinstance(spec, str):
         return _path_reader(spec)
+    spec = _as_map(spec)
     body = _operator(spec, strict)
-    when = _condition(spec["when"]) if "when" in spec else None
+    when = _condition(_as_map(spec["when"])) if "when" in spec else None
     other = reader(spec.get("else"))
-    transform = _transform(spec["transform"]) if spec.get("transform") else None
+    transform = _transform(_as_str(spec["transform"])) if spec.get("transform") else None
     has_default, default = "default" in spec, spec.get("default")
     if when is None and transform is None and not has_default:
         return body
@@ -450,11 +451,39 @@ def _path_reader(p: str) -> Reader:
     return lambda entry, ctx: get(entry)
 
 
-def _operator(spec: dict[str, Any], strict: bool) -> Reader:
+def _as_map(v: JSON) -> Mapping[str, JSON]:
+    """`v` as a mapping; `check` has vouched for a loaded spec."""
+    if not isinstance(v, Mapping):
+        raise TypeError(f"not a mapping: {v!r}")
+    return v
+
+
+def _as_str(v: JSON) -> str:
+    """`v` as text; `check` has vouched for a loaded spec."""
+    if not isinstance(v, str):
+        raise TypeError(f"not text: {v!r}")
+    return v
+
+
+def _as_seq(v: JSON) -> Sequence[JSON]:
+    """`v` as a sequence; `check` has vouched for a loaded spec."""
+    if not isinstance(v, Sequence):
+        raise TypeError(f"not a sequence: {v!r}")
+    return v
+
+
+def _as_iter(v: JSON) -> Iterable[JSON]:
+    """`v` as something to iterate; `check` has vouched for a loaded spec."""
+    if not isinstance(v, Iterable):
+        raise TypeError(f"not iterable: {v!r}")
+    return v
+
+
+def _operator(spec: Mapping[str, JSON], strict: bool) -> Reader:
     """The reader of a dict spec's operator (`of` by default), without its
     modifiers."""
     if "first" in spec:
-        subs = [reader(s) for s in spec["first"]]
+        subs = [reader(s) for s in _as_iter(spec["first"])]
 
         def first(entry: JSON, ctx: Mapping[str, JSON]) -> JSON:
             for f in subs:
@@ -464,16 +493,19 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
             return None
         return first
     if "join" in spec:
-        subs, sep, cap = [reader(s) for s in spec["join"]], spec.get("sep", " "), spec.get("max")
+        subs, sep, cap = ([reader(s) for s in _as_iter(spec["join"])],
+                          _as_str(spec.get("sep", " ")), spec.get("max"))
+        if cap is not None and not isinstance(cap, int):
+            raise TypeError(f"not a count: {cap!r}")
 
         def join(entry: JSON, ctx: Mapping[str, JSON]) -> str:
             parts = [s for s in (str(p).strip() for p in _flat([f(entry, ctx) for f in subs])
                                  if p and not isinstance(p, dict)) if s]
-            return cast(str, sep.join(parts[:cap]))
+            return sep.join(parts[:cap])
         return join
     if "each" in spec:
-        items_of, do = _getter(spec["each"]), reader(spec.get("do", ""))
-        skip = _condition(spec["skip"]) if spec.get("skip") else None
+        items_of, do = _getter(_as_str(spec["each"])), reader(spec.get("do", ""))
+        skip = _condition(_as_map(spec["skip"])) if spec.get("skip") else None
 
         def each(entry: JSON, ctx: Mapping[str, JSON]) -> JSON:
             items = items_of(entry)
@@ -481,10 +513,11 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
                     if not (skip and isinstance(i, dict) and skip(i, ctx))]
         return each
     if "merge" in spec:
-        primary, extras = reader(spec["merge"]["primary"]), reader(spec["merge"]["extras"])
+        merge = _as_map(spec["merge"])
+        primary, extras = reader(merge["primary"]), reader(merge["extras"])
         return lambda entry, ctx: merge_locations(primary(entry, ctx), _flat(extras(entry, ctx)))
     if "format" in spec:
-        template = spec["format"]
+        template = _as_str(spec["format"])
         getters = {name: _getter(name) for _lit, name, _n, _t in _template(template)
                    if name is not None}
 
@@ -499,7 +532,7 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
     return reader(spec.get("of"))
 
 
-def check(spec: Any) -> None:
+def check(spec: JSON) -> None:
     """Raise ValueError when the grammar cannot read field spec `spec`.
 
     >>> check({"of": "content", "transform": "html_text"})
@@ -517,19 +550,20 @@ def check(spec: Any) -> None:
     ops = set(spec) & operators
     if len(ops) > 1 or set(spec) - operators - modifiers:
         raise ValueError(f"bad field spec keys {sorted(spec)}")
-    if spec.get("transform") and spec["transform"].partition(":")[0] not in TRANSFORMS:
+    if spec.get("transform") and _as_str(spec["transform"]).partition(":")[0] not in TRANSFORMS:
         raise ValueError(f"unknown transform {spec['transform']!r}")
     if "format" in spec:
-        check_template(spec["format"])
-    for sub in (s for op in ("first", "join") if op in spec for s in spec[op]):
+        check_template(_as_str(spec["format"]))
+    for sub in (s for op in ("first", "join") if op in spec for s in _as_iter(spec[op])):
         check(sub)
     for key in ("of", "else", "do"):
         check(spec.get(key))
     if "skip" in spec:
         _check_cond(spec["skip"])
     if "merge" in spec:
-        check(spec["merge"]["primary"])
-        check(spec["merge"]["extras"])
+        merge = _as_map(spec["merge"])
+        check(merge["primary"])
+        check(merge["extras"])
     if "when" in spec:
         _check_cond(spec["when"])
 
@@ -548,21 +582,21 @@ def check_template(template: str) -> None:
             raise ValueError(f"unknown transform {m.group(3)!r}")
 
 
-def _check_cond(cond: Any) -> None:
+def _check_cond(cond: JSON) -> None:
     conditions = {"any", "all", "truthy", "falsy", "eq", "contains", "past"}
     if not isinstance(cond, dict) or len(cond) != 1 or set(cond) - conditions:
         raise ValueError(f"bad condition {cond!r}")
     (op, arg), = cond.items()
     if op in ("any", "all"):
-        for c in arg:
+        for c in _as_iter(arg):
             _check_cond(c)
     elif op in ("eq", "contains"):
-        check(arg[0])
+        check(_as_seq(arg)[0])
     else:
         check(arg)
 
 
-def holds(cond: dict[str, Any], entry: JSON, ctx: Mapping[str, JSON] | None = None) -> bool:
+def holds(cond: Mapping[str, JSON], entry: JSON, ctx: Mapping[str, JSON] | None = None) -> bool:
     """Whether condition `cond` holds for `entry`. `eq` compares strings
     case-insensitively and anything else by type and value; `contains`
     searches a list's items joined, for a needle that is literal or, as
@@ -583,11 +617,11 @@ def holds(cond: dict[str, Any], entry: JSON, ctx: Mapping[str, JSON] | None = No
     return _condition(cond)(entry, ctx or {})
 
 
-def _condition(cond: dict[str, Any]) -> Callable[[JSON, Mapping[str, JSON]], bool]:
+def _condition(cond: Mapping[str, JSON]) -> Callable[[JSON, Mapping[str, JSON]], bool]:
     """Condition `cond` read once: a callable (entry, ctx) -> `holds`."""
     (op, arg), = cond.items()
     if op in ("any", "all"):
-        subs, agg = [_condition(c) for c in arg], any if op == "any" else all
+        subs, agg = [_condition(_as_map(c)) for c in _as_iter(arg)], any if op == "any" else all
         return lambda entry, ctx: agg(c(entry, ctx) for c in subs)
     if op in ("truthy", "falsy", "past"):
         f = reader(arg)
@@ -600,9 +634,10 @@ def _condition(cond: dict[str, Any]) -> Callable[[JSON, Mapping[str, JSON]], boo
             v = str(f(entry, ctx) or "")
             return bool(re.match(r"\d{4}-\d{2}-\d{2}", v)) and v[:10] < time.strftime("%Y-%m-%d")
         return past
-    f = reader(arg[0])
+    pair = _as_seq(arg)
+    f = reader(pair[0])
     if op == "eq":
-        want = arg[1]
+        want = pair[1]
         if isinstance(want, str):
             low = want.lower()
 
@@ -616,7 +651,7 @@ def _condition(cond: dict[str, Any]) -> Callable[[JSON, Mapping[str, JSON]], boo
             return type(v) is type(want) and v == want
         return eq
     if op == "contains":
-        needle = arg[1]
+        needle = _as_str(pair[1])
         of_needle = reader(needle[1:]) if needle.startswith("$") else None
         low = needle.lower()
 

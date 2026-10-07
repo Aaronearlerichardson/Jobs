@@ -6,7 +6,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timedelta
-from typing import Any
+from typing import NotRequired, TypedDict, cast
 
 from src import store
 from src.ats.board import company as company_fetch
@@ -17,10 +17,20 @@ from src.ops.maintenance import (_t, board_index, board_match,
 from src.rows import CompanyRow, FetchedJob
 
 
+class StaleRow(TypedDict):
+    """A stored row `stale_body_rows` selects (`columns` always names job_id,
+    title and url; company_id only when asked)."""
+    job_id: str
+    title: str | None
+    url: str | None
+    company_id: NotRequired[int | None]
+    desc_checked_at: str | None
+
+
 def stale_body_rows(conn: sqlite3.Connection, where: str,
                     columns: str = "job_id, title, url", min_len: int = 200,
                     retry_days: int = 3, limit: int | None = None,
-                    label: str = "description(s)") -> list[dict[str, Any]]:
+                    label: str = "description(s)") -> list[StaleRow]:
     """Stored rows with no usable body yet, minus the ones a recent attempt
     already failed on, and the header line saying so.
 
@@ -38,7 +48,7 @@ def stale_body_rows(conn: sqlite3.Connection, where: str,
     """
     cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
               if retry_days else "9999")
-    rows = [dict(r) for r in conn.execute(
+    rows = [cast(StaleRow, dict(r)) for r in conn.execute(
         f"SELECT {columns}, desc_checked_at FROM open_jobs "
         f"WHERE {where} "
         "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
@@ -110,8 +120,8 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
                             min_len=min_len, retry_days=retry_days,
                             limit=limit,
                             label="description(s) via company board(s)")
-        groups: list[tuple[CompanyRow, list[dict[str, Any]]]] = []
-        boardless: list[dict[str, Any]] = []
+        groups: list[tuple[CompanyRow, list[StaleRow]]] = []
+        boardless: list[StaleRow] = []
         for cid, rs in group_by_company(rows).items():
             company = await db.run(store.get_company, cid)
             if not company or not company.get("ats"):
@@ -124,7 +134,7 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
         if boardless:
             await db.batch(_save_bodies, [(r["job_id"], None) for r in boardless])
 
-        async def _bodies(group: tuple[CompanyRow, list[dict[str, Any]]]) -> list[tuple[str, str | None]]:
+        async def _bodies(group: tuple[CompanyRow, list[StaleRow]]) -> list[tuple[str, str | None]]:
             """One company's fetching: the batched board pull for the common
             case (one fetch per company), then per-job-URL hydration for the
             rows that pull didn't cover. Boards we can't pull simply yield
@@ -139,7 +149,8 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
                 if not desc and r.get("url"):
                     # Board didn't cover this row — hydrate from the job's own
                     # detail page (JSON-LD / career-site markup).
-                    stub: FetchedJob = {"title": r["title"], "url": r["url"],
+                    # TODO(any-zero): title may be None; passed as-is.
+                    stub: FetchedJob = {"title": cast(str, r["title"]), "url": r["url"],
                             "ats": company.get("ats"), "description": ""}
                     await company_fetch.hydrate_description(stub, company)
                     desc = stub.get("description")

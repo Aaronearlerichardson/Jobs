@@ -28,14 +28,17 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import TypedDict
+
+from pydantic import BaseModel
 
 from src import config, store
 from src.ats import coords
 from src.ats.board import BOARDS
 from src.discovery.name_sources import blocked_keys
 from src.discovery.resolve import directory
-from src.discovery.resolve.directory import Detected, board_of, cache_path, is_url, locate, query
+from src.discovery.resolve.probes import Slug
+from src.discovery.resolve.directory import Detected, Row, board_of, cache_path, is_url, locate, query
 from src.match.gates import exclude_reason, is_technical_role
 from src.match.locality import is_nc
 from src.match.names import name_key
@@ -43,6 +46,7 @@ from src.net import http
 from src.net.util import JSON
 from src.rows import BoardHit
 from src.runstate import per_run
+from src.store.companies import BoardKey
 
 from .vocab import title_vocab, word_score, words
 
@@ -54,7 +58,7 @@ class DirectoryBoard(TypedDict):
     """One board with postings in the locality."""
     name: str
     ats: str
-    handle: Any                 # a slug, or Workday's (tenant, pod, site)
+    handle: Slug                # a slug, or Workday's (tenant, pod, site)
     careers_url: str | None     # only for a platform whose handle is the URL
     nc_postings: int
     gate_passes: int            # of them, titles the local engine's gate keeps
@@ -63,7 +67,7 @@ class DirectoryBoard(TypedDict):
     title_words: set[str]       # the words of every local posting title (`words`)
 
 
-def _key(found: Detected) -> tuple[Any, ...] | None:
+def _key(found: Detected) -> BoardKey | None:
     """The store's identity of a detected board (`store.board_key`)."""
     return store.board_key(coords.columns(found.ats, found.handle, found.careers_url))
 
@@ -140,7 +144,7 @@ async def _cached(rel: str) -> Path | None:
     return path
 
 
-async def _read(rel: str, sql: str, args: Sequence[str] = ()) -> list[tuple[Any, ...]] | None:
+async def _read(rel: str, sql: str, args: Sequence[str] = ()) -> list[Row] | None:
     """`sql` over the directory's file `rel` (`?` is the file); None when it
     cannot be read. A remote file is read in place (httpfs), else through
     the cache."""
@@ -178,14 +182,14 @@ class Scan:
     """
 
     def __init__(self) -> None:
-        self.boards: dict[tuple[Any, ...], DirectoryBoard] = {}
+        self.boards: dict[BoardKey, DirectoryBoard] = {}
         self.posts: Counter[str] = Counter()        # platform -> local postings
-        self.leads: defaultdict[str, set[Any]] = defaultdict(set)  # unsupported platform -> boards
+        self.leads: defaultdict[str, set[Slug | str]] = defaultdict(set)  # unsupported platform -> boards
         self.read = 0                               # rows past the prefilter
         self.gates: dict[tuple[str, str | None], bool] = {}   # (track id, title) -> the title gate's verdict
 
-    def add(self, rows: Iterable[tuple[Any, ...]], label: str,
-            names: dict[tuple[Any, ...], str], track: config.RuntimeTrack) -> None:
+    def add(self, rows: Iterable[Row], label: str,
+            names: dict[BoardKey, str], track: config.RuntimeTrack) -> None:
         """Fold in `rows` ((company, url, location, title)) of the file
         `label`: the local ones, by board."""
         for company, url, location, title in rows:
@@ -235,6 +239,11 @@ class Scan:
                 samples.append(title)
 
 
+class _Manifest(BaseModel):
+    """The directory's manifest.json: the platforms it has files for."""
+    by_ats: dict[str, object] | list[str] = {}
+
+
 async def _files() -> list[str]:
     """The platform files to read: the configured `files`, else every one
     the directory's manifest lists. [] when there is no readable manifest."""
@@ -250,14 +259,13 @@ async def _files() -> list[str]:
                 Path(locate("manifest.json")).read_text, "utf-8"))
         except (OSError, ValueError):
             manifest = dict[str, JSON]()
-    # TODO(any-zero): HEAD trusts the manifest shape; parse it at the edge.
-    return list(cast("Iterable[str]", cast("dict[str, JSON]", manifest or {}).get("by_ats", {})))
+    return list(_Manifest.model_validate(manifest or {}).by_ats)
 
 
-def _names() -> dict[tuple[Any, ...], str]:
+def _names() -> dict[BoardKey, str]:
     """The directory's board names by board key (`_key`), the first listed
     winning."""
-    names: dict[tuple[Any, ...], str] = {}
+    names: dict[BoardKey, str] = {}
     for found, name in directory.index().named:
         if key := _key(found):
             names.setdefault(key, name)

@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from typing import Annotated, Any, ClassVar, Literal, Self, Union, cast, get_args
+from typing import Annotated, ClassVar, Literal, Self, Union, cast, get_args
 
 from cssselect import SelectorError
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
-                      Discriminator, Field, Strict, StringConstraints, Tag,
+                      Discriminator, Field, SkipValidation, Strict, StringConstraints, Tag,
                       ValidationError, model_validator)
 from typing_extensions import TypedDict
 
@@ -82,7 +82,7 @@ def _css(v: str) -> str:
     return v
 
 
-def _listed(v: list[Any] | str | dict[str, Any]) -> list[Any]:
+def _listed(v: JSON) -> JSON:
     """A key taking one value or several: a lone value as a list of one."""
     return [v] if isinstance(v, (str, dict)) else v
 
@@ -98,7 +98,8 @@ Template = Annotated[str, Strict(), StringConstraints(min_length=1),
 #: A CSS selector template, compiled as the spec loads (`net.util.css`).
 Css = Annotated[Template, AfterValidator(_css)]
 #: A field-grammar spec (fields.py): a path, a dict, or None.
-Grammar = Annotated[Any, AfterValidator(lambda v: [v, fields.check(v)][0])]
+Raw = Annotated[JSON, SkipValidation()]
+Grammar = Annotated[Raw, AfterValidator(lambda v: [v, fields.check(v)][0])]
 Paths = Annotated[tuple[Str, ...], BeforeValidator(_listed)]
 #: Search terms each placed among every platform's: [position, text] pairs.
 Ranked = tuple[tuple[Int, Str], ...]
@@ -220,7 +221,7 @@ class HtmlDecoder(_Decoder):
                                              '[{name, options: [{value, label}]}]')
 
 
-def _decoder_kind(v: Any) -> str | None:
+def _decoder_kind(v: object) -> str | None:
     """A decoder's `kind`: a dict naming none is JsonDecoder's default."""
     if isinstance(v, dict):
         return cast(str | None, v["kind"] if "kind" in v else JsonDecoder.model_fields["kind"].default)
@@ -339,7 +340,7 @@ class _Call(_Spec):
     method: Literal["GET", "POST"] = Field("GET", description="The HTTP method")
     params: dict[Str, Str] | None = Field(None, description="Query parameters; a None one is "
                                                             "left off")
-    json_: dict[Str, Any] | None = Field(None, alias="json", description="A JSON body template")
+    json_: dict[Str, Raw] | None = Field(None, alias="json", description="A JSON body template")
     headers: dict[Str, Str] = Field(default_factory=dict,
                                 description="Over the shared request headers")
     decoder: Decoder = Field(JsonDecoder(),
@@ -443,7 +444,7 @@ class Rescue(_Spec):
 
 
 class Rule(_Spec):
-    when: Annotated[dict[Str, Any],
+    when: Annotated[dict[Str, Raw],
     AfterValidator(lambda v: [v, fields.check({"const": 1, "when": v})][0])] = Field(
         description="A condition on the record")
     why: Grammar = Field(None, description="Names the reason")
@@ -468,7 +469,7 @@ class Closure(_Adaptation):
                                                         "proving it closed")
 
 
-def _default_of(model: type[BaseModel], key: str) -> Any:
+def _default_of(model: type[BaseModel], key: str) -> object:
     """The default of `model`'s field named (or aliased) `key`; a marker
     no value equals when there is no such field."""
     info = next((f for n, f in model.model_fields.items() if key in (n, f.alias)), None)
@@ -518,10 +519,12 @@ class BoardSpec(_Spec):
 
     @model_validator(mode="before")
     @classmethod
-    def _alternatives(cls, data: Any) -> Any:
+    def _alternatives(cls, data: object) -> object:
         """A lone listing as the one alternative; a later one completed
         from the first, a key it resets to its default left unset."""
-        listing = data.get("listing") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return data
+        listing = data.get("listing")
         if isinstance(listing, dict):
             return {**data, "listing": [listing]}
         if not (isinstance(listing, list) and listing
@@ -578,7 +581,7 @@ def parse(name: str, raw: JSON) -> BoardSpec:
         raise ValueError(f"{name}: {e}") from None
 
 
-def walk(model: BaseModel, path: str = "") -> Iterator[tuple[str, Any, bool, Any]]:
+def walk(model: BaseModel, path: str = "") -> Iterator[tuple[str, object, bool, object]]:
     """(path, value, set, default) for every key of `model` and of the
     models under it, depth first; `set` when the spec gave the key."""
     for name, info in type(model).model_fields.items():
