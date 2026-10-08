@@ -19,7 +19,7 @@ class _Topic(BaseModel):
     title: str | None = ""
     slug: object = ""
     id: object = ""
-    last_posted_at: str | None = None
+    created_at: str | None = None
 
 
 class _TopicList(BaseModel):
@@ -58,14 +58,14 @@ async def fetch_discourse(display_name: str, base_url: str, category_id: int,
         title = t.title or ""
         tid   = t.id
         jurl  = f"{base_url}/t/{t.slug}/{tid}"
-        loc   = t.last_posted_at[:10] if t.last_posted_at else "See post"
         if gate is None or gate(title):
             jobs.append({
                 "id":          f"discourse_{base_url.split('.')[0].split('//')[1]}_{tid}",
                 "company":     display_name,
                 "title":       title,
                 "url":         jurl,
-                "location":    f"Posted {loc}",
+                "location":    "",
                 "description": "",
+                "posted_at":   t.created_at[:10] if t.created_at else None,
             })
     return jobs

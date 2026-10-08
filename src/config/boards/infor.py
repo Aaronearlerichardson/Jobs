@@ -1,4 +1,12 @@
-"""The `infor` board spec."""
+"""The `infor` board spec.
+
+Notes:
+    A board URL without the org id names no board; the /hcm/Jobs path is
+    required because the same hosts serve the signed-in employee app. The
+    next-page URL carries opaque record keys, so it is followed verbatim.
+    A pulled posting answers 200 either way: record gone, or kept with a
+    past posting-end date (2026-09-21, live).
+"""
 
 from __future__ import annotations
 

@@ -37,13 +37,15 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator
+from contextlib import contextmanager
 from datetime import datetime
 from types import ModuleType
 from typing import NamedTuple, TypedDict
 
 from src import config
 from src import digest
+from src.digest.render import score_text
 from src import store
 from src.ats.board import company as company_fetch
 from src.ats.feeds.discourse import fetch_discourse
@@ -106,6 +108,18 @@ def apply_keyword_focus(cfg: ModuleType, t: RuntimeTrack) -> None:
             have = {k.lower() for k in dst}
             dst.extend(k for k in add if k.lower() not in have)
     setattr(cfg, "ACCEPT_REMOTE", t.accept_remote)
+
+
+@contextmanager
+def keyword_focus(t: RuntimeTrack) -> Generator[None]:
+    """apply_keyword_focus for the duration of a block, then put the shared
+    lists back (config.keyword_snapshot / restore_keywords)."""
+    saved = config.keyword_snapshot()
+    apply_keyword_focus(config, t)
+    try:
+        yield
+    finally:
+        config.restore_keywords(saved)
 
 
 def core_anchor(title: str, description: str = "") -> str | None:
@@ -653,9 +667,7 @@ async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scor
             print(f"          {j.get('url')}")
     print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY RESUME FIT\n  {bar}")
     for rj in ranked[:top_n]:
-        fs = (f"{rj['resume_fit_score']:.2f}"
-              if isinstance(rj.get("resume_fit_score"), float) else "n/a")
-        print(f"  fit={fs} [{geo_label(rj)}] "
+        print(f"  fit={score_text(rj.get('resume_fit_score'))} [{geo_label(rj)}] "
               f"[{digest.age_tag(rj)}] {(rj['title'] or '')[:48]}")
         print(f"        {rj['company_name']} "
               f"({rj.get('mission_tier') or '?'})  -  "
@@ -729,65 +741,65 @@ async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
         print("  [!] No resume text — fit scores will be null. "
               "Set config.RESUME_PATH.")
 
-    apply_keyword_focus(config, t)
-    specs = await build_sources(config, t, include_websearch=websearch)
-    sources = [(s["name"], s["platform"], s["thunk"]) for s in specs]
-    async with store.Writer(t.db_path) as db:
+    with keyword_focus(t):
+        specs = await build_sources(config, t, include_websearch=websearch)
+        sources = [(s["name"], s["platform"], s["thunk"]) for s in specs]
+        async with store.Writer(t.db_path) as db:
 
-        bar = "=" * 70
-        gates_desc: list[str] = []
-        if t.require_core_anchor:
-            gates_desc.append("core-anchor")
-        gates_desc.append("technical-title")
-        gates_desc.append("geo" if t.geo_gate else "remote-stamped")
-        print(f"\n{bar}\n  [{t.label.upper()}] crawl - "
-              f"{datetime.now():%Y-%m-%d %H:%M}")
-        print(f"  engine={engine} keywords={t.keyword_mode} "
-              f"sources={sum(1 for _, v in t.sources if v)} families "
-              f"({len(sources)} feeds) gates={'+'.join(gates_desc)}")
-        mode = "COMMIT (DB writes)" if commit else "PREVIEW (no DB writes)"
-        print(f"  Mode: {mode}" + (" + EMAIL" if send else "") + f"\n{bar}\n")
-        if not sources:
-            print("  [!] No sources — check [tracks.*].sources and the company "
-                  "store (discover.py --local / --import-companies).")
+            bar = "=" * 70
+            gates_desc: list[str] = []
+            if t.require_core_anchor:
+                gates_desc.append("core-anchor")
+            gates_desc.append("technical-title")
+            gates_desc.append("geo" if t.geo_gate else "remote-stamped")
+            print(f"\n{bar}\n  [{t.label.upper()}] crawl - "
+                  f"{datetime.now():%Y-%m-%d %H:%M}")
+            print(f"  engine={engine} keywords={t.keyword_mode} "
+                  f"sources={sum(1 for _, v in t.sources if v)} families "
+                  f"({len(sources)} feeds) gates={'+'.join(gates_desc)}")
+            mode = "COMMIT (DB writes)" if commit else "PREVIEW (no DB writes)"
+            print(f"  Mode: {mode}" + (" + EMAIL" if send else "") + f"\n{bar}\n")
+            if not sources:
+                print("  [!] No sources — check [tracks.*].sources and the company "
+                      "store (discover.py --local / --import-companies).")
 
-        done_count = [0]
+            done_count = [0]
 
-        def _progress(name: str, platform: str, jobs: list[FetchedJob],
-                      err: object) -> None:
-            done_count[0] += 1
-            status = f"fetch error: {err}" if err else f"{len(jobs)} relevant"
-            print(f"  [{done_count[0]:>3}/{len(sources)}] {name} ({platform}): "
-                  f"{status}")
+            def _progress(name: str, platform: str, jobs: list[FetchedJob],
+                          err: object) -> None:
+                done_count[0] += 1
+                status = f"fetch error: {err}" if err else f"{len(jobs)} relevant"
+                print(f"  [{done_count[0]:>3}/{len(sources)}] {name} ({platform}): "
+                      f"{status}")
 
-        fetched = await fetch_all(sources, on_done=_progress)
+            fetched = await fetch_all(sources, on_done=_progress)
 
-        got = await _gate_sources(db, t, specs, fetched, commit)
+            got = await _gate_sources(db, t, specs, fetched, commit)
 
-        n_would_score = (len(got.to_score) + len(got.matches)) if fit else 0
-        guard_tripped = fit and _cost_guard_trips(t, n_would_score, confirm_cost)
-        scored = await _score_and_persist(db, t, got, resume, fit=fit, commit=commit,
-                                          guard_tripped=guard_tripped,
-                                          max_workers=max_workers)
+            n_would_score = (len(got.to_score) + len(got.matches)) if fit else 0
+            guard_tripped = fit and _cost_guard_trips(t, n_would_score, confirm_cost)
+            scored = await _score_and_persist(db, t, got, resume, fit=fit, commit=commit,
+                                              guard_tripped=guard_tripped,
+                                              max_workers=max_workers)
 
-        linked = t.sources.store and t.sources.location_scoped
-        if resume and commit and linked and not guard_tripped:
-            scored += await scoring.self_heal_unscored(
-                db, resume, track=t.track, max_workers=max_workers)
-        if verify_n and resume and commit and not guard_tripped:
-            await scoring.verify_top(top_n=verify_n,
-                                     max_workers=max(2, max_workers // 2),
-                                     db=db, t=t)
+            linked = t.sources.store and t.sources.location_scoped
+            if resume and commit and linked and not guard_tripped:
+                scored += await scoring.self_heal_unscored(
+                    db, resume, track=t.track, max_workers=max_workers)
+            if verify_n and resume and commit and not guard_tripped:
+                await scoring.verify_top(top_n=verify_n,
+                                         max_workers=max(2, max_workers // 2),
+                                         db=db, t=t)
 
-        _print_funnel(got.funnel, bar)
+            _print_funnel(got.funnel, bar)
 
-        ranked: list[RankedJob] | None = None
-        if linked:
-            ranked = await _report_ranked(db, t, got, scored, send=send,
-                                          top_n=top_n, bar=bar)
-        if got.matches or not linked:
-            await _report_matches(got.matches, t, new_ids=got.new_ids, send=send,
-                                  samples=samples, bar=bar)
+            ranked: list[RankedJob] | None = None
+            if linked:
+                ranked = await _report_ranked(db, t, got, scored, send=send,
+                                              top_n=top_n, bar=bar)
+            if got.matches or not linked:
+                await _report_matches(got.matches, t, new_ids=got.new_ids, send=send,
+                                      samples=samples, bar=bar)
 
-        print("")
+            print("")
     return ranked if ranked is not None else got.matches

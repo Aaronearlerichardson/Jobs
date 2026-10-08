@@ -45,7 +45,7 @@ from src.rows import BoardCoords, BoardHit, FetchedJob
 from .directory import find_boards
 from .domain import seed_urls
 from .identity import foreign_board
-from .probes import Slug, probe_company
+from .probes import JsScanProbePool, Slug, probe_company
 from . import sniffer
 from .websearch_board import websearch_board
 
@@ -346,7 +346,22 @@ async def _classify(name: str, careers_url: str) -> str:
     return f"board-dead:{ats}"
 
 
-async def resolve_or_miss(name: str, careers_url: str = ""
+async def _js_hit(name: str, careers_url: str, js: JsScanProbePool) -> BoardHit | None:
+    """The board `js`'s headless scan of `name`'s careers page finds,
+    validated like every other hit (``via='js'``), or None."""
+    meta, _ = await js.probe(name, careers_url)
+    if not meta:
+        return None
+    curl = meta.get("careers_url") or careers_url or None
+    counts = await validate_board(coords.columns(meta["ats"], meta["slug"], curl))
+    if not counts or counts[0] <= 0:
+        return None
+    return {"name": name, "ats": meta["ats"], "slug": meta["slug"], "careers_url": curl,
+            "count": counts[0], "nc": counts[1], "via": "js"}
+
+
+async def resolve_or_miss(name: str, careers_url: str = "",
+                          js: JsScanProbePool | None = None
                           ) -> tuple[BoardHit | None, str | None]:
     """Resolve a company NAME to a crawlable board, or say why it failed.
 
@@ -355,39 +370,29 @@ async def resolve_or_miss(name: str, careers_url: str = ""
     a live, readable board that simply has no openings in your [locality]
     (``no-local-jobs``): worth keeping, not worth crawling today. A board
     found but unreadable (`read_board`) is ``fetch-error:unreadable-<ats>``,
-    a transient, never ``board-dead``.
+    a transient, never ``board-dead``. With `js`, a ``no-board-found`` name
+    gets one headless scan of its careers page (`_js_hit`), for SPA pages
+    whose board link only exists once JS has run.
 
     Notes:
         The single entry point for "attempt a company, and record the
         outcome either way". Callers persist the reason with
         src.store.record_miss so a rerun can skip, retry or report it.
+        Any raise, classify_miss's included, is printed and returned as
+        ``fetch-error:<Type>``.
     """
     try:
         hit, unread = await _resolve(name, careers_url or "")
-    except Exception as e:
+        miss = None if hit or unread else await classify_miss(name, careers_url)
+        if js is not None and miss and miss.startswith("no-board-found"):
+            hit = await _js_hit(name, careers_url, js)
+    except Exception as e:          # noqa: BLE001 - the reason IS the result
+        print(f"    [!] {name}: {type(e).__name__}: {e}")
         return None, f"fetch-error:{type(e).__name__}"
     if unread:
         return None, f"fetch-error:unreadable-{unread}"
     if not hit:
-        return None, await classify_miss(name, careers_url)
+        return None, miss
     if not hit.get("nc"):
         return hit, "no-local-jobs"
     return hit, None
-
-
-async def resolved(name: str, careers_url: str = ""
-                   ) -> tuple[BoardHit | None, str | None]:
-    """`resolve_or_miss`'s (hit, reason), with a RAISE reported and turned
-    into a miss reason of the same shape.
-
-    `resolve_or_miss` already converts the exceptions it can see, but not
-    one raised past it. Its three bulk consumers (resolve_leads,
-    add_names, reresolve_misses) each wrote this out, and the third had
-    already dropped the report line, so a resolution that blew up during
-    a reresolve became a miss with nothing in the log to say why.
-    """
-    try:
-        return await resolve_or_miss(name, careers_url)
-    except Exception as e:          # noqa: BLE001 - the reason IS the result
-        print(f"    [!] {name}: {type(e).__name__}: {e}")
-        return None, f"fetch-error:{type(e).__name__}"

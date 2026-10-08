@@ -412,7 +412,7 @@ class TestRescoreAllUsesTheSharedUnscoredMarker:
 
 
 class TestDeadBoardClosure:
-    """check_closed_jobs's board-dead sweep: status._dead_board_open_rows plus
+    """check_closed_jobs's board-dead sweep: store.close_dead_board_jobs plus
     the closure loop inside check_closed_jobs itself. Judi Health (47 open
     rows, miss_reason board-dead:greenhouse since 2026-09-11) is the live
     case this was written for."""

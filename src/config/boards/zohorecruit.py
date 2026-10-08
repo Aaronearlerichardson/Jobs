@@ -1,20 +1,18 @@
-"""The `zohorecruit` board spec."""
+"""The `zohorecruit` board spec.
+
+Zoho Recruit career sites: postings as entity-escaped JSON in a hidden input.
+
+Notes:
+    Added 2026-10-07. The page serves at most 50 postings and `?page=2`
+    answers the same 50, so a 50-row snapshot reads as capped. Only the
+    .zohorecruit.com host is detected. A pulled posting answers 200 with
+    a bare page lacking `Posting_Title`.
+"""
 
 from __future__ import annotations
 
 from src.rows import JSON
 
-# Zoho Recruit career sites (<slug>.zohorecruit.com/jobs/Careers): the page
-# carries its postings as entity-escaped JSON in the `value` of a hidden
-# `<input id="jobs">` (read by the json_in_html decoder's `element`). The page
-# serves at most 50 postings and offers no way to ask for more (`?page=2`
-# answers the same 50, the site's script has no listing request, and its RSS
-# feed is removed), so the pager reads a 50-row snapshot as capped: a board
-# of fewer rows is complete. Only the .zohorecruit.com host is detected; the
-# regional hosts (.eu, .in, .com.au) are not robots-checked.
-# <slug>.zohorecruit.com/robots.txt allows /jobs. A listing row names a
-# posting's city, state and country (absent on remote ones), industry, open
-# date and plain-text body.
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "zohorecruit.com",
                 "re": [r"(?i)//([a-z0-9][a-z0-9-]*)\.zohorecruit\.com/(?:jobs|careers)\b"],
@@ -35,8 +33,7 @@ SPEC: dict[str, JSON] = {
             "title": "Posting_Title",
             "url": {"format": "https://{slug}.zohorecruit.com/jobs/Careers/{id}"},
             "location": {"first": [{"join": ["City", "State", "Country"], "sep": ", "},
-                                   {"const": "Remote", "when": {"truthy": "Remote_Job"}}],
-                         "default": "Unknown"},
+                                   {"const": "Remote", "when": {"truthy": "Remote_Job"}}]},
             "description": {"of": "Job_Description", "transform": "html_text"},
             "posted_at": "Date_Opened",
             "remote_hint": {"const": "zohorecruit:remote", "when": {"truthy": "Remote_Job"}},

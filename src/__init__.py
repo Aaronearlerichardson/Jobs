@@ -1,7 +1,7 @@
 """The job crawler's package tree.
 
 Entry points stay at the repository root (run_scraper.py, discover.py,
-harvest.py, webapp.py, capture.py, crawler.py); everything they drive
+harvest.py, webapp.py, capture.py); everything they drive
 lives here, grouped by what it does rather than by when it was written:
 
     src/validation.py  the pydantic field types schemas share   (leaf)

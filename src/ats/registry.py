@@ -8,7 +8,7 @@ single roster (manage it with discover.py, --add-board, or
 The seed TAG (src/tags.py) is the scope a newly added company gets: SWEEP
 for a platform whose spec sets `sweep` (a cheap board the sweep pulls
 whole), LOCAL for the boards only worth querying per region.
-tests/test_boards_spec.py pins the rule.
+tests/test_board_specs.py pins the rule.
 
 A capture-only company (``src.store.CAPTURE_ATS``) has no fetchable board
 and store.crawlable_companies never hands one to a crawl path; like any

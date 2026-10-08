@@ -17,7 +17,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Mapping
-from typing import Protocol, TypeGuard
+from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 from typing_extensions import TypedDict
 
@@ -26,6 +26,9 @@ from src.net.http import HEADERS, fetch_failed
 from src.net.util import JSON, jsonld_scripts, parse_markup, stable_id, text_from_html
 from src.net.util import norm_posted_date as _norm_posted
 from src.rows import FetchedJob
+
+if TYPE_CHECKING:
+    from lxml import etree
 
 
 class Page(Protocol):
@@ -47,16 +50,27 @@ class Posting(TypedDict, closed=True):
 
 
 def extract_jsonld(html: str, url: str = "") -> list[JSON]:
-    """Find every <script type=application/ld+json> block in the page at
-    `url`; return parsed objects, a list's items and an @graph's members
-    each one; a trailing comma is forgiven.
+    """`jsonld_objects` of the page `html` fetched from `url`.
 
     >>> extract_jsonld('<script type="application/ld+json">{"@graph": [{"@type": "JobPosting",'
     ...                ' "title": "Chemist",}]}</script>')
     [{'@type': 'JobPosting', 'title': 'Chemist'}]
     """
+    return jsonld_objects(parse_markup(html, url=url))
+
+
+def jsonld_objects(tree: etree._Element) -> list[JSON]:
+    """The parsed <script type=application/ld+json> blocks in `tree`: an
+    object, a list's items and an @graph's members each one; a BOM and a
+    trailing comma are forgiven, an unparseable block skipped.
+
+    >>> tree = parse_markup('<script type="application/ld+json">\\ufeff[{"a": 1}, {"b": 2,}]'
+    ...                     '</script><script type="application/ld+json">{oops</script>')
+    >>> jsonld_objects(tree)
+    [{'a': 1}, {'b': 2}]
+    """
     out: list[JSON] = []
-    for script in jsonld_scripts(parse_markup(html, url=url)):
+    for script in jsonld_scripts(tree):
         txt = script.text
         if not txt:
             continue
@@ -124,7 +138,7 @@ def _normalize_location(jp: Mapping[str, JSON]) -> str:
         return str(alr["name"])
     if jp.get("jobLocationType") == "TELECOMMUTE":
         return "Remote"
-    return "Unknown"
+    return ""
 
 
 def read_posting(jp: Mapping[str, JSON], page_url: str = "") -> Posting:
@@ -146,12 +160,11 @@ def read_posting(jp: Mapping[str, JSON], page_url: str = "") -> Posting:
     identifier = jp.get("identifier")
     if isinstance(identifier, dict):
         identifier = identifier.get("value", "")
-    location = _normalize_location(jp)
     description = jp.get("description")
     return {
         "title": str(jp.get("title") or jp.get("name") or "").strip(),
         "url": str(job_url) if job_url else page_url,
-        "location": "" if location == "Unknown" else location,
+        "location": _normalize_location(jp),
         "description": text_from_html(description if isinstance(description, str) else ""),
         "posted_at": jp.get("datePosted"),
         "key": str(identifier or stable_id(str(job_url))),
@@ -172,7 +185,7 @@ def _job_from_posting(jp: Mapping[str, JSON], company_name: str, source_url: str
         "company":     company_name,
         "title":       p["title"],
         "url":         p["url"],
-        "location":    p["location"] or "Unknown",
+        "location":    p["location"],
         "description": p["description"],
         "posted_at":   _norm_posted(p["posted_at"]),
     }

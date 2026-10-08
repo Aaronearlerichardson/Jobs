@@ -25,7 +25,7 @@ from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
 from src.rows import BoardHit, CompanyIn, CompanyRow
 from .local_sourcing import queue_names
-from .name_sources import CompanyNames, _is_nav_noise, blocked_keys
+from .name_sources import CompanyNames, _is_nav_noise
 
 
 def _is_sentence_case(name: str) -> bool:
@@ -389,7 +389,7 @@ async def preview_names(blob: str | bytes | list[str] | tuple[str, ...],
     async with store.Writer() as db:
         tracked, blocked, missed = await db.run(lambda conn: (
             {name_key(r["name"]) for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()},
-            blocked_keys(conn),
+            store.blocked_keys(conn),
             {name_key(n) for n in store.recent_miss_names(conn)}))
     out: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -456,7 +456,7 @@ async def add_names(names: str | bytes | list[str], use_llm: bool = False,
     async with store.Writer() as db:
         skip = await db.run(lambda conn: (
             {name_key(r["name"]) for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
-            | blocked_keys(conn)))
+            | store.blocked_keys(conn)))
         fresh, junk = screen_names([n for n in names if name_key(n) not in skip])
         skipped = len(names) - len(fresh) - len(junk)
         for n, why in junk:
@@ -475,7 +475,7 @@ async def add_names(names: str | bytes | list[str], use_llm: bool = False,
         # reason, so the paste is a worklist, not a one-shot. A person named
         # it, so a live board with no local jobs is queued all the same.
         written, unresolved = await queue_names(
-            db, fresh, "paste", max_workers=max_workers, local_only=False,
+            db, dict.fromkeys(fresh, "paste"), max_workers=max_workers, local_only=False,
             include_missions=include_missions, report=_report_queued)
     if unresolved:
         print(f"\n  {len(unresolved)} name(s) did not resolve to a live board "

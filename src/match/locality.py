@@ -297,7 +297,7 @@ def location_snippet(text: str | None, default: str = _NO_PLACE) -> str:
 
 def location_unknown(location: str | None) -> bool:
     """True when `location` names no place at all: blank, location_snippet's
-    own placeholder ("See posting", any case), or a Workday board's
+    own placeholder ("See posting", any case), a literal "Unknown", or a Workday board's
     "<N> Location(s)" listing text -- three spellings of the same fact, that
     the geo gate has nothing to read yet and a detail call is what would
     fix it (see src.crawl.triage's module docstring and
@@ -307,6 +307,8 @@ def location_unknown(location: str | None) -> bool:
     (True, True)
     >>> location_unknown("See posting"), location_unknown("SEE POSTING")
     (True, True)
+    >>> location_unknown("Unknown"), location_unknown(" unknown ")
+    (True, True)
     >>> location_unknown("2 Locations"), location_unknown("1 Location")
     (True, True)
     >>> location_unknown("Durham, NC")
@@ -315,7 +317,7 @@ def location_unknown(location: str | None) -> bool:
     loc = (location or "").strip().lower()
     # Workday's "<N> Locations" listing text for a multi-site req; the real
     # list comes with the detail JSON (board.company.hydrate_description).
-    return (loc in ("", _NO_PLACE.lower())
+    return (loc in ("", "unknown", _NO_PLACE.lower())
             or bool(re.match(r"^\s*\d+\s+locations?\s*$", loc, re.I)))
 
 
@@ -445,13 +447,6 @@ _DEFAULT_HARD_NEGATIONS = (
 _HARD_NEGATIONS = tuple(getattr(config, "REMOTE_HARD_NEGATIONS", None) or _DEFAULT_HARD_NEGATIONS)
 
 
-def _has_token(text: str, tokens: Iterable[str]) -> str | None:
-    """The first of `tokens` found in `text`, or None. Short codes ("wfh",
-    "us", "uk") match on word boundaries so they cannot fire inside other
-    words; phrases and longer words are substrings (filters.SHORT_REMOTE)."""
-    return first_hit(tokens, text, SHORT_REMOTE)
-
-
 def remote_signal(location: str | None, description: str | None = "") -> str | None:
     """Return the phrase that marks this posting remote-eligible, or None.
 
@@ -467,10 +462,10 @@ def remote_signal(location: str | None, description: str | None = "") -> str | N
     body = (description or "").lower()
 
     # A hard negation anywhere vetoes the posting.
-    if _has_token(loc + " \n " + body, _HARD_NEGATIONS):
+    if first_hit(_HARD_NEGATIONS, loc + " \n " + body, SHORT_REMOTE):
         return None
 
-    hit = _has_token(loc, _LOC_REMOTE_TOKENS)
+    hit = first_hit(_LOC_REMOTE_TOKENS, loc, SHORT_REMOTE)
     if hit:
         return f"location:{hit}"
     # A field that is only the country: a nationwide posting, which an ATS
@@ -478,7 +473,7 @@ def remote_signal(location: str | None, description: str | None = "") -> str | N
     if re.fullmatch(r"\s*(?:united states(?: of america)?|u\.?s\.?a?\.?)\s*", loc):
         return "location:nationwide"
 
-    hit = _has_token(body, _BODY_REMOTE_PHRASES)
+    hit = first_hit(_BODY_REMOTE_PHRASES, body, SHORT_REMOTE)
     if hit:
         return f"body:{hit}"
 
@@ -562,9 +557,9 @@ def us_eligible(location: str | None) -> bool:
     loc = (location or "").lower()
     if not loc:
         return True
-    if _has_token(loc, _US_MARKERS):
+    if first_hit(_US_MARKERS, loc, SHORT_REMOTE):
         return True
-    if _has_token(loc, _NON_US_REGIONS):
+    if first_hit(_NON_US_REGIONS, loc, SHORT_REMOTE):
         return False
     return True
 

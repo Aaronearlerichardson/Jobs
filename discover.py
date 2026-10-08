@@ -13,7 +13,7 @@ Usage:
     python discover.py "medical device companies hiring ML engineers"
     python discover.py --local          # employers in your [locality]
 
-Every flag except --from-bciwiki is the CLI spelling of an operation in
+Every flag is the CLI spelling of an operation in
 src/dispatch/registry.py, the same table the web UI's roster buttons run from.
 """
 
@@ -46,36 +46,10 @@ def _cmd_from_keywords(args: argparse.Namespace) -> None:
     runstate.run(each())
 
 
-def _cmd_from_bciwiki(args: argparse.Namespace) -> None:
-    """A worked example of bulk-importing a public industry directory: the
-    BCIWiki company list, resolved to crawlable boards. Not a registry op —
-    it is directory-specific and only useful if that is your field."""
-    from src.discovery import (bciwiki_seed_candidates, apply_to_store,
-                               discover_companies, print_summary,
-                               write_discovery_report)
-    cats = tuple(c.strip() for c in args.bciwiki_categories.split(",") if c.strip())
-    print(f"  > Harvesting BCIWiki categories: {', '.join(cats)}")
-
-    async def resolve() -> None:
-        seeds = await bciwiki_seed_candidates(categories=cats)
-        if args.limit:
-            seeds = seeds[: args.limit]
-        print(f"  > {len(seeds)} candidate(s) to resolve")
-        result = await discover_companies(seeds, term=f"bciwiki:{','.join(cats)}",
-                                          use_js=args.js)
-        print_summary(result)
-        if not args.no_report:
-            write_discovery_report(result)
-        for line in await apply_to_store(result, dry_run=args.dry_run):
-            print(line)
-    runstate.run(resolve())
-
-
 # In precedence order: the first whose flag is set runs and the process
 # exits. `dest` is the argparse attribute that selects it.
 _COMMANDS = [
     ("from_keywords", _cmd_from_keywords),
-    ("from_bciwiki", _cmd_from_bciwiki),
     ("local", _op("discover-local", lambda a: {})),
     ("add_board", _op("add-board", lambda a: {
         "name": a.add_board[0], "url": a.add_board[1], "capture": a.capture})),
@@ -98,21 +72,8 @@ def main() -> None:
                          "(e.g. 'climate tech startups')")
     ap.add_argument("--from-keywords", action="store_true",
                     help="Run discovery once per keyword in your profile")
-    ap.add_argument("--from-bciwiki", action="store_true",
-                    help="Resolve the BCIWiki company directory "
-                         "(bciwiki.org, ~700 brain-computer-interface "
-                         "companies) to crawlable boards. A worked example of "
-                         "bulk-importing a public industry directory; only "
-                         "useful if that is your field.")
-    ap.add_argument("--bciwiki-categories", default="companies",
-                    help="Comma-separated BCIWiki categories to harvest "
-                         "(companies,labs,organizations). Default: companies")
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap the number of candidates resolved (for testing)")
-    ap.add_argument("--js", action="store_true",
-                    help="Enable the headless-browser Workday fallback for "
-                         "--from-bciwiki (off by default for bulk: it's "
-                         "single-threaded and dominates a large run)")
     ap.add_argument("--local", action="store_true",
                     help="Local-sourcing pass for your [locality]: profile "
                          "seeds + configured directories + web-search name "

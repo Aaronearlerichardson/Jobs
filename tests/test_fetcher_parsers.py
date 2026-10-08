@@ -803,15 +803,16 @@ class TestGetroAttribution:
         assert apply.attribute_employers(db, [plain]) == [plain]
 
 
-async def test_a_later_page_that_fails_once_is_asked_again(serve, monkeypatch):
+@pytest.mark.parametrize("first", [502, TimeoutError("read timed out")])
+async def test_a_later_page_that_fails_once_is_asked_again(serve, monkeypatch, first):
     """A Workday 502 on one page left the whole pass incomplete, closing
     nothing ([policy] page_retries, page_retry_pause_s); a retry that lands
-    takes the failure back."""
+    takes the failure back. A transport failure is retried the same way."""
     monkeypatch.setattr(config, "PAGE_RETRY_PAUSE_S", 0)
     monkeypatch.setattr(config, "PAGE_DELAY_S", 0)
     rows = [{"id": str(i), "name": f"Engineer {i}", "location": {"city": "Durham"}}
             for i in range(150)]
-    serve({"offset=100": [502, fake_response({"totalFound": 150, "content": rows[100:]})],
+    serve({"offset=100": [first, fake_response({"totalFound": 150, "content": rows[100:]})],
            "offset=0": fake_response({"totalFound": 150, "content": rows[:100]}),
            "postings/": fake_response({"jobAd": {"sections": {}}})})
     http.reset_fetch_failures()

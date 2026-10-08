@@ -70,8 +70,8 @@ class TestDiscoverRegistries:
         store.record_miss(db, "Bravo", "no-board-found")
         self.queued = []
 
-        async def queue(writer, names, source, careers_urls=None, **_kw):
-            self.queued.append((list(names), source))
+        async def queue(writer, names, careers_urls=None, **_kw):
+            self.queued.append(dict(names))
             for n in names:
                 await writer.run(store.record_miss, n, "no-board-found")
             return [{}] * len(names), []
@@ -86,8 +86,8 @@ class TestDiscoverRegistries:
     async def test_roster_and_missed_names_are_dropped_and_batches_take_the_best_unprocessed(self):
         assert (await reg.discover_registries(apply=True, limit=2))["queued"] == 2
         assert (await reg.discover_registries(apply=True, limit=2))["queued"] == 1
-        assert self.queued == [(["Delta", "Charlie"], "registry:nih_sbir"),
-                               (["Alpha"], "registry:nih_sbir")]
+        source = "registry:nih_sbir"
+        assert self.queued == [{"Delta": source, "Charlie": source}, {"Alpha": source}]
 
     async def test_no_state_skips_the_registries(self, monkeypatch, capsys):
         monkeypatch.setattr(config, "LOCALITY_STATE_SUFFIX", ["california"])

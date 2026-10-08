@@ -60,7 +60,9 @@ from src.conftest import _close_stores            # noqa: E402,F401  (autouse: s
 import src.crawl.runner as _runner                  # noqa: E402
 import src.claude.api as _claude                    # noqa: E402
 import src.ops.scoring as _scoring                  # noqa: E402
+import src.discovery.write as _write                # noqa: E402
 from src.net import http as _http                   # noqa: E402
+from src.store import jobs as _jobs                 # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -166,12 +168,14 @@ def _fresh_run(monkeypatch):
     so nothing it registered with runstate.at_exit runs. The process's
     state starts fresh too: the per-host limiter (its asyncio locks belong
     to one event loop, and each test has its own), the board-owner
-    verdicts, and the rows a deep verify gave up on."""
+    verdicts, the rows a deep verify gave up on, and ranked_jobs' place
+    verdicts (_place_ok: NC_RE's answers follow the profile a test patches)."""
     token = _runstate.RUN.set(_runstate.Run())
     monkeypatch.setattr(_http, "LIMITER", _http.HostLimiter())
     monkeypatch.setattr(_claude, "_BOARD_OWNER_CACHE", {})
     monkeypatch.setattr(_scoring, "_GIVEN_UP", set())
     _http.reset_fetch_failures()     # the failure count is a ContextVar a sync test leaves set
+    _jobs._place_ok.cache_clear()
     yield
     _runstate.RUN.reset(token)
 
@@ -460,22 +464,14 @@ def make_board_fn(*, before=None, err=None, fetched=0, new=0, hydrated=0,
 
 
 def keep_store_open(monkeypatch, db):
-    """Point `store.connect()`, and so every store.Writer, at the test's OWN
-    connection, with close() disarmed.
+    """Point `store.schema.connect()`, and so every store.Writer, at the
+    test's OWN connection, with close() disarmed.
 
-    The paths under test (add_names, preview_names, populate_companies,
-    score_missions, reresolve) open their own connection and close it when
-    they are done, which would leave the test with nothing to assert
-    against. Five test classes across two files had written this same
-    eight-line passthrough out.
-
-    A plain function rather than a fixture: it is called from the `_wire`
-    helpers those classes already have, and threading one more fixture
-    through twenty-six test signatures to reach them would cost more than
-    it saves.
+    The paths under test (add_names, score_missions, reresolve, ...) open
+    their own connection and close it when done, which would leave the
+    test nothing to assert against. A plain function, called from `_wire`
+    helpers, rather than a fixture.
     """
-    import src.store as store
-
     class _NoClose:
         def __getattr__(self, k):
             return getattr(db, k)
@@ -483,9 +479,18 @@ def keep_store_open(monkeypatch, db):
         def close(self):
             pass
 
-    for owner in (store, store.schema):
-        monkeypatch.setattr(owner, "connect", lambda *a, **k: _NoClose())
+    monkeypatch.setattr(_store.schema, "connect", lambda *a, **k: _NoClose())
     return db
+
+
+def stub_mission(monkeypatch, db=None, score=("adjacent", 0.5, "stub")):
+    """The board-add write path offline: `keep_store_open` (when `db` is
+    given), no title sampling, and the mission call answering `score` (a
+    verdict, or a callable returning one)."""
+    if db is not None:
+        keep_store_open(monkeypatch, db)
+    monkeypatch.setattr(_write, "_sample_titles", answer([]))
+    monkeypatch.setattr(_claude, "score_company_mission", answer(score))
 
 
 def no_pacing(monkeypatch):

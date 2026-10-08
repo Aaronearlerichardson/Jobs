@@ -12,14 +12,11 @@ Imports only .schema, so companies.py and review.py may both use it.
 from __future__ import annotations
 
 import sqlite3
-from typing import Literal
 
 from .schema import _commit, apply_update
 
 #: The columns of one mission verdict, on an employer and on a board alike.
 MISSION_COLS = ("mission_tier", "mission_score", "mission_reason")
-
-_Fact = Literal["mission", "review", "watch"]
 
 
 def _employer(conn: sqlite3.Connection, company_id: int) -> int:
@@ -49,47 +46,27 @@ def write_mission(conn: sqlite3.Connection, company_id: int, **facts: object) ->
                      [*sets.values(), _employer(conn, company_id)])
 
 
-def set_mission(conn: sqlite3.Connection, company_id: int, tier: str | None,
-                score: float | None, reason: str | None = None) -> None:
-    """Rescore the employer of board `company_id`: all its boards inherit,
-    except those carrying their own verdict (set_board_mission)."""
-    write_mission(conn, company_id, mission_tier=tier, mission_score=score, mission_reason=reason)
-    _commit(conn)
-
-
 def set_board_mission(conn: sqlite3.Connection, company_id: int, tier: str | None,
                       score: float | None, reason: str | None = None) -> None:
     """Score ONE board as a division of its own, overriding the employer's
     verdict for this board only. Needs a tier or a score (neither reads as
-    "inherit"). clear_board_override undoes it.
+    "inherit").
 
     >>> from src.store.schema import connect
     >>> from src.store import add_board
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
     >>> b, _ = add_board(conn, {"name": "Acme", "ats": "workday", "handle": "x|1|s"})
-    >>> set_mission(conn, a, "core", 0.9)
+    >>> write_mission(conn, a, mission_tier="core", mission_score=0.9)
     >>> set_board_mission(conn, b, "other", 0.1, "the hospital division")
     >>> [r[:] for r in conn.execute("SELECT id = ?, mission_tier, mission_score "
     ...                             "FROM companies_effective ORDER BY id", (a,))]
     [(1, 'core', 0.9), (0, 'other', 0.1)]
-    >>> clear_board_override(conn, b)
-    >>> [r[0] for r in conn.execute("SELECT mission_tier FROM companies_effective")]
-    ['core', 'core']
     """
     if tier is None and score is None:
         raise ValueError("a board verdict needs a tier or a score")
     apply_update(conn, "companies", "id", company_id,
                  dict(zip(MISSION_COLS, (tier, score, reason))))
-
-
-def clear_board_override(conn: sqlite3.Connection, company_id: int, *facts: _Fact) -> None:
-    """Drop board `company_id`'s own mission, review and watch (just the
-    ones named, when any are), so it inherits its employer's again."""
-    cols: dict[_Fact, tuple[str, ...]] = {
-        "mission": MISSION_COLS, "review": ("review",), "watch": ("watch",)}
-    apply_update(conn, "companies", "id", company_id,
-                 {c: None for f in (facts or tuple(cols)) for c in cols[f]})
 
 
 def _set_fact(conn: sqlite3.Connection, company_id: int, col: str, *, board: bool,

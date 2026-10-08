@@ -11,8 +11,6 @@ Getro are OFF: one needs credentials, the other names a place.
 
 from __future__ import annotations
 
-from typing import TypedDict
-
 from .profile import PROFILE
 
 _src = PROFILE.sources
@@ -87,51 +85,6 @@ RSS_FEEDS: list[tuple[str, str, str]] = [(f.label or f.url, f.url, f.location)
 # Board directory — [sources.board_directory] (src/discovery/board_directory.py):
 # the jobhive dataset of live postings, read for boards the roster lacks.
 BOARD_DIRECTORY = _src.board_directory
-
-# Name registries (src/discovery/registries.py, enabled by
-# [discovery].registries): each reader's endpoint and query facts.
-class NihSbirSpec(TypedDict):
-    url: str
-    activity_codes: list[str]
-    page: int
-    max_offset: int
-    include_fields: list[str]
-    blurb_field: str
-
-
-class OpenFdaSpec(TypedDict):
-    url: str
-    limit: int
-    count: str
-    search: str
-    specialty_search: str
-
-
-class _Registries(TypedDict):
-    nih_sbir: NihSbirSpec
-    openfda_devices: OpenFdaSpec
-
-
-REGISTRIES: _Registries = {
-    "nih_sbir": {
-        "url": "https://api.reporter.nih.gov/v2/projects/search",
-        "activity_codes": ["R41", "R42", "R43", "R44", "U43", "U44", "SB1"],
-        "page": 500,
-        "max_offset": 14999,
-        # What each project returns, and the reply key of the title kept as
-        # the organization's blurb (the mission pre-screen reads it).
-        "include_fields": ["Organization", "ProjectTitle"],
-        "blurb_field": "project_title",
-    },
-    "openfda_devices": {
-        "url": "https://api.fda.gov/device/registrationlisting.json",
-        "limit": 1000,
-        "count": "registration.name.exact",
-        "search": "registration.state_code:{state}",
-        # One clause per [discovery].registry_specialties entry, ORed in.
-        "specialty_search": 'products.openfda.medical_specialty_description.exact:"{value}"',
-    },
-}
 
 # Wikidata's API: the domain lookup's fallback (src/discovery/resolve/domain.py)
 # and tools/miss_cleanup.py.

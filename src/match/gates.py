@@ -89,7 +89,7 @@ def exclude_reason(title: str | None, description: str = "", allow_defense: bool
     """
     tables = _exclude_tables(track_id)
     title_l = (title or "").lower()
-    text = f"{title} {description}".lower()
+    text = f"{title or ''} {description}".lower()
 
     # BOUNDED so "scribe" doesn't fire on "describe", "data entry" doesn't
     # fire mid-word. These used to be three hand-written `\b...\b` regexes

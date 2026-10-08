@@ -211,7 +211,7 @@ def _link(j: Mapping[str, object]) -> tuple[str, str]:
     return f"[{title}]({url}){note}", f"<a href='{url}'>{title}</a>{note}"
 
 
-def _fit(score: object) -> str:
+def score_text(score: object) -> str:
     """A fit/combined score to two places; 'n/a' when nobody scored it."""
     return f"{score:.2f}" if isinstance(score, (int, float)) else "n/a"
 
@@ -370,7 +370,7 @@ def write_ranked_digest(
     seen_before = store.prior_lookup(pipeline or [])
     band = apply_band_rows(ranked, prior=seen_before)
     if band:
-        rows = [_cells([_fit(j["resume_fit_score"]), age_tag(j, today),
+        rows = [_cells([score_text(j["resume_fit_score"]), age_tag(j, today),
                         j.get("company_name"), _link(j), j.get("location")])
                 for j in band]
         sections.append((
@@ -393,8 +393,8 @@ def write_ranked_digest(
             "rest never cost a fetch or a score).",
             _table(tuple(triage), [_cells([str(n) for n in triage.values()])],
                    numeric=set(triage))))
-    rows = [_cells([_fit(j.get("resume_fit_score")),
-                    _fit(j.get("combined_score")), age_tag(j, today),
+    rows = [_cells([score_text(j.get("resume_fit_score")),
+                    score_text(j.get("combined_score")), age_tag(j, today),
                     j.get("company_name"), j.get("mission_tier") or "?",
                     _link(j), _repeat_note(j, seen_before), j.get("fit_reason") or ""])
             for j in ranked]
@@ -467,7 +467,7 @@ def send_ranked_digest(
         sections.append((_FOLLOWUPS, None, _list(rows)))
     band = apply_band_rows(ranked, prior=seen_before)
     if band:
-        rows = [_bullet([_fit(j["resume_fit_score"]), j.get("company_name"),
+        rows = [_bullet([score_text(j["resume_fit_score"]), j.get("company_name"),
                          _link(j), j.get("location")]) for j in band]
         sections.append((_APPLY_BAND, _band_intro(), _list(rows)))
     if hits:
@@ -475,7 +475,7 @@ def send_ranked_digest(
     floor = float(t.digest_min_fit or 0.0)
     n_md, n_html = _bold(f"{len(fresh)} new job(s)")
     verb = "first seen" if by == "first_seen" else "surfaced since"
-    rows = [_cells([_fit(j.get("resume_fit_score")), age_tag(j, today),
+    rows = [_cells([score_text(j.get("resume_fit_score")), age_tag(j, today),
                     j.get("company_name"), _link(j), j.get("location"),
                     j.get("fit_reason") or ""])
             for j in fresh]
@@ -580,7 +580,7 @@ def _matches_sections(matches: list[FetchedJob], tag: str
     cols = (("Fit",) if with_fit else ()) + (
         "Tag", "Company", "Title", "Location", "Anchor", "Remote signal")
     # Sweep rows carry `company`, store rows `company_name`.
-    rows = [_cells(([_fit(j.get("resume_fit_score"))] if with_fit else [])
+    rows = [_cells(([score_text(j.get("resume_fit_score"))] if with_fit else [])
                    + [tag, j.get("company") or j.get("company_name"), _link(j),
                       j.get("location"), j.get("anchor_signal", ""),
                       j.get("remote_signal", "")])

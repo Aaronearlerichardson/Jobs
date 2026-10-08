@@ -20,8 +20,7 @@ from typing import TYPE_CHECKING
 from src import store
 from src.ats.feeds.careeronestop import fetch_nlx_company
 from src.config import RuntimeTrack
-from src.discovery import (apply_to_store, discover, print_summary,
-                           write_discovery_report)
+from src.discovery import discover, print_summary, write_discovery_report
 from src.discovery.dork import run_ddgs_dorks
 from src.ops.ingest import ingest_external_jobs
 from src.ops.maintenance import track_store, track_writer
@@ -33,14 +32,14 @@ if TYPE_CHECKING:
 
 def dedup(t: RuntimeTrack | None = None) -> tuple[int, int]:
     """Merge duplicate company rows pointing at one board, then duplicate
-    job rows, then flag the cross-board duplicates of one employer
-    (store.flag_duplicate_jobs). Returns (companies merged, jobs dropped)."""
+    job rows (store.merge_jobs), then flag the cross-board duplicates of one employer
+    (store.flag_duplicate_jobs). Returns (companies merged, job rows merged away)."""
     with track_store(t) as conn:
         n = store.dedup_companies(conn)
         n_jobs = store.dedup_jobs(conn)
         flagged = store.flag_duplicate_jobs(conn)
     print(f"\n  merged {n} duplicate company row(s) into their canonical board; "
-          f"dropped {n_jobs} duplicate job row(s); "
+          f"merged {n_jobs} duplicate job row(s); "
           f"{flagged} cross-board duplicate flag(s) changed.")
     return n, n_jobs
 
@@ -54,12 +53,6 @@ async def prune(offmission: bool = False, t: RuntimeTrack | None = None) -> tupl
     print(f"\n  deactivated {n_dead} dead-board compan(ies)"
           + (f" + {n_off} off-mission" if offmission else "") + ".")
     return n_dead, n_off
-
-
-def backfill_axes(t: RuntimeTrack | None = None) -> int:
-    """Populate the per-axis fit columns from fit_reason (offline)."""
-    with track_store(t) as conn:
-        return store.backfill_axis_columns(conn)
 
 
 async def ingest_nlx(companies: list[str] | None, t: RuntimeTrack | None = None) -> int:
@@ -90,18 +83,19 @@ async def dork_sweep() -> tuple[int, int]:
 
 async def discover_term(term: str | None, no_report: bool = False,
                         dry_run: bool = False) -> DiscoveryResult | None:
-    """Free-text sector discovery: ask Claude for likely employers matching
-    `term`, probe each against the ATS registry, and (apply-by-default)
-    queue the confirmed ones unless `dry_run`. Returns the discovery
-    result, or None when no term was given."""
+    """Free-text sector discovery (src.discovery.pipeline.discover): ask
+    Claude for likely employers matching `term`, resolve each, and queue the
+    boards for review unless `dry_run`. Returns the discovery result, or
+    None when no term was given."""
     term = (term or "").strip()
     if not term:
         print("  [!] give a sector/term to search for, e.g. 'medical device companies'")
         return None
-    result = await discover(term)
+    result = await discover(term, dry_run=dry_run)
     print_summary(result)
     if not no_report:
         write_discovery_report(result)
-    for line in await apply_to_store(result, dry_run=dry_run):
-        print(line)
+    if result["queued"] and not dry_run:
+        print("  Confirm the [review] rows in the web UI's Review section "
+              "before they are crawled")
     return result

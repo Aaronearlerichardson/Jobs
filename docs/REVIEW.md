@@ -147,7 +147,7 @@ What a reviewer holds a new shape to:
   instead of a table:
   `test_the_fetched_job_names_the_row_fields_and_fit_columns` and
   `test_the_engine_row_names_the_spec_row_fields`, in
-  `tests/test_boards_spec.py`, check their names.
+  `tests/test_board_specs.py`, check their names.
 - **SQLite does not enforce declared column types**, so the one cast where a
   row leaves sqlite is honest only with an audit:
   `test_the_company_writers_store_each_column_as_declared`, and its jobs

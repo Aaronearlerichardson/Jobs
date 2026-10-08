@@ -1,4 +1,10 @@
-"""The `oracle` board spec."""
+"""The `oracle` board spec.
+
+Notes:
+    Endpoint shapes credited to kalil0321/ats-scrapers (MIT). A tenant
+    host serves several sites, so the handle is the host and the site
+    number. The server serves at most 200 rows a page, whatever the limit.
+"""
 
 from __future__ import annotations
 
@@ -38,8 +44,7 @@ SPEC: dict[str, JSON] = {
             "title": "Title",
             "url": {"format": "https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{Id}"},
             "location": {"merge": {"primary": "PrimaryLocation",
-                                   "extras": "secondaryLocations[].Name"},
-                         "default": "Unknown"},
+                                   "extras": "secondaryLocations[].Name"}},
             "posted_at": "PostedDate",
             "remote_hint": {"const": "oracle:workplaceType",
                             "when": {"eq": ["WorkplaceTypeCode", "ORA_REMOTE"]}},

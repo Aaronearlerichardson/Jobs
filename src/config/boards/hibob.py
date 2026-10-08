@@ -1,4 +1,10 @@
-"""The `hibob` board spec."""
+"""The `hibob` board spec.
+
+Notes:
+    Every posting's URL is the board's one /jobs page, so the stored job
+    id names a posting and closure is board membership. The API 401s
+    without a same-origin Referer.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +26,7 @@ SPEC: dict[str, JSON] = {
             "title": "title",
             "url": {"format": "https://{slug}.careers.hibob.com/jobs"},
             "location": {"join": [{"first": ["site", "country"]}, "workspaceType"],
-                         "sep": " - ", "default": "Unknown"},
+                         "sep": " - "},
             "description": {"of": "description", "transform": "html_text"},
             "posted_at": "publishedAt",
             "remote_hint": {"const": "hibob:workspaceType",

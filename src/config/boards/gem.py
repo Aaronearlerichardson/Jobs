@@ -1,11 +1,15 @@
-"""The `gem` board spec."""
+"""The `gem` board spec.
+
+Gem's public job-board API, the whole board in one list.
+
+Notes:
+    Endpoint shape credited to kalil0321/ats-scrapers (MIT).
+"""
 
 from __future__ import annotations
 
 from src.rows import JSON
 
-# Gem's public job-board API (the whole board in one list), endpoint shape
-# credited to kalil0321/ats-scrapers (MIT).
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "jobs.gem.com", "re": [r"(?i)jobs\.gem\.com/([a-z0-9_-]+)"],
                 "blocklist": ["api", "embed", "static", "_next"],
@@ -20,8 +24,7 @@ SPEC: dict[str, JSON] = {
             "url": "absolute_url",
             "location": {"first": [{"merge": {"primary": "location.name",
                                               "extras": "offices[].location.name"}},
-                                   {"const": "Remote", "when": {"eq": ["location_type", "remote"]}}],
-                         "default": "Unknown"},
+                                   {"const": "Remote", "when": {"eq": ["location_type", "remote"]}}]},
             "description": "content_plain",
             "posted_at": {"first": ["first_published_at", "created_at"]},
             "remote_hint": {"const": "gem:location_type",

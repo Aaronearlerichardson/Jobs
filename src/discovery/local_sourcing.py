@@ -30,8 +30,11 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import json
 import sqlite3
 import time
+from datetime import datetime, timedelta
+from contextlib import AsyncExitStack
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from typing import cast
 
@@ -40,15 +43,18 @@ from src import store
 from src import tags as company_tags
 from src.ats import coords
 from src.ats.board import company as company_fetch
+from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
 from src.claude import api as claude_api
 from src.claude.api import ACTIVE_MISSION_TIERS
+from src.digest.render import score_text
 from src.match.locality import NC_RE
 from src.match.names import name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.rows import BoardHit, CompanyIn, CompanyRow, is_watched
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
-from .resolve.board import read_local, resolved
+from .resolve import board as resolve_board
+from .resolve.board import read_local
 from .resolve.probes import JsScanProbePool, probe_company
 from .resolve import sniffer
 from src.ats.signatures import Detection
@@ -220,7 +226,7 @@ async def _sniff_pass(names: list[str], hits: list[BoardHit],
 
 async def _websearch_pass(names: list[str], hits: list[BoardHit],
                           misses: list[BoardHit], max_workers: int,
-                          cap: int | None, retry_days: int) -> None:
+                          cap: int | None) -> None:
     """Search the web for a careers page, for names probe+sniff could not
     board. A measured 60-company gap study found 5 of 6 eventual
     resolutions came through here -- names on gov/acronym/product-named
@@ -234,7 +240,7 @@ async def _websearch_pass(names: list[str], hits: list[BoardHit],
     todo = _boardless(names, hits)
     if todo and cap > 0:
         async with store.Writer() as db:
-            recent = await db.run(store.recent_miss_names, days=retry_days)
+            recent = await db.run(store.recent_miss_names)
         todo = [n for n in todo if n not in recent][:cap]
     else:
         todo = list[str]()
@@ -340,7 +346,7 @@ def _report_discovery(hits: list[BoardHit], confirmed: list[BoardHit],
 async def discover_local(extra_names: list[str] | None = None, max_workers: int = 12,
                          js_majors: bool = True, sniff: bool = True,
                          websearch: bool = True, websearch_cap: int | None = None,
-                         websearch_retry_days: int = 14, tracked: Collection[str] = frozenset()
+                         tracked: Collection[str] = frozenset()
                          ) -> tuple[list[BoardHit], list[str], list[BoardHit]]:
     """
     Gather names + probe each. Returns (confirmed, checked, misses) where
@@ -385,8 +391,7 @@ async def discover_local(extra_names: list[str] | None = None, max_workers: int 
     if sniff:
         await _sniff_pass(todo, hits, misses, max_workers)
     if websearch:
-        await _websearch_pass(todo, hits, misses, max_workers, websearch_cap,
-                              websearch_retry_days)
+        await _websearch_pass(todo, hits, misses, max_workers, websearch_cap)
 
     hits, confirmed, dropped, misses = _reduce_hits(todo, hits, misses)
     misses = [m for m in misses if name_key(m["name"]) not in tracked]
@@ -491,22 +496,28 @@ async def populate_companies(extra_names: list[str] | None = None,
     return written
 
 
-async def queue_names(db: store.Writer, names: Collection[str], source: str,
+async def queue_names(db: store.Writer, names: Mapping[str, str],
                       careers_urls: Mapping[str, str] | None = None,
                       max_workers: int = 6, *, local_only: bool = True,
                       include_missions: list[str] | None = None,
                       report: Callable[[str, BoardHit, tuple[CompanyRow | CompanyIn, int, bool]],
-                                       None] | None = None
+                                       None] | None = None,
+                      seed_tags: bool = False, js_pages: int = 0, dry_run: bool = False
                       ) -> tuple[list[BoardHit], list[tuple[str, str]]]:
-    """Resolve each of `names` (its `careers_urls` entry, when it has one,
-    seeds the sniff) and queue every board with local jobs for review as
-    `source`; every other outcome is recorded as a miss under it.
+    """Resolve each name in `names` (name -> the `source` it is filed under;
+    its `careers_urls` entry, when it has one, seeds the sniff) and queue
+    every board with local jobs for review; every other outcome is recorded
+    as a miss.
 
     Returns (queued hits, [(name, reason)] of the misses). A live board with
     no local jobs is a miss (`no-local-jobs`), as in discover_local: a name
     from a regional list is not proof the board is local. Without
     `local_only` it is queued too. `report(name, hit, (row, active,
     pending))` prints each queued board (default: `_print_scored`).
+    `seed_tags` tags each board as its platform seeds (`seed_tag_for`)
+    instead of by its local jobs; `js_pages` > 0 adds a headless scan of
+    that many pages for a name nothing else resolves (resolve_or_miss's
+    `js`). `dry_run` resolves and returns without writing anything.
     """
     urls = careers_urls or {}
     queued: list[BoardHit] = []
@@ -514,25 +525,33 @@ async def queue_names(db: store.Writer, names: Collection[str], source: str,
     stalled: list[str] = []
 
     async def miss(name: str, reason: str, hit: BoardHit | None = None) -> None:
-        await db.run(_record_miss, name, reason, hit, source)
+        if not dry_run:
+            await db.run(_record_miss, name, reason, hit, names[name])
         missed.append((name, reason))
 
-    async for name, (hit, reason) in fan_out(
-            list(names), lambda n: resolved(n, urls.get(n, "")), str, max_workers,
-            with_item=True, stall_s=RESOLVE_STALL_S,
-            on_abandon=stalled.append):
-        if not hit or (reason and local_only):
-            await miss(name, reason or "no-board-found", hit)
-            continue
-        result = await score_and_upsert(db, hit, source=source,
-                                        include_missions=include_missions)
-        if not result:
-            continue
-        queued.append(hit)
-        if report:
-            report(name, hit, result)
-        else:
-            _print_scored(name, result[0], "PENDING REVIEW" if result[2] else "tracked")
+    async with AsyncExitStack() as stack:
+        js = {"js": await stack.enter_async_context(JsScanProbePool(js_pages))
+              } if js_pages else {}
+        async for name, (hit, reason) in fan_out(
+                list(names), lambda n: resolve_board.resolve_or_miss(n, urls.get(n, ""), **js),
+                str, max_workers, with_item=True, stall_s=RESOLVE_STALL_S,
+                on_abandon=stalled.append):
+            if not hit or (reason and local_only):
+                await miss(name, reason or "no-board-found", hit)
+                continue
+            if dry_run:
+                queued.append(hit)
+                continue
+            result = await score_and_upsert(
+                db, hit, source=names[name], include_missions=include_missions,
+                tags=seed_tag_for(hit["ats"]) if seed_tags else None)
+            if not result:
+                continue
+            queued.append(hit)
+            if report:
+                report(name, hit, result)
+            else:
+                _print_scored(name, result[0], "PENDING REVIEW" if result[2] else "tracked")
     for name in stalled:
         await miss(name, "fetch-error:stalled")
     return queued, missed
@@ -629,10 +648,37 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
         if pending:
             row = store.mark_pending(row)
         await db.run(store.upsert_company, row)
-    ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-    print(f"  [OK] {name}: {ats} {slug!s}  nc={nc}  mission={tier} ({ss})  "
+    print(f"  [OK] {name}: {ats} {slug!s}  nc={nc}  mission={tier} ({score_text(score)})  "
           f"{'PENDING REVIEW' if pending else 'ACTIVE'}")
     return found
+
+
+def _to_score(conn: sqlite3.Connection, rescore_all: bool) -> list[tuple[CompanyRow, bool]]:
+    """score_missions' rows, each with whether it holds a board verdict of
+    its own: every board row with no mission tier (every active one with
+    `rescore_all`), keeping of one employer's verdict-less boards only the
+    largest (total_job_count, then lowest id).
+
+    >>> conn = store.connect(":memory:")
+    >>> for n, jobs in (("A", 5), ("A (lever)", 9), ("B", 1)):
+    ...     _ = store.upsert_company(conn, {"name": n, "ats": "lever", "slug": n,
+    ...                                     "total_job_count": jobs, "active": 1})
+    >>> _ = conn.execute("UPDATE companies SET employer_id = 1 WHERE name LIKE 'A%'")
+    >>> [(c["name"], own) for c, own in _to_score(conn, False)]
+    [('A (lever)', False), ('B', False)]
+    """
+    rows = conn.execute(
+        "SELECT e.*, k.own FROM companies_effective e JOIN ("
+        " SELECT e.id, o.own, ROW_NUMBER() OVER ("
+        "  PARTITION BY COALESCE(e.employer_id, -e.id), o.own"
+        "  ORDER BY COALESCE(e.total_job_count, 0) DESC, e.id) AS rn"
+        " FROM companies_effective e JOIN (SELECT id, (mission_tier IS NOT NULL"
+        "  OR mission_score IS NOT NULL) AS own FROM companies) o ON o.id = e.id"
+        " WHERE COALESCE(e.ats, '') != '' AND CASE WHEN ? THEN e.active = 1"
+        "  ELSE COALESCE(e.mission_tier, '') = '' END) k ON k.id = e.id"
+        " WHERE k.own OR k.rn = 1"
+        " ORDER BY e.mission_score DESC, e.local_job_count DESC", (rescore_all,)).fetchall()
+    return [(store.as_company(r), bool(r["own"])) for r in rows]
 
 
 async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int:
@@ -651,20 +697,9 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
     through its largest board; only a board holding a verdict of its own
     (set_board_mission) is scored on its own and keeps it."""
     async with store.Writer() as db:
-        cos = [c for c in await db.run(store.get_companies, active_only=rescore_all)
-               if c.get("ats") and (rescore_all or not c.get("mission_tier"))]
-        own = {r[0] for r in await db.run(lambda conn: conn.execute(
-            "SELECT id FROM companies WHERE mission_tier IS NOT NULL "
-            "OR mission_score IS NOT NULL").fetchall())}
-        def employer(c: CompanyRow) -> int | str:
-            emp = c.get("employer_id")
-            return emp if emp is not None else f"row{c['id']}"
-
-        lead: dict[int | str, int] = {}
-        for c in sorted(cos, key=lambda c: (-(c.get("total_job_count") or 0), c["id"])):
-            if c["id"] not in own:
-                lead.setdefault(employer(c), c["id"])
-        cos = [c for c in cos if c["id"] in own or lead[employer(c)] == c["id"]]
+        picked = await db.run(_to_score, rescore_all)
+        cos = [c for c, _ in picked]
+        own = {c["id"] for c, o in picked if o}
         if not cos:
             print("  Nothing to score - every active company has a mission tier.")
             return 0
@@ -710,12 +745,11 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
                     revived = True
             await db.run(store.upsert_company, update)
             n += 1
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             flag = ("  -> deactivated (off-mission)"
                     if (tier is not None and tier not in ACTIVE_MISSION_TIERS)
                     else "  -> REACTIVATED (was unscored + inactive)" if revived
                     else "")
-            print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
+            print(f"    {c['name']:32} {str(tier):20} {score_text(score)}  ({reason}){flag}")
     print(f"\n  {n} compan(ies) scored.")
     return n
 
@@ -786,11 +820,42 @@ def _miss_row(m: BoardHit) -> CompanyIn:
     return row
 
 
+def _leads(conn: sqlite3.Connection, sources: Collection[str] | None, days: int,
+           limit: int | None) -> tuple[list[CompanyRow], int]:
+    """(resolve_leads' rows, how many were skipped): inactive boardless rows
+    whose `source` is in `sources` (None: any), less those that missed
+    within `days` (0: none skipped), best mission score first, at most `limit`.
+
+    >>> conn = store.connect(":memory:")
+    >>> for n in ("Fresh", "Missed", "Other"):
+    ...     _ = store.upsert_company(conn, {"name": n, "active": 0,
+    ...                                     "source": "x" if n != "Other" else "y"})
+    >>> _ = store.record_miss(conn, "Missed", "no-board-found")
+    >>> [c["name"] for c in _leads(conn, ["x"], 14, None)[0]], _leads(conn, ["x"], 14, None)[1]
+    (['Fresh'], 1)
+    >>> sorted(c["name"] for c in _leads(conn, None, 0, None)[0])
+    ['Fresh', 'Missed', 'Other']
+    """
+    where = ("COALESCE(c.ats, '') = '' AND NOT COALESCE(c.active, 0)"
+             " AND (? IS NULL OR c.source IN (SELECT value FROM json_each(?)))")
+    recent = ("EXISTS (SELECT 1 FROM companies m WHERE m.name = c.name"
+              " AND m.miss_reason IS NOT NULL AND m.miss_at >= ?)")
+    src = None if sources is None else json.dumps(list(sources))
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat() if days else "9999"
+    args = (src, src, cutoff)
+    skipped = conn.execute(f"SELECT COUNT(*) FROM companies_effective c WHERE {where}"
+                           f" AND {recent}", args).fetchone()[0]
+    rows = conn.execute(f"SELECT c.* FROM companies_effective c WHERE {where} AND NOT {recent}"
+                        " ORDER BY c.mission_score DESC, c.local_job_count DESC LIMIT ?",
+                        (*args, limit or -1)).fetchall()
+    return [store.as_company(r) for r in rows], skipped
+
+
 async def resolve_leads(max_workers: int = 8,
                         sources: tuple[str, ...] = ("page_capture", "linkedin_search",
                                                      "linkedin_company_search"),
-                        all_leads: bool = False, limit: int | None = None,
-                        retry_days: int = 14) -> list[CompanyRow | CompanyIn]:
+                        all_leads: bool = False, limit: int | None = None
+                        ) -> list[CompanyRow | CompanyIn]:
     """Resolve boardless company leads (banked by capture.py from browsed
     LinkedIn/Indeed pages, or by manual adds) into crawlable boards and queue
     the hits for review. Careers-page SNIFF first (collision-safe), slug-probe
@@ -801,24 +866,14 @@ async def resolve_leads(max_workers: int = 8,
     sources: resolve only leads carrying one of these ``source`` values
     (default: capture.py's 'page_capture'). all_leads=True ignores the source
     filter and takes every inactive boardless lead. Idempotent — rerunning
-    retries only the still-unresolved leads."""
+    retries only the still-unresolved leads; a lead that missed within
+    [discovery] miss_retry_days is skipped unless `all_leads`."""
+    days = 0 if all_leads else config.DISCOVERY_MISS_RETRY_DAYS
     async with store.Writer() as db:
-        leads = [c for c in await db.run(store.get_companies, active_only=False)
-                 if not c.get("ats") and not c.get("active")]
-        if not all_leads:
-            leads = [c for c in leads if c.get("source") in sources]
-        # Skip leads that failed recently: without this every rerun re-probes
-        # every permanent miss, and the pass gets slower the longer it runs.
-        # retry_days=0 (or --all-leads) retries the lot.
-        if retry_days and not all_leads:
-            recent = await db.run(store.recent_miss_names, days=retry_days)
-            skipped_recent = [c for c in leads if c["name"] in recent]
-            leads = [c for c in leads if c["name"] not in recent]
-            if skipped_recent:
-                print(f"  skipping {len(skipped_recent)} lead(s) that missed in "
-                      f"the last {retry_days}d (--all-leads to retry them)")
-        if limit:
-            leads = leads[:limit]
+        leads, skipped = await db.run(_leads, None if all_leads else sources, days, limit)
+        if skipped:
+            print(f"  skipping {skipped} lead(s) that missed in "
+                  f"the last {days}d (--all-leads to retry them)")
         if not leads:
             print("  No unresolved leads to resolve"
                   + ("." if all_leads else f" (source in {sources}; --all-leads to widen)."))
@@ -835,26 +890,20 @@ async def resolve_leads(max_workers: int = 8,
             resolved_rows.append(row)
             if hit.get("via") == "probe":
                 probe_only.append(name)
-            score = row["mission_score"]
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
             mark = "queue" if pending else ("OK  " if active else "off ")
             print(f"    [{mark}] {name[:30]:30} "
                   f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
-                  f"{str(row['mission_tier']):18} {ss}{flag}")
+                  f"{str(row['mission_tier']):18} {score_text(row['mission_score'])}{flag}")
 
         # A lead is a name somebody's page mentioned, not an employer anyone
         # vouched for: resolving it produces a review candidate under the
         # lead's own name, and the lead row keeps WHY a miss missed (a
         # stalled one included) so the next run can skip it.
-        missed: list[tuple[str, str]] = []
-        for source in sorted({c.get("source") or "resolve_leads" for c in leads}):
-            group = [c for c in leads if (c.get("source") or "resolve_leads") == source]
-            _, m = await queue_names(
-                db, [c["name"] for c in group], source,
-                {c["name"]: u for c in group if (u := c.get("careers_url"))},
-                max_workers, local_only=False, report=report)
-            missed += m
+        _, missed = await queue_names(
+            db, {c["name"]: c.get("source") or "resolve_leads" for c in leads},
+            {c["name"]: u for c in leads if (u := c.get("careers_url"))},
+            max_workers, local_only=False, report=report)
         for name, reason in missed:
             print(f"    [miss] {name[:34]:34} {reason}")
     queued = sum(1 for r in resolved_rows

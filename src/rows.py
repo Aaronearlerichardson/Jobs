@@ -93,7 +93,7 @@ class Employer(TypedDict, closed=True):
 class FetchedJob(_FitFields, total=False, closed=True):
     """A posting as a fetcher returns it, then as each later stage stamps it
     in place. Its names are checked against ROW_FIELDS and FitColumns by
-    tests/test_boards_spec.py::test_the_fetched_job_names_the_row_fields_and_fit_columns.
+    tests/test_board_specs.py::test_the_fetched_job_names_the_row_fields_and_fit_columns.
 
     Notes:
         Nothing is required, because the shape differs by stage: a fetcher

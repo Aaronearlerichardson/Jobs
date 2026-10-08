@@ -1,11 +1,16 @@
-"""The `avature` board spec."""
+"""The `avature` board spec.
+
+Avature portals: a path on the tenant's own host, keyed on its URL.
+
+Notes:
+    Tenants size their own pages (12, 20); the page's legend gives the
+    total. Fetchable since 2026-10.
+"""
 
 from __future__ import annotations
 
 from src.rows import JSON
 
-# Avature: a portal path on the tenant's own host (`/careers`,
-# `/en_US/careers`), keyed on its URL.
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "avature.net",
                 "re": [r"(?i)(https?://[a-z0-9.-]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)"
@@ -34,7 +39,7 @@ SPEC: dict[str, JSON] = {
             "id": {"format": "avature_{_key}_{_jid}", "when": {"truthy": "_jid"}},
             "title": "text",
             "url": "url",
-            "location": {"first": ["loc", "country"], "default": "Unknown"},
+            "location": {"first": ["loc", "country"]},
             "department": "dept",
         },
     },

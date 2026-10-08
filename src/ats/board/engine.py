@@ -811,11 +811,10 @@ class Board:
         dec, vals = spec.decoder, vals or {}
 
         async def ask(n: int, page: Vals, url: str | None
-                      ) -> tuple[dict[str, str], JSON, str | Exception | None]:
-            parts, _status, payload, err = await self._page(
+                      ) -> tuple[dict[str, str], int | None, JSON, str | Exception | None]:
+            return await self._page(
                 req, handle, {**vals, **page}, f"{label} p{n}" if label and paged else label,
                 timeout, url)
-            return parts, payload, err
 
         def rows_of(parts: dict[str, str], payload: JSON) -> tuple[int, list[EngineRow]]:
             entries = decode.entries(payload, dec)

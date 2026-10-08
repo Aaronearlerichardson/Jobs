@@ -1,0 +1,24 @@
+# The built-in pair used when a profile has no [tracks] section.
+
+[local]
+label = "Local"
+db = "jobs.db"
+track = "local"
+engine = "local"
+rank_by = "fit"
+min_mission = 0.2
+min_fit_default = 0.0
+willing_to_move_default = false
+remote_requires_watch = true
+default = true
+
+[remote]
+label = "Remote"
+db = "jobs.db"
+track = "remote"
+engine = "sweep"
+rank_by = "fit"
+min_fit_default = 0.5
+willing_to_move_default = true
+remote_requires_watch = false
+default = false

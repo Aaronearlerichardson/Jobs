@@ -1,4 +1,13 @@
-"""The `smartrecruiters` board spec."""
+"""The `smartrecruiters` board spec.
+
+Notes:
+    The API answers a slug in any case alike, so the handle folds
+    (2026-10-08). Boards run to thousands of rows, so it stays out of the
+    lightweight sweep. A pulled posting answers 200 with active=false; a
+    repost answers under its successor's id, so neither open nor closed.
+    The vendor's `oneclick-ui` apply widget embedded on customer pages is
+    blocklisted from detection (2026-10-08).
+"""
 
 from __future__ import annotations
 

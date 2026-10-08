@@ -15,13 +15,12 @@ import re
 
 import pytest
 
-from conftest import answer, fake_response, iso_days_ago, track_with
+from conftest import answer, fake_response, iso_days_ago, stub_mission, track_with
 
 import src.store as store
 from src import tags
 from src.ats import signatures as ats_signatures
 from src.discovery import local_sourcing
-from src.discovery import write
 from src.discovery.resolve import board as resolve_board
 from src.ops import ingest, rekey, repair
 
@@ -115,9 +114,7 @@ class TestReresolveWrites:
 
     def _wire(self, monkeypatch, result):
         monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(result))
-        monkeypatch.setattr(write, "_sample_titles", answer([]))
-        monkeypatch.setattr("src.claude.api.score_company_mission",
-                            answer(("adjacent", 0.5, "stub")))
+        stub_mission(monkeypatch)
 
     async def test_a_hit_is_queued_for_review_not_activated(self, db, monkeypatch):
         store.upsert_company(db, {"name": "Emmes", "active": 0,
@@ -273,9 +270,7 @@ class TestManualAddUsesTheSharedResolver:
             return result
 
         monkeypatch.setattr(resolve_board, "resolve_or_miss", _resolve)
-        monkeypatch.setattr(write, "_sample_titles", answer([]))
-        monkeypatch.setattr("src.claude.api.score_company_mission",
-                            answer(("adjacent", 0.5, "stub")))
+        stub_mission(monkeypatch)
         monkeypatch.setattr("src.claude.api.is_active_mission",
                             lambda *a, **k: True)
         # No crawl and no ingest: this test is about the resolver call,
@@ -386,27 +381,23 @@ class TestJobviteSignature:
 
 
 class TestARaisedResolutionIsReported:
-    """`resolve_or_miss` converts the exceptions it can see; one raised
-    past it still can. Three consumers unwrapped that by hand and the
-    reresolve copy had dropped the report line, so a resolution that blew
-    up there became a miss with nothing in the log to say why.
-    resolve.board.resolved is the one unwrap now."""
+    """A reresolve copy of the unwrap had dropped the report line, so a
+    resolution that blew up there became a miss with nothing in the log to
+    say why. resolve_or_miss reports and converts every raise itself,
+    classify_miss's included."""
 
+    @pytest.mark.parametrize("stage", ["_resolve", "classify_miss"])
     async def test_the_reason_and_the_report_both_survive(self, capsys,
-                                                          monkeypatch):
-        async def boom(name, careers_url=""):
+                                                          monkeypatch, stage):
+        async def boom(*a, **k):
             raise RuntimeError("boom")
-        monkeypatch.setattr(resolve_board, "resolve_or_miss", boom)
-        hit, reason = await resolve_board.resolved("Acme Bio")
+        monkeypatch.setattr(resolve_board, "_resolve", answer((None, None)))
+        monkeypatch.setattr(resolve_board, stage, boom)
+        hit, reason = await resolve_board.resolve_or_miss("Acme Bio")
         assert hit is None
         assert reason == "fetch-error:RuntimeError"
         out = capsys.readouterr().out
         assert "Acme Bio" in out and "RuntimeError" in out
-
-    async def test_a_normal_result_passes_straight_through(self, monkeypatch):
-        monkeypatch.setattr(resolve_board, "resolve_or_miss",
-                            answer(({"name": "Acme"}, None)))
-        assert await resolve_board.resolved("Acme") == ({"name": "Acme"}, None)
 
 
 class TestRenameSlugBoards:
@@ -624,3 +615,21 @@ class TestRekeyJobs:
         merged = db.execute("SELECT disposition, resume_fit_score, first_seen FROM jobs "
                             "WHERE job_id='phenom_careers_a_org_2'").fetchone()
         assert tuple(merged) == ("applied", 0.7, "2026-01-01")
+
+
+class TestJunkNamesInReresolve:
+    T = {"db_path": None}
+
+    async def test_old_junk_misses_are_retired_not_retried(self, monkeypatch, db):
+        store.record_miss(db, "Required Qualifications", "no-board-found:x")
+        store.record_miss(db, "Emmes", "no-board-found:wrong-domain")
+        tried = []
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n)
+                                   or (None, "no-board-found:x")))
+        await repair.reresolve_misses(db=db, max_workers=1, t=self.T)
+        assert tried == ["Emmes"]
+        assert db.execute("SELECT miss_reason FROM companies WHERE "
+                          "name='Required Qualifications'").fetchone()[0] \
+            == "junk-name:section-heading"
+        assert [c["name"] for c in repair._reresolve_candidates(db)] == ["Emmes"]

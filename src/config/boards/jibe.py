@@ -1,4 +1,11 @@
-"""The `jibe` board spec."""
+"""The `jibe` board spec.
+
+An iCIMS tenant's Jibe front, on the employer's own host.
+
+Notes:
+    Ordered ahead of icims: its pages name the iCIMS tenant too, whose
+    search the front replaces with a script redirect. Added 2026-09-25.
+"""
 
 from __future__ import annotations
 

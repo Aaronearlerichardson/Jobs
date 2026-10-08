@@ -1,4 +1,11 @@
-"""The `icims` board spec."""
+"""The `icims` board spec.
+
+Notes:
+    The listing names no place (the rescue's JSON-LD does), so the canary
+    checks no location fill. The WAF 405s a Chrome UA without Chrome's
+    client hints; a bare platform UA passes. Tenants serve 20 or 50 a
+    page. A pulled posting's page answers 410.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +14,10 @@ from src.rows import JSON
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "icims.com", "re": [r"(?i)([a-z0-9-]+)\.icims\.com"]}],
     "discovery": {"search": [[7, "*.icims.com"]], "hint": [[5, "icims"]]},
+    # Its listing names no place (the rescue's JSON-LD does, and a sample
+    # reads no rescue), so the canary checks no location fill.
     "canary": {"name": "FUJIFILM Healthcare Americas Corporation",
-               "handle": "uscareers-fujifilm"},
+               "handle": "uscareers-fujifilm", "min_fill": {"location": 0}},
     "job_ref": {"re": r"(?i)^(https?://[a-z0-9-]+\.icims\.com/jobs/\d+/[^?#]*)",
                 "parts": ["link"]},
     "listing": [
@@ -30,7 +39,8 @@ SPEC: dict[str, JSON] = {
                             "city": "dt:has(.glyphicons-map-marker):contains('City') + dd",
                             "state": "dt:has(.glyphicons-map-marker):contains('State') + dd",
                             "country": "dt:has(.glyphicons-map-marker):contains('Country')"
-                                       " + dd"}},
+                                       " + dd",
+                            "posted": ".field-label:contains('Posted Date') + span"}},
             # Tenants serve 20 or 50 a page.
             "pager": {"kind": "page", "pages": 8, "bare_first": True,
                       "why": "the first search page takes no page number, 2026-08"},
@@ -58,7 +68,7 @@ SPEC: dict[str, JSON] = {
                 "url": {"format": "{_path}?in_iframe=1", "when": {"truthy": "_jid"}},
                 "location": {"first": [{"join": ["city", "state", "country"], "sep": ", "},
                                        "place"]},
-                "department": None,
+                "posted_at": "posted",
             },
         },
         # Titled by the URL slug; some tenants' WAF 403s it.
@@ -80,7 +90,6 @@ SPEC: dict[str, JSON] = {
                 "id": {"format": "icims_{_tenant}_{_jid}"},
                 "title": {"of": {"of": "_slug", "transform": "unquote"}, "transform": "dash_space"},
                 "url": {"format": "{_path}?in_iframe=1", "when": {"truthy": "_jid"}},
-                "department": None,
             },
         },
     ],

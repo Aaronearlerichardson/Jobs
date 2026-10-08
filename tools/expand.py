@@ -60,7 +60,8 @@ def _footer(*lines: str) -> None:
 
 
 def print_expansion(term: str, expanded: ExpandReply) -> None:
-    _banner(f"BCI Expansion: '{term}'")
+    track = config.UI_TRACKS.get(config.DEFAULT_TRACK or "")
+    _banner(f"{track.label if track else 'Search'} Expansion: '{term}'")
     _section("JOB TITLES TO SEARCH", expanded.titles)
     _section("KEYWORDS TO ADD", expanded.keywords, INCLUDE_KEYWORDS)
     _section("SECTORS / COMPANIES TO INVESTIGATE", expanded.sectors)

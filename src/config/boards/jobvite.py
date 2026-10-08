@@ -1,4 +1,9 @@
-"""The `jobvite` board spec."""
+"""The `jobvite` board spec.
+
+Notes:
+    Some tenants replace the all-rows page with a landing page listing
+    nothing, which is why the search goes first.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +33,6 @@ SPEC: dict[str, JSON] = {
                 "title": "text",
                 "url": {"format": "https://jobs.jobvite.com/{_tenant}/job/{_jid}"},
                 "location": "location",
-                "department": None,
             },
         },
         # Every row on one page; some tenants replace it with a landing

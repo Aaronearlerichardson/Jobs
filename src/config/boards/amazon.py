@@ -1,4 +1,12 @@
-"""The `amazon` board spec."""
+"""The `amazon` board spec.
+
+One employer; the handle is the region the search is narrowed to.
+
+Notes:
+    Spelled as the server spells it (case-sensitive) so a pull stays small.
+    Added 2026-10-07 with a fixture trimmed from a live region search;
+    closure reads a pulled requisition as a zero-hit 200.
+"""
 
 from __future__ import annotations
 
@@ -26,7 +34,7 @@ SPEC: dict[str, JSON] = {
             "id": {"format": "amazon_{id_icims}"},
             "title": "title",
             "url": {"format": "https://www.amazon.jobs{job_path}"},
-            "location": {"first": ["normalized_location", "location"], "default": "Unknown"},
+            "location": {"first": ["normalized_location", "location"]},
             "posted_at": "posted_date",
             "description": {"join": ["description", "basic_qualifications",
                                      "preferred_qualifications"],

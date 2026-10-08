@@ -1,4 +1,11 @@
-"""The `paylocity` board spec."""
+"""The `paylocity` board spec.
+
+Notes:
+    The slug is the company GUID; the trailing name segment is cosmetic.
+    The listing's Description is a teaser cut at ~110 characters, so the
+    body is the detail page. A pulled posting's detail page still
+    answers 200 (all 2026-09-23).
+"""
 
 from __future__ import annotations
 
@@ -25,8 +32,7 @@ SPEC: dict[str, JSON] = {
             "location": {"first": ["LocationName",
                                    {"join": ["JobLocation.City", "JobLocation.State"], "sep": ", "},
                                    {"const": "Remote", "when": {"truthy": "IsRemote"}},
-                                   "JobLocation.Country"],
-                         "default": "Unknown"},
+                                   "JobLocation.Country"]},
             # No "description": the listing's Description is a teaser cut at
             # ~110 characters (2026-09-23); the body is the detail page.
             "remote_hint": {"const": "paylocity:isRemote", "when": {"truthy": "IsRemote"}},

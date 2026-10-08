@@ -1,4 +1,9 @@
-"""The `pinpoint` board spec."""
+"""The `pinpoint` board spec.
+
+Notes:
+    Endpoint shape credited to kalil0321/ats-scrapers (MIT). A posting's
+    URL names its uuid, not the row id, so closure is board membership.
+"""
 
 from __future__ import annotations
 
@@ -24,8 +29,7 @@ SPEC: dict[str, JSON] = {
             "location": {"first": [{"of": "location.name",
                                     "when": {"contains": ["location.name", ","]}},
                                    {"join": ["location.name", "location.province"], "sep": ", "},
-                                   {"const": "Remote", "when": {"eq": ["workplace_type", "remote"]}}],
-                         "default": "Unknown"},
+                                   {"const": "Remote", "when": {"eq": ["workplace_type", "remote"]}}]},
             "description": {"join": ["description", "key_responsibilities",
                                      "skills_knowledge_expertise"], "sep": "\n",
                             "transform": "html_text"},

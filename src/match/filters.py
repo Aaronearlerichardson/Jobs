@@ -5,7 +5,7 @@ The keyword lists (CORE/DOMAIN/SKILL/INCLUDE/EXCLUDE_*) are bound from
 config at import time as the SAME list objects config holds, and
 src.crawl.runner.apply_keyword_focus mutates those lists in place, so a
 track's focus is visible here without a reload (tests/test_tracks.py pins
-that). The boilerplate regex is compiled once at import.
+that).
 
 Relevance model (tiered):
   1. CORE match  -> standalone signal, relevant.
@@ -133,6 +133,8 @@ def token_in(term: str, text: str, short_len: int | Literal["bounded"]) -> bool:
     (True, False)
     >>> token_in("Boston", "bostonian", 4)
     True
+    >>> token_in("weapon", "weapons", 3), token_in("cortical", "subcortical", 5)
+    (True, True)
 
     BOUNDED anchors however long the term is; SUBSTRING never anchors:
 
@@ -152,21 +154,33 @@ def token_in(term: str, text: str, short_len: int | Literal["bounded"]) -> bool:
     return bounded is None or bounded.search(text) is not None
 
 
+@lru_cache(maxsize=256)
+def _rules(terms: tuple[str, ...], short_len: int | Literal["bounded"]
+           ) -> tuple[tuple[str, str, re.Pattern[str] | None], ...]:
+    """(term, lowered, boundary regex or None) per term, in list order."""
+    return tuple((t, *_term_rule(t, short_len)) for t in terms)
+
+
 def first_hit(terms: Iterable[str], text: str,
               short_len: int | Literal["bounded"]) -> str | None:
-    """The first of `terms` that occurs in `text`, or None.
-
-    The shape every vocabulary gate in this package was writing out for
-    itself -- walk a list, return what matched so the verdict can say why.
-    Five loops over four vocabularies, in two modules, with three
-    different spellings of the match test between them.
+    """The first of `terms`, in list order, that occurs in lowercase `text`
+    under the `token_in` rule, or None.
 
     >>> first_hit(("scribe", "data entry"), "senior data entry clerk", BOUNDED)
     'data entry'
     >>> first_hit(("scribe",), "we describe things", BOUNDED) is None
     True
+    >>> first_hit(["Entry", "data"], "data entry", BOUNDED)   # list order, as given
+    'Entry'
+
+    Notes:
+        The per-term rules are cached per (terms, short_len) tuple, keyed
+        on contents, so a list apply_keyword_focus mutated gets new rules.
     """
-    return next((t for t in terms if token_in(t, text, short_len)), None)
+    for term, low, bounded in _rules(tuple(terms), short_len):
+        if low in text and (bounded is None or bounded.search(text) is not None):
+            return term
+    return None
 
 
 # --------------------------------------------------------------------- #
@@ -177,7 +191,7 @@ def _kw_in(text: str, keywords: Iterable[str]) -> bool:
     """A keyword hits `text` — acronyms on word boundaries (a bare "meg"
     would fire inside "omega" and flood aggregator sources with off-topic
     roles), longer terms as substrings (see SHORT_KEYWORD)."""
-    return any(token_in(k, text, SHORT_KEYWORD) for k in keywords)
+    return first_hit(keywords, text, SHORT_KEYWORD) is not None
 
 
 def blank_phrases(text: str, phrases: Iterable[str | None]) -> str:
@@ -243,10 +257,36 @@ def _excluded(title: str | None, text: str) -> bool:
     return bool(first_hit(EXCLUDE_TITLE_PHRASES, title_l, SUBSTRING))
 
 
+@lru_cache(maxsize=4096)
+def _scrub(frags: tuple[str, ...], text: str) -> str:
+    """`text` with every match of the ORed `frags` blanked; no re.I."""
+    return _boiler_re(frags).sub(" ", text)
+
+
+@lru_cache(maxsize=8)
+def _boiler_re(frags: tuple[str, ...]) -> re.Pattern[str]:
+    """`frags` ORed into one case-sensitive regex."""
+    return re.compile("|".join(frags))
+
+
 def scrub_boilerplate(text: str | None) -> str:
-    """`text` with benefits/EEO/infra-health idioms blanked — for matchers
-    whose keywords those idioms would otherwise false-trigger ("medical",
-    "health", "drug", "military")."""
+    """Lowercase `text` with benefits/EEO/infra-health idioms blanked — for
+    matchers whose keywords those idioms would otherwise false-trigger
+    ("medical", "health", "drug", "military").
+
+    `text` must already be lowercase, the `token_in` contract: the
+    fragments are lowercase (the profile schema rejects an uppercase one)
+    and match without re.I.
+
+    >>> scrub_boilerplate("medical, dental, vision insurance; eeg data")
+    ' ; eeg data'
+    >>> scrub_boilerplate(None)
+    ''
+
+    Notes:
+        Cached on (fragments, text), keyed on the fragment list's contents;
+        dropping re.I took a call from 0.93 to 0.31 ms (2026-10-08).
+    """
     # Boilerplate idioms that contain domain-looking words without meaning
     # them: benefits sections ("medical, dental, vision", "health savings
     # account", "drug-free workplace"), EEO statements ("military or
@@ -276,12 +316,9 @@ def scrub_boilerplate(text: str | None) -> str:
         r"health\s+(?:checks?|monitoring|metrics)",
         r"health\s+of\s+(?:the|our|your)",
     )
-    boilerplate_re = re.compile(
-        "|".join(getattr(config, "EXCLUDE_BOILERPLATE_PHRASES", None)
-                 or default_boilerplate_phrases),
-        re.I,
-    )
-    return boilerplate_re.sub(" ", text or "")
+    frags = tuple(getattr(config, "EXCLUDE_BOILERPLATE_PHRASES", None)
+                  or default_boilerplate_phrases)
+    return _scrub(frags, text or "")
 
 
 def watch_division_title(title: str | None) -> str | None:

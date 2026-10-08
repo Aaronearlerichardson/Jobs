@@ -31,7 +31,7 @@ SPEC: dict[str, JSON] = {
                 {"join": ["Locations[0].Address.City",
                           {"first": ["Locations[0].Address.State.Code",
                                      "Locations[0].Address.State"]}], "sep": ", "},
-                "Locations[0].LocalizedName"], "default": "Unknown"},
+                "Locations[0].LocalizedName"]},
             "description": {"of": "BriefDescription", "transform": "html_text"},
             "department": "JobCategoryName",
         },

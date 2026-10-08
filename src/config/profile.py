@@ -210,18 +210,17 @@ CANDIDATE_AVOID     = PROFILE.candidate.avoid.strip()
 #   1. JOBS_RESUME               — explicit path override
 #   2. [candidate] resume = "…"  — a filename (relative to DATA_DIR) or path
 #   3. the first resume.* in DATA_DIR, else the only document in there
-#
-# Formats src/claude/resume.py can read. PDF is deliberately absent — it would be
-# read as garbled bytes rather than text, which is worse than no résumé.
-RESUME_SUFFIXES = (".docx", ".txt", ".md")
 
 
 def _resolve_resume_path() -> Path:
+    # Formats src/claude/resume.py can read. PDF is deliberately absent: it
+    # would be read as garbled bytes rather than text, worse than no résumé.
+    suffixes = (".docx", ".txt", ".md")
     override = SETTINGS.jobs_resume or PROFILE.candidate.resume.strip()
     if override:
         p = Path(override).expanduser()
         return p if p.is_absolute() else DATA_DIR / p
-    for suffix in RESUME_SUFFIXES:                    # resume.docx, resume.txt…
+    for suffix in suffixes:                    # resume.docx, resume.txt…
         p = DATA_DIR / f"resume{suffix}"
         if p.exists():
             return p
@@ -229,7 +228,7 @@ def _resolve_resume_path() -> Path:
     # it's named ("Jane Doe 2026 Resume.docx"). Ambiguity is not guessed at —
     # two candidates means you name one in [candidate].resume.
     found = sorted(p for p in DATA_DIR.glob("*")
-                   if p.suffix.lower() in RESUME_SUFFIXES and p.is_file())
+                   if p.suffix.lower() in suffixes and p.is_file())
     return found[0] if len(found) == 1 else DATA_DIR / "resume.docx"
 
 
@@ -277,7 +276,6 @@ DISCOVERY_SEED_NAMES         = [s["name"] for s in DISCOVERY_SEED_COMPANIES]
 DISCOVERY_SEED_TRIGGERS      = list(PROFILE.discovery.seed_triggers)
 DISCOVERY_SCAN_MAJORS        = list(PROFILE.discovery.scan_majors)
 DISCOVERY_DIRECTORY_PAGES    = list(PROFILE.discovery.directory_urls)
-DISCOVERY_DIRECTORY_URLS     = [p.url for p in DISCOVERY_DIRECTORY_PAGES]
 DISCOVERY_DOMAIN_LOOKUP      = PROFILE.discovery.domain_lookup
 DISCOVERY_DOMAIN_LOOKUP_URLS = list(PROFILE.discovery.domain_lookup_urls)
 DISCOVERY_DOMAIN_HOSTS       = list(PROFILE.discovery.domain_hosts)
@@ -295,6 +293,7 @@ DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
 # minutes of rate-limit stalls across a full ~100+ name gather); 0 disables
 # the bulk websearch pass entirely.
 DISCOVERY_WEBSEARCH_CAP      = PROFILE.discovery.websearch_cap
+DISCOVERY_MISS_RETRY_DAYS    = PROFILE.discovery.miss_retry_days
 # Job-aggregator hosts to skip, and generic words to ignore, when resolving a
 # search result to a company's own ATS board (src/discovery/websearch_board.py).
 DISCOVERY_AGGREGATOR_HOSTS    = tuple(PROFILE.discovery.aggregator_hosts)

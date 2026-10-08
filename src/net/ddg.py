@@ -61,10 +61,9 @@ RETRY_PAUSE = 2.5               # seconds, scaled by the attempt number
 # cleared, because the breaker stayed shut for the rest of the run. After
 # each window one query goes through as a probe; a refused probe doubles
 # the window (capped at 600 s). The breaker is the run's; the override
-# patches the library, so it is the process's, until `reset_resolver()`
-# drops it.
+# patches the library, so it is the process's.
 RESOLVER_WINDOW = 90.0          # seconds of skipping after the first trip
-_RESOLVER_OVERRIDE: tuple[ModuleType, Callable[..., object]] | None = None   # (module, original Client)
+_RESOLVER_OVERRIDE = False     # whether ddgs's client factory is wrapped
 
 
 class Hit(TypedDict, total=False):
@@ -204,7 +203,7 @@ def _install_resolver(query: str) -> bool:
     global _RESOLVER_OVERRIDE
     servers = [s for s in getattr(config, "SEARCH_DNS_FALLBACK", ()) if s]
     hc = _http_client_module()
-    if _RESOLVER_OVERRIDE is not None or not servers or hc is None:
+    if _RESOLVER_OVERRIDE or not servers or hc is None:
         return False
     orig = hc.primp.Client
 
@@ -213,7 +212,7 @@ def _install_resolver(query: str) -> bool:
         return orig(*a, **kw)
 
     hc.primp.Client = client
-    _RESOLVER_OVERRIDE = (hc, orig)
+    _RESOLVER_OVERRIDE = True
     print(f"  [!] web search: the search library's resolver was refused on "
           f"{query[:40]!r}; retrying through {', '.join(servers)} for the "
           f"rest of this run (a VPN plus a second connected adapter is the "
@@ -238,7 +237,7 @@ def _trip_resolver(query: str, exc: BaseException) -> None:
     # installed and refused too, which points at the host, not ddgs.
     via = ("the SEARCH_DNS_FALLBACK override ("
            + ", ".join(s for s in config.SEARCH_DNS_FALLBACK if s) + ")"
-           if _RESOLVER_OVERRIDE is not None else "its own default resolver")
+           if _RESOLVER_OVERRIDE else "its own default resolver")
     print(f"  [!] web search unreachable: the search library's resolver "
           f"was refused via {via} ({type(exc).__name__} on {query[:40]!r}). "
           f"Skipping web search for {s.backoff:.0f}s, then probing.")
@@ -268,16 +267,6 @@ def _probe_passed() -> None:
         s.down_until = s.backoff = 0.0
         s.probing = False
     print("  web search resolver recovered")
-
-
-def reset_resolver() -> None:
-    """Drop the DNS override (tests, or a long-lived process after the
-    network changed); each run's breaker starts closed."""
-    global _RESOLVER_OVERRIDE
-    if _RESOLVER_OVERRIDE is not None:
-        hc, orig = _RESOLVER_OVERRIDE
-        hc.primp.Client = orig
-        _RESOLVER_OVERRIDE = None
 
 
 def _query(DDGS: Callable[..., AbstractContextManager[_Ddgs]], query: str,

@@ -10,8 +10,8 @@ headings, duplicates of a tracked company under another spelling, acquired
 or dissolved companies. This reads the store read-only and writes a SQL
 script, one reason line per proposal, in two tiers:
 
-  apply   junk names (`match.names.junk_name_reason` plus a few heading
-          shapes), spellings of one company (a name equal to a tracked
+  apply   junk names (`match.names.junk_name_reason`, bar its length
+          rule), spellings of one company (a name equal to a tracked
           company's, or to a parenthetical alias of it), and companies
           Wikidata calls replaced (P1366) or dissolved (P576).
   review  same shapes, weaker evidence: a subsidiary of a tracked company
@@ -68,21 +68,6 @@ ORG_RE = re.compile(
 
 # Descriptions of items that merely discuss an organisation.
 NOT_ORG_RE = re.compile(r"article|disambiguation|journal|news|episode|supermarket", re.I)
-
-# Words that alone make a pasted fragment a heading, not an employer, beyond
-# what junk_name_reason knows: pronoun phrases ("Who We Are") and a heading
-# word with a modifier ("Minimum Requirements").
-FUNCTION_WORDS = frozenset({
-    "who", "we", "you", "are", "what", "our", "your", "i", "am", "is", "this",
-    "that", "they", "it", "us", "how", "why", "when", "where", "to", "be"})
-HEADING_MODIFIERS = frozenset({
-    "minimum", "basic", "additional", "desired", "key", "core", "general",
-    "nice", "plus", "bonus", "ideal", "essential", "other", "physical",
-    "working", "work", "environment", "conditions", "equal", "opportunity"})
-HEADING_NOUNS = frozenset({
-    "requirements", "requirement", "qualifications", "qualification",
-    "responsibilities", "skills", "duties", "benefits", "perks", "conditions",
-    "environment", "employer", "opportunity"})
 
 Tier = Literal["apply", "review"]
 Kind = Literal["merge", "prune"]
@@ -181,30 +166,6 @@ def stripped_keys(name: str) -> set[str]:
     return {k for k in (canon(name), canon(strip_suffixes(name))) if k}
 
 
-def heading_reason(name: str) -> str:
-    """Why `name` reads as a pasted heading though `junk_name_reason` lets it
-    through, or ''.
-
-    >>> heading_reason("Who We Are"), heading_reason("Minimum Requirements")
-    ('heading-phrase', 'heading-phrase')
-    >>> heading_reason("… more")
-    'listing-chrome'
-    >>> heading_reason("Who Cares Labs"), heading_reason("Acme Requirements Inc")
-    ('', '')
-    """
-    words = name_words(name)
-    if words and all(w in FUNCTION_WORDS for w in words):
-        return "heading-phrase"
-    if (len(words) == 2 and words[0] in HEADING_MODIFIERS
-            and words[1] in HEADING_NOUNS):
-        return "heading-phrase"
-    if re.match(r"\s*(?:…|\.\.\.)", name):
-        return "listing-chrome"
-    if "�" in name:
-        return "garbled"
-    return ""
-
-
 def junk_reason(name: str) -> str:
     """The first reason `name` is not an employer, or ''.
 
@@ -217,7 +178,7 @@ def junk_reason(name: str) -> str:
     ''
     """
     reason = junk_name_reason(name)
-    return heading_reason(name) if reason == "too-long" else reason or heading_reason(name)
+    return "" if reason == "too-long" else reason
 
 
 def search_term(name: str) -> str:

@@ -13,6 +13,7 @@ Notes:
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
@@ -26,8 +27,8 @@ from src.match.locality import LocationRE
 from src.net.util import clean_url
 from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob, str_or_none
 from .schema import (SqlScalar, _commit, apply_update, as_job,
-                     dedup_groups, _norm_url, sql, sql_function)
-from .companies import harvestable_companies
+                     _norm_url, sql, sql_function)
+from .companies import harvestable_companies, miss_family_in
 from .pipeline import RANKING_EXCLUDED_DISPOSITIONS
 
 
@@ -647,7 +648,9 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
     stamp = (now or datetime.now()).isoformat()
     grace_cutoff = (datetime.now()
                     - timedelta(days=external_grace_days)).isoformat()
-    n_reopened = n_closed = 0
+    n_reopened = 0
+    opened: list[tuple[str, str | None, str]] = []
+    closed: list[tuple[str, str]] = []
     rows = conn.execute(
         "SELECT job_id, url, title, track, status, first_seen, last_seen "
         "FROM jobs WHERE company_id=?", (company_id,)).fetchall()
@@ -667,13 +670,9 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
         if present:
             if (r["status"] or "open") != "open":
                 n_reopened += 1
-            p = (posted.get(r["job_id"]) or posted.get(_norm_url(r["url"]))
+            p = (posted.get(r["job_id"]) or posted.get(u)
                  or posted.get(_norm_title(r["title"])))
-            conn.execute(
-                "UPDATE jobs SET status='open', closed_at=NULL, last_seen=?, "
-                "posted_at=COALESCE(posted_at, ?), probe_streak=0 "
-                "WHERE job_id=?",
-                (stamp, p, r["job_id"]))
+            opened.append((stamp, p, r["job_id"]))
             continue
         if track is not None and track not in track_set(r["track"]):
             continue
@@ -689,12 +688,13 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
             seen = r["last_seen"] or r["first_seen"] or ""
             closeable = seen < grace_cutoff
         if closeable:
-            conn.execute(
-                "UPDATE jobs SET status='closed', closed_at=? WHERE job_id=?",
-                (stamp, r["job_id"]))
-            n_closed += 1
+            closed.append((stamp, r["job_id"]))
+    conn.executemany(
+        "UPDATE jobs SET status='open', closed_at=NULL, last_seen=?, "
+        "posted_at=COALESCE(posted_at, ?), probe_streak=0 WHERE job_id=?", opened)
+    conn.executemany("UPDATE jobs SET status='closed', closed_at=? WHERE job_id=?", closed)
     _commit(conn)
-    return (n_reopened, n_closed)
+    return (n_reopened, len(closed))
 
 
 def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> list[tuple[str, int]]:
@@ -731,6 +731,63 @@ def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> lis
     return [tuple(r) for r in rows]
 
 
+class DeadBoardRow(TypedDict):
+    """An open job closed because its company's board is dead."""
+    job_id: str
+    title: str | None
+    company_id: int
+    company_name: str | None
+    miss_reason: str
+
+
+def close_dead_board_jobs(conn: sqlite3.Connection, family: str, days: int,
+                          now: datetime | None = None) -> list[DeadBoardRow]:
+    """Close, at `now` (default: the clock), the OPEN rows at a company
+    whose CURRENT miss_reason is in `family` (miss_family) and whose last
+    board-verified sighting (last_seen, else first_seen) is older than
+    `days`; returns them ordered by company name. Nobody has vouched for
+    them since the board itself started returning nothing, so these are
+    dead by inference rather than by a URL probe.
+
+    A promoted board-dead company (companies.mark_harvested's
+    HARVEST_DEAD_AFTER_DAYS cycle, or a manual src.ops.roster.prune) writes
+    miss_reason with a raw UPDATE rather than through record_miss (whose
+    "never demote an ACTIVE company" guard the promotion overrides), so
+    that is what these fixtures do too. A quiet board that never missed is
+    never touched, however stale, nor is a miss in another family:
+
+    >>> from src.store.schema import connect
+    >>> from .companies import upsert_company
+    >>> conn = connect(":memory:")
+    >>> for name, j, miss in (("Judi Health", "j1", "board-dead:greenhouse"),
+    ...                       ("Quiet Co", "j2", None), ("Ats Gap", "j3", "ats-unsupported:ukg")):
+    ...     cid = upsert_company(conn, {"name": name, "ats": "lever"})
+    ...     _ = upsert_job(conn, {"job_id": j, "title": "T", "company_id": cid,
+    ...                           "company_name": name})
+    ...     _ = conn.execute("UPDATE companies SET miss_reason=? WHERE id=?", (miss, cid))
+    >>> close_dead_board_jobs(conn, "board-dead", 14)
+    []
+    >>> _ = conn.execute("UPDATE jobs SET last_seen='2020-01-01'")
+    >>> [(r["job_id"], r["miss_reason"]) for r in close_dead_board_jobs(conn, "board-dead", 14)]
+    [('j1', 'board-dead:greenhouse')]
+    >>> [r[0] for r in conn.execute("SELECT job_id FROM open_jobs ORDER BY job_id")]
+    ['j2', 'j3']
+    """
+    now = now or datetime.now()
+    rows = conn.execute(
+        "UPDATE jobs SET status = 'closed', closed_at = ? WHERE id IN ("
+        " SELECT j.id FROM open_jobs j JOIN companies c ON c.id = j.company_id"
+        f" WHERE {miss_family_in('c.miss_reason')}"
+        " AND COALESCE(j.last_seen, j.first_seen, '') < ?) "
+        "RETURNING job_id, title, company_id, company_name, "
+        "(SELECT miss_reason FROM companies c WHERE c.id = jobs.company_id) AS miss_reason",
+        (now.isoformat(), json.dumps([family]),
+         (now - timedelta(days=days)).isoformat())).fetchall()
+    _commit(conn)
+    return sorted((cast(DeadBoardRow, dict(r)) for r in rows),
+                  key=lambda r: (r["company_name"] or "", r["job_id"]))
+
+
 # Fit columns written together by the rescore path (see update_job_scores).
 _SCORE_COLS = tuple(FitColumns.__annotations__)
 
@@ -744,35 +801,26 @@ def update_job_scores(conn: sqlite3.Connection, job_id: str, cols: FitColumns) -
                  {c: cols.get(c) for c in _SCORE_COLS})
 
 
-def backfill_axis_columns(conn: sqlite3.Connection) -> int:
-    """Populate the per-axis columns (fit_domain/function/stack/seniority,
-    fit_gates) from the tag already embedded in fit_reason. Offline, no API.
-    Only touches rows that have the tag and a NULL fit_domain, and leaves
-    resume_fit_score / fit_reason untouched. Rows with no tag ('no
-    description; unscored', or old single-scalar reasons) are skipped."""
-    rows = conn.execute(
-        "SELECT job_id, fit_reason FROM jobs "
-        "WHERE fit_domain IS NULL AND fit_reason LIKE '[dom%'"
-    ).fetchall()
-    n = 0
-    for r in rows:
-        # The fit_reason tag summary() writes: "[dom0.45 fun0.72 sta0.55
-        # sen0.80 gate:geo+embedded] reason". Gates are '+'-joined in the tag.
-        m = re.match(r"\[dom([\d.]+) fun([\d.]+) sta([\d.]+) sen([\d.]+)"
-                     r"(?: gate:([^\]]+))?\]", r["fit_reason"] or "")
-        if not m:
-            continue
-        dom, fun, sta, sen, gates = m.groups()
-        conn.execute(
-            "UPDATE jobs SET fit_domain=?, fit_function=?, fit_stack=?, "
-            "fit_seniority=?, fit_gates=? WHERE job_id=?",
-            (float(dom), float(fun), float(sta), float(sen),
-             (gates.replace("+", ",") if gates else None), r["job_id"]),
-        )
-        n += 1
-    _commit(conn)
-    print(f"  {n} of {len(rows)} row(s) backfilled from fit_reason tags.")
-    return n
+def record_verified(conn: sqlite3.Connection, job_id: str, cols: FitColumns,
+                    body: str | None = None, ok_detail: str | None = None,
+                    tracks: Iterable[str] = ()) -> None:
+    """Write one deep verify: its fit columns (update_job_scores), the live
+    `body` it read (store_body), and, given `ok_detail`, an 'ok' triage
+    verdict into `tracks` (record_triage).
+
+    >>> from src.store.schema import connect
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_job(conn, {"job_id": "j", "title": "T", "track": "x"})
+    >>> record_verified(conn, "j", {"resume_fit_score": 0.7}, "live body", "x=fit", ["x"])
+    >>> tuple(conn.execute("SELECT resume_fit_score, description, triage_status "
+    ...                    "FROM jobs").fetchone())
+    (0.7, 'live body', 'ok')
+    """
+    update_job_scores(conn, job_id, cols)
+    if body:
+        store_body(conn, job_id, body)
+    if ok_detail is not None:
+        record_triage(conn, job_id, TRIAGE_OK, ok_detail, tracks=tracks)
 
 
 def remote_admitted(row: Mapping[str, object], remote_mission_floor: float | None) -> bool:
@@ -905,6 +953,17 @@ def _remote_admitted_cols(company_name: str | None, mission_score: float | None,
     return remote_admitted({"company_name": company_name, "mission_score": mission_score}, floor)
 
 
+@functools.lru_cache(maxsize=1 << 17)
+def _place_ok(matcher: LocationRE, location: str) -> bool:
+    """`matcher` accepts `location`, memoised per (matcher, location).
+
+    Notes:
+        Process-wide, not per-run: a matcher's answer is fixed once the
+        profile's locality regexes are built at import, so runs can share it.
+        Tests that patch those regexes clear it (tests/conftest.py)."""
+    return matcher.search(location) is not None
+
+
 def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int | None = None,
                 location_re: LocationRE | None = None, rank_by: str = "combined",
                 allow_geo_modes: Collection[str] | None = None,
@@ -999,10 +1058,13 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         include_dispositioned=include_dispositioned)
     conds.append("j.dup_of IS NULL")      # the survivor of a cross-board mirror stands for it
     if location_re is not None:
-        # NC_RE is a Python matcher, not a regex: judge each DISTINCT stored
-        # location once (~31k of 119k rows) and let SQL keep the accepted set.
+        # NC_RE is a Python matcher, not a regex: judge each DISTINCT location
+        # the pool can hold once (23k of 227k rows) and let SQL keep the
+        # accepted set.
         accepted = [loc for (loc,) in conn.execute(
-            "SELECT DISTINCT COALESCE(location, '') FROM jobs") if location_re.search(loc)]
+            "SELECT DISTINCT COALESCE(location, '') FROM "
+            f"{'jobs' if include_closed else 'open_jobs'} WHERE dup_of IS NULL")
+            if _place_ok(location_re, loc)]
         args.append(json.dumps(accepted))
         geo = "COALESCE(j.location, '') IN (SELECT value FROM json_each(?))"
         if allow_geo_modes:
@@ -1119,12 +1181,26 @@ def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) 
     return cast(int, keep["id"])
 
 
+@sql_function("id_tail", 1)
+def _id_tail(job_id: str) -> str:
+    """A job id's per-posting part: what follows its namespace (the first
+    two "_" tokens), else what follows its last "_".
+
+    >>> _id_tail("adp_9a6de238_9205893561468_1"), _id_tail("icims_global-sas_42305")
+    ('9205893561468_1', '42305')
+    >>> _id_tail("custom_blob"), _id_tail("x")
+    ('blob', 'x')
+    """
+    parts = job_id.split("_", 2)
+    return parts[2] if len(parts) == 3 else parts[-1]
+
+
 class _Twin(TypedDict):
-    """One dedup_jobs row: a member of a same-posting group, ranked."""
+    """One dedup_jobs row: a member of a same-posting group."""
+    id: int
     job_id: str
     title: str | None
     g: int
-    rn: int
 
 
 def dedup_jobs(conn: sqlite3.Connection) -> int:
@@ -1144,24 +1220,25 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
     fresh requisition (a second office, a re-opened req) is a separate
     posting, not a duplicate.
 
-    Keeps, per group: a dispositioned row over an undispositioned one, then
-    an open row over a closed one, then the earliest first_seen (the row
-    whose history is longest). Returns the number of rows deleted.
+    Each group is folded by merge_jobs: its survivor (a dispositioned row
+    over an undispositioned one, then an open row over a closed one, then
+    the earliest first_seen) keeps its id and takes what it lacks from the
+    others. Returns the number of rows deleted.
 
     Notes:
         The 2026-09-01 store held 12 SAS pairs (iCIMS `?in_iframe=1` vs
         `?hub=9&in_iframe=1`). The dry run without the requisition guard
         would have merged three Butterfly Network pairs.
     """
-    # Group = (company, posting key, requisition tail): the tail is the id
-    # after its last "_" (the whole id when none). Members come back
+    # Group = (company, posting key, requisition tail: _id_tail, so ADP's
+    # "<req>_1" ids keep their distinct requisitions). Members come back
     # best-first (_SURVIVOR_ORDER), groups in first-row order.
     groups: dict[int, list[_Twin]] = {}
     for r in conn.execute(f"""
             WITH keyed AS (
               SELECT id, job_id, title, disposition, status, first_seen, company_id,
                      norm_url(url) AS u, norm_title(title) AS t,
-                     substr(job_id, length(rtrim(job_id, replace(job_id, '_', ''))) + 1) AS tail
+                     id_tail(job_id) AS tail
               FROM jobs WHERE company_id IS NOT NULL AND url IS NOT NULL AND url != ''
             ), ranked AS (
               SELECT *, ROW_NUMBER() OVER ordered AS rn, COUNT(*) OVER same AS n,
@@ -1170,14 +1247,14 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
               WINDOW same AS (PARTITION BY company_id, u, t, tail),
                      ordered AS (same ORDER BY {_SURVIVOR_ORDER})
             )
-            SELECT job_id, title, g, rn FROM ranked WHERE n > 1 ORDER BY g, rn"""):
+            SELECT id, job_id, title, g FROM ranked WHERE n > 1 ORDER BY g, rn"""):
         groups.setdefault(r["g"], []).append(cast(_Twin, dict(r)))
-
-    return dedup_groups(
-        conn, "jobs", "job_id", groups, rank=lambda r: r["rn"],
-        describe=lambda keep, losers: (
-            f"{(keep['title'] or '')[:40]:40} kept {keep['job_id'][:28]}"
-            f" <- dropped {', '.join(l['job_id'][:28] for l in losers)}"))
+    for keep, *losers in groups.values():
+        merge_jobs(conn, [keep["id"], *(l["id"] for l in losers)], keep["job_id"])
+        print(f"    {(keep['title'] or '')[:40]:40} kept {keep['job_id'][:28]}"
+              f" <- merged {', '.join(l['job_id'][:28] for l in losers)}")
+    _commit(conn)
+    return sum(len(g) - 1 for g in groups.values())
 
 
 def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:

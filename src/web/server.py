@@ -87,9 +87,9 @@ def _ours_on(port: int) -> bool:
     """True if a RUNNING instance of this app already serves `port`."""
     try:
         with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/stats", timeout=2) as r:
+                f"http://127.0.0.1:{port}/api/boot", timeout=2) as r:
             head: bytes = r.read(4096)
-            return b"screen_model" in head
+            return b"boot_id" in head
     except (OSError, HTTPException) as e:
         _log.debug("port %s not ours: %s", port, type(e).__name__)
         return False
@@ -171,31 +171,25 @@ def main() -> None:
         # Config-save restart successor: our dying predecessor still holds
         # the port for a moment. Wait for it instead of the idempotent
         # "already running" bail-out — we ARE the replacement.
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            if _port_free(port):
-                break
+        takeover_s = 20
+        deadline = time.time() + takeover_s
+        while not _port_free(port):
+            if time.time() >= deadline:
+                raise SystemExit(f"  [!] restart takeover timed out - port {port} still "
+                                 f"busy after {takeover_s}s. Start the UI manually.")
             time.sleep(0.25)
-        else:
-            raise SystemExit(f"  [!] restart takeover timed out - port {port} "
-                             "still busy after 20s. Start the UI manually.")
-    elif _ours_on(port):
-        url = f"http://127.0.0.1:{port}"
-        print(f"  already running -> {url}  (opening browser; this window can close)")
-        if "--no-open" not in sys.argv:
-            webbrowser.open(url)
-        return
-    if not _port_free(port):
-        for cand in range(port + 1, port + 11):
+    else:
+        for cand in range(port, port + 11):
             if _ours_on(cand):
                 url = f"http://127.0.0.1:{cand}"
-                print(f"  already running -> {url}  (opening browser)")
+                print(f"  already running -> {url}  (opening browser; this window can close)")
                 if "--no-open" not in sys.argv:
                     webbrowser.open(url)
                 return
             if _port_free(cand):
-                print(f"  [!] port {port} is in use by another program - "
-                      f"using {cand} instead")
+                if cand != port:
+                    print(f"  [!] port {port} is in use by another program - "
+                          f"using {cand} instead")
                 port = cand
                 break
         else:

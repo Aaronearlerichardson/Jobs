@@ -11,13 +11,14 @@ ranking knobs from it.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import AsyncGenerator, Generator, Iterable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, overload
 
 from src import config
 from src import digest
+from src.digest.render import score_text
 from src import store
 from src import tags
 from src.ats.board import company as company_fetch
@@ -194,21 +195,22 @@ def write_digest(conn: sqlite3.Connection, t: RuntimeTrack,
 
 
 def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
-                   heading: str = "") -> list[RankedJob]:
+                   heading: str | Callable[[int], str] = "") -> list[RankedJob]:
     """Rewrite the track's ranked digest from the store as it stands now,
-    and print the top `top_n` of it. Returns the ranked list.
+    and print `heading` (a callable is given the ranked count) and the top
+    `top_n` of it. Returns the ranked list.
 
     The tail of every op that changes what the ranking contains -- the
     status sync and the standalone deep verify both ended with their own
     copy, and the copies had already drifted apart in what they printed.
     """
     ranked = write_digest(conn, t)[0]
+    if callable(heading):
+        heading = heading(len(ranked))
     if heading:
         print(heading)
     for j in ranked[:top_n]:
-        fit = j["resume_fit_score"]
-        fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
-        print(f"  fit={fs} [{geo_label(j)}] {(j['title'] or '')[:52]}"
+        print(f"  fit={score_text(j['resume_fit_score'])} [{geo_label(j)}] {(j['title'] or '')[:52]}"
               f"  -  {j['company_name']}")
     return ranked
 

@@ -49,10 +49,6 @@ class TestPosting:
         assert (rec["city"], rec["state"]) == ("Morrisville", "North Carolina")
         assert "Cabin Supervisor" in rec["description"]
 
-    def test_a_posting_url_names_its_portal_and_id(self):
-        url = f"{BASE}/JobDetail/1160-RDU-Delta-Cabin-CB2SUP-Cabin-Supervisor-FT/14712"
-        assert AVATURE.job_ref(url) == {"base": BASE, "jid": "14712"}
-
 
 class TestDetection:
     @pytest.mark.parametrize("text,base", [

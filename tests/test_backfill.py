@@ -88,8 +88,6 @@ class TestBackfillRetryThrottle:
             self, tmp_path, monkeypatch, capsys):
         dbp = tmp_path / "t.db"
         self._seed(dbp)
-        board_row = {"title": "Vanished Engineer", "description": ""}
-        monkeypatch.setattr(company_fetch, "fetch_company", answer([board_row]))
         monkeypatch.setattr(
             company_fetch, "hydrate_description",
             answer(lambda stub, company=None: stub.__setitem__("description",

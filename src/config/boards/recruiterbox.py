@@ -1,12 +1,19 @@
-"""The `recruiterbox` board spec."""
+"""The `recruiterbox` board spec.
+
+Recruiterbox (Trakstar Hire): the public API wants a key, so the
+server-rendered list is read.
+
+Notes:
+    25 cards a page with `?p=`. The old `<co>.recruiterbox.com` host
+    redirects to `<co>.hire.trakstar.com`. The posting page's JSON-LD holds
+    raw line breaks in a string (not valid JSON); a pulled posting's page
+    answers 404.
+"""
 
 from __future__ import annotations
 
 from src.rows import JSON
 
-# Recruiterbox (Trakstar Hire): its public API wants a key, so the
-# board's own server-rendered list is read, 25 cards a page with `?p=`.
-# The old `<co>.recruiterbox.com` host redirects to `<co>.hire.trakstar.com`.
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "hire.trakstar.com",
                 "re": [r"(?i)([a-z0-9][a-z0-9-]*)\.hire\.trakstar\.com"],
@@ -44,8 +51,7 @@ SPEC: dict[str, JSON] = {
             "url": "url",
             # The spans hold "City", "State" and "Country"; a free-text place has none.
             "location": {"first": [{"join": ["city", "state", "country"], "sep": ", "},
-                                   {"of": "place", "transform": "one_line"}],
-                         "default": "Unknown"},
+                                   {"of": "place", "transform": "one_line"}]},
             "remote_hint": {"const": "recruiterbox:remote",
                             "when": {"contains": ["meta", "fully remote"]}},
             "department": "dept",

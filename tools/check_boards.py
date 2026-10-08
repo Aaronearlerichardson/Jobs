@@ -171,15 +171,16 @@ async def dry_run(board: Board, handle: str, show: int, floors: dict[str, float]
     print the count, each field's fill rate and the first `show` rows;
     1 when the board is unreadable or a field falls under its floor."""
     rows = await board.listing(handle, f"{board.name} {handle}")
-    print(f"  {board.name} {handle}: {len(rows)} jobs")
-    if not rows:
+    posts = [r for r in rows if r["id"] is not None]     # id-less rows are shell links
+    print(f"  {board.name} {handle}: {len(posts)} jobs"
+          + (f" ({len(rows) - len(posts)} id-less rows)" if len(rows) > len(posts) else ""))
+    if not posts:
         return 1
     floor = FILL_FLOORS | floors
-    posts = [r for r in rows if r["id"] is not None]     # id-less rows are shell links
     rates = fill_rates(posts)
     for k, v in rates.items():
         print(f"  {k:12} {v:6.1%}  (floor {floor[k]:.0%}){'  FAIL' if v < floor[k] else ''}")
-    for r in rows[:show]:
+    for r in posts[:show]:
         print(" ", json.dumps({k: v for k, v in r.items() if v and not k.startswith("_")},
                               ensure_ascii=False)[:400])
     return 1 if fill_misses(posts, floors) else 0

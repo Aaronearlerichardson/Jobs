@@ -1264,7 +1264,7 @@ function showRestart() {
       return;
     }
     try {
-      const s = await api(withTrack("/api/stats"));
+      const s = await api("/api/boot");
       if (s.boot_id && s.boot_id !== prevBoot) { clearInterval(iv); location.reload(); }
     } catch (e) { /* successor not up yet */ }
   }, 500);

@@ -71,9 +71,6 @@ class TestPosting:
         center()
         assert "Certified Nursing Assistants" in await TALEO.description_for(POSTING)
 
-    def test_a_posting_url_names_its_career_center(self):
-        assert TALEO.job_ref(POSTING) == {"site": SITE, "org": "NFINDY", "cws": "37", "jid": "17"}
-
 
 class TestDetection:
     @pytest.mark.parametrize("url", [

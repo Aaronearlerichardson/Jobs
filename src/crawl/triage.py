@@ -60,7 +60,7 @@ track record ("local-tech=geo;remote-neural=title") is kept in
 triage_detail so a false drop is debuggable; triage_status carries the
 one row verdict the funnel counts.
 
-Keyword focus (runner.apply_keyword_focus) mutates config's shared lists,
+Keyword focus (runner.keyword_focus) mutates config's shared lists,
 so the gate phases run one company and one track at a time (off the loop,
 asyncio.to_thread), with the lists restored afterwards. Only hydration and
 scoring run concurrently, and neither reads those lists.
@@ -78,8 +78,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable, Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -96,7 +95,7 @@ from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, FitResult, score_resume_fit
 from src.config import RuntimeTrack
 from src.crawl.hydrate import MISS_BACKOFF_S, BoardStats, hydrate_rows
-from src.crawl.runner import apply_keyword_focus, core_anchor
+from src.crawl.runner import core_anchor, keyword_focus
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
@@ -164,18 +163,6 @@ def _track_applies(t: RuntimeTrack, company: CompanyRow) -> bool:
     """A tag-scoped track (store_tag) only reads companies carrying it."""
     tag = t.store_tag
     return not tag or tags.has(company.get("tags"), tag)
-
-
-@contextmanager
-def _keyword_focus(t: RuntimeTrack) -> Generator[None]:
-    """apply_keyword_focus for the duration of a block, then put the shared
-    lists back (config.keyword_snapshot / restore_keywords)."""
-    saved = config.keyword_snapshot()
-    apply_keyword_focus(config, t)
-    try:
-        yield
-    finally:
-        config.restore_keywords(saved)
 
 
 # --------------------------------------------------------------------------- #
@@ -376,7 +363,7 @@ async def judge(db: store.Writer, company: CompanyRow, jobs: list[JobRow], track
                 for j in jobs:
                     out[j["job_id"]][t.track] = mv
                 continue
-            with _keyword_focus(t):
+            with keyword_focus(t):
                 for j in jobs:
                     out[j["job_id"]][t.track] = row_verdict(company, j, t, cutoff)
         return out
@@ -511,7 +498,7 @@ def _hydrate_order(survivors: dict[str, tuple[CompanyRow, JobRow, str]]) -> Call
     the per-host budget reaches it, and the free exclude gate
     ([exclude.<track>] title_tokens) is what keeps it from being fetched at
     all. Relevance is judged on the GLOBAL keyword lists: hydration runs
-    outside _keyword_focus, and an ordering need not agree with any one
+    outside keyword_focus, and an ordering need not agree with any one
     track. Exercised end to end by tests/test_triage.py::
     test_hydration_spends_the_board_budget_on_relevant_titles_first.
 

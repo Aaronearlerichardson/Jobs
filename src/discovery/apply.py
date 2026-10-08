@@ -1,132 +1,25 @@
-"""Write what discovery found into the company store.
+"""Employer attribution: aggregator postings -> roster rows, queued for review.
 
-Replaces the original config.py source-rewriter: discovery used to regex-edit
-Python source (insert entries into GREENHOUSE_COMPANIES etc.), and a separate
---import-seeds step copied them into the store. The store IS the roster now —
-candidates upsert straight into the companies table through the same
-mission-scoring write path every other automated add uses
-(src.discovery.write.score_and_upsert).
-
-New rows land in the REVIEW QUEUE (src.store.mark_pending): a candidate the
-model suggested and a resolver confirmed is exactly the kind of name that
-used to reach the roster without ever having been an employer.
+New rows land in the REVIEW QUEUE (src.store.mark_pending): a name an
+aggregator posting carries is exactly the kind of name that used to reach
+the roster without ever having been an employer.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from src import store
 from src.ats import coords
-from src.ats.board import board_for
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
 from src.match.names import name_key
-from src.rows import BoardHit, CompanyIn, FetchedJob, Slug
-from .write import score_and_upsert
+from src.rows import CompanyIn, FetchedJob
 
 if TYPE_CHECKING:
     import sqlite3
-
-    from .pipeline import Candidate, DiscoveryResult
-
-
-def _candidate_hit(c: Candidate) -> BoardHit | None:
-    """A confirmed Candidate as the resolver-shaped hit dict the store write
-    path takes, or None when its coordinates are malformed. A multi-part
-    handle ('t|p|s', Workday's) goes back to the tuple a hit carries
-    (Board.split: each part typed as `detect` types it, Workday's pod an int).
-
-    What counts as coordinates is ``src.store.board_key``, the store's own
-    rule for which column identifies a board -- the slug for most families,
-    the triple for Workday, and the careers URL for the ones keyed on it
-    (custom, successfactors, peopleadmin, wpjson). Requiring a slug here
-    instead rejected a self-hosted `custom` board, whose only coordinate IS
-    its URL, as a malformed one (src.discovery.resolve.board returns exactly
-    that for a real careers page on no known platform).
-    """
-    # The handle: a string, or the tuple of a multi-part one.
-    text = (c.slug or "").strip() or None
-    slug: Slug = text
-    board = board_for(c.ats)
-    if board and board.multi_column:
-        slug = board.split(text)
-        if slug is None:
-            return None
-    hit: BoardHit = {"name": c.name, "ats": c.ats, "slug": slug,
-                     "careers_url": c.careers_url or None,
-                     "count": c.job_count, "nc": c.nc}
-    # The same coordinates score_and_upsert will write, asked of the same
-    # function company_by_board dedups on: no board, no row.
-    return hit if store.board_key(coords.from_hit(hit)) else None
-
-
-async def apply_to_store(result: DiscoveryResult, dry_run: bool = False) -> list[str]:
-    """Mission-score confirmed candidates and write them to the companies
-    table; return summary lines. `dry_run=True` reports without writing —
-    and without paying for a mission call.
-
-    The write is write.score_and_upsert, the one path behind every
-    automated add: it mission-scores the board, activates it only if the tier
-    says so (src.claude.is_active_mission), refuses a board the roster
-    already holds under another name, and queues anything the store has not
-    confirmed for review.
-
-    Notes:
-        This used to build the row here instead, with ``active=1``
-        unconditionally and the mission columns left NULL for a later
-        ``--score-missions`` pass. So a `discover-term` / `--from-bciwiki`
-        candidate was the one discovery product that skipped the mission
-        gate: confirming its review row put an unscored company on the
-        roster, ACTIVE, and it stayed crawled until somebody remembered to
-        run the backfill.
-    """
-    term = result["term"]
-    confirmed = [c for c in result["companies"] if c.confirmed]
-    if not confirmed:
-        return [f"  (no confirmed candidates for '{term}')"]
-
-    async with store.Writer() as db:
-        added, skipped = 0, 0
-        summary: list[str] = []
-        for c in confirmed:
-            # "Can this row be fetched" is board_for, what fetch_company
-            # dispatches on and every other caller of the write path trusts.
-            if not board_for(c.ats):
-                summary.append(f"    [skip] {c.name}: no fetcher for ATS '{c.ats}'")
-                skipped += 1
-                continue
-            hit = _candidate_hit(c)
-            if hit is None:
-                summary.append(f"    [skip] {c.name}: malformed slug {c.slug!r}")
-                skipped += 1
-                continue
-            if dry_run:
-                added += 1
-                summary.append(f"    + {c.name:32} {c.ats:12} (unscored preview)")
-                continue
-            written = await score_and_upsert(
-                db, hit, source=f"discovery:{term[:60]}",
-                tags=seed_tag_for(c.ats), extra={"notes": c.notes or None})
-            if not written:
-                # Already on the roster under another name -- score_and_upsert
-                # printed which one.
-                skipped += 1
-                continue
-            row, active, pending = written
-            added += 1
-            state = "[review]" if pending else ("active" if active else "off-mission")
-            summary.append(f"    + {c.name:32} {c.ats:12} "
-                           f"{str(row.get('mission_tier')):16} {state}")
-
-    verb = "would queue/refresh" if dry_run else "queued/refreshed"
-    summary.insert(0, f"  {'[DRY-RUN] ' if dry_run else ''}{verb} {added} "
-                      f"compan(ies) in the store, {skipped} skipped")
-    if added and not dry_run:
-        summary.append("  Confirm the [review] rows in the web UI's Review "
-                       "section before they are crawled")
-    return summary
 
 
 # --------------------------------------------------------------------------- #
@@ -196,7 +89,7 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
     if not groups:
         return list(jobs)
 
-    blocked = store.blocked_name_keys(conn)
+    blocked = store.blocked_keys(conn)
     drop: set[int] = set()
     for key, group in groups.items():
         emp = group[0]["_employer"]
@@ -208,11 +101,13 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
             row = store.get_company(conn, cid) if cid else None
         if row is not None:
             crawled = bool(row.get("active")) and row["review"] != "pending"
+            urls: list[str] = [j["url"] for j in group if j.get("url")] if crawled else []
+            stored = {r[0] for r in conn.execute(
+                "SELECT url FROM jobs WHERE url IN (SELECT value FROM json_each(?))",
+                (json.dumps(urls),))} if urls else set()
             for j in group:
                 j["company_id"] = row["id"]
-                if crawled and j.get("url") and conn.execute(
-                        "SELECT 1 FROM jobs WHERE url=? LIMIT 1",
-                        (j["url"],)).fetchone():
+                if j.get("url") in stored:
                     drop.add(id(j))
             continue
         if name_key(name) in blocked:

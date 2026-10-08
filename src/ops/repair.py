@@ -3,7 +3,9 @@ resolved, rename boards still named after their own slug."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from collections import Counter
 from collections.abc import Collection, Iterable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
@@ -17,11 +19,12 @@ from src.claude import api as claude_api
 from src.config import RuntimeTrack
 from src.discovery.write import (board_already_tracked, mission_context,
                                  report_dup_board)
-from src.discovery.resolve.board import resolved
+from src.digest.render import score_text
+from src.discovery.resolve import board as resolve_board
 from src.match.names import junk_name_reason, name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
-from src.rows import CompanyIn, CompanyRow, is_watched
+from src.rows import BoardHit, CompanyIn, CompanyRow, is_watched
 from src.store.companies import CAPTURE_ATS
 
 if TYPE_CHECKING:
@@ -313,23 +316,27 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
     wanted = {n.strip().lower() for n in (names or []) if n.strip()}
     cutoff = ((datetime.now() - timedelta(days=days)).isoformat()
               if days else None)
-    rows = [store.as_company(r) for r in conn.execute(
-        "SELECT * FROM companies_effective WHERE COALESCE(active, 0) = 0 "
-        "AND miss_reason IS NOT NULL "
-        "ORDER BY COALESCE(miss_at, '') ASC, name ASC").fetchall()]
-    rows = [r for r in rows if store.miss_family(r["miss_reason"]) in families]
-    if SILENT_FAMILY in families:
-        rows += _silent_board_candidates(conn)
-
-    def since(r: CompanyRow) -> str:
-        # A NULL miss_at predates the column: unknown age, so old enough.
-        if r["miss_reason"]:
-            return r.get("miss_at") or ""
-        return r.get("last_nonempty_at") or r.get("created_at") or ""
-
-    out = [r for r in rows
-           if (not wanted or (r["name"] or "").strip().lower() in wanted)
-           and not (cutoff and since(r) > cutoff)]
+    # A NULL miss_at predates the column: unknown age, so old enough.
+    conds = ["COALESCE(active, 0) = 0", "miss_reason IS NOT NULL",
+             store.miss_family_in()]
+    args: list[str | int] = [json.dumps(sorted(families))]
+    if wanted:
+        conds.append("lower(name) IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(sorted(wanted)))
+    if cutoff:
+        conds.append("COALESCE(miss_at, '') <= ?")
+        args.append(cutoff)
+    if limit:
+        args.append(limit)
+    out = [store.as_company(r) for r in conn.execute(
+        f"SELECT * FROM companies_effective WHERE {' AND '.join(conds)} "
+        "ORDER BY COALESCE(miss_at, '') ASC, name ASC"
+        + (" LIMIT ?" if limit else ""), args).fetchall()]
+    if SILENT_FAMILY in families and not (limit and len(out) >= limit):
+        out += [r for r in _silent_board_candidates(conn)
+                if (not wanted or (r["name"] or "").strip().lower() in wanted)
+                and not (cutoff and (r.get("last_nonempty_at") or r.get("created_at")
+                                     or "") > cutoff)]
     return out[:limit] if limit else out
 
 
@@ -398,7 +405,7 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
         for r, why in junk:
             if why:
                 await miss(r["name"], f"junk-name:{why}")
-                print(f"    [junk]    {r['name'][:30]:30} {why} - "
+                print(f"    {'[junk]':9} {r['name'][:30]:30} {why} - "
                       f"{'retired' if commit else 'would be retired'} "
                       f"from the retry queue")
         rows = [r for r, why in junk if not why]
@@ -415,19 +422,15 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
         was = {r["name"]: (r["miss_reason"] or SILENT_FAMILY) for r in rows}
         written: list[CompanyIn] = []
         still: list[tuple[str, str]] = []
-        dups: list[str] = []
         stalled: list[CompanyRow] = []
 
-        async for r, (hit, reason) in fan_out(
-                rows, lambda r: resolved(r["name"], r.get("careers_url") or ""),
-                lambda r: r["name"], max_workers, with_item=True,
-                stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
-            name = r["name"]
+        async def settle(name: str, hit: BoardHit | None, reason: str | None) -> tuple[str, str]:
+            """Write one name's outcome; returns its tag and the line's detail
+            ("" when another function already printed it)."""
             if not hit:
                 await miss(name, cast(str, reason))
                 still.append((name, cast(str, reason)))
-                print(f"    [miss]    {name[:30]:30} {was[name]} -> {reason}")
-                continue
+                return "miss", f"{was[name]} -> {reason}"
             board = coords.from_hit(hit, name=name)
             dup = await db.run(board_already_tracked, board)
             if dup:
@@ -438,29 +441,35 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
                 report_dup_board(name, dup)
                 if commit:
                     await db.run(store.record_alias, name, dup)
-                dups.append(name)
-                continue
+                return "dup", ""
+            counts = f"nc={hit['nc']:<3} tot={hit['count']:<4}"
             if not commit:
                 written.append(board)
-                print(f"    [preview] {name[:30]:30} {hit['ats']:12} "
-                      f"{coords.board_slug(board) or board.get('careers_url') or ''} "
-                      f"nc={hit['nc']:<3} "
-                      f"tot={hit['count']:<4} (was {was[name]})")
-                continue
-            tier, score, reason = await claude_api.score_company_mission(
+                return "preview", (f"{hit['ats']:12} "
+                                   f"{coords.board_slug(board) or board.get('careers_url') or ''} "
+                                   f"{counts} (was {was[name]})")
+            tier, score, why = await claude_api.score_company_mission(
                 name, await mission_context(hit))
             await db.run(_retarget, name, store.mark_pending({
                 **board,
                 "local_job_count": hit["nc"], "total_job_count": hit["count"],
                 "mission_tier": tier, "mission_score": score,
-                "mission_reason": reason,
+                "mission_reason": why,
                 "last_probed": datetime.now().isoformat(),
             }))
             written.append(board)
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            print(f"    [pending] {name[:30]:30} {hit['ats']:12} "
-                  f"nc={hit['nc']:<3} tot={hit['count']:<4} "
-                  f"{str(tier):18} {ss}  (was {was[name]})")
+            return "pending", (f"{hit['ats']:12} {counts} {str(tier):18} "
+                               f"{score_text(score)}  (was {was[name]})")
+
+        tags: Counter[str] = Counter()
+        async for r, (hit, reason) in fan_out(
+                rows, lambda r: resolve_board.resolve_or_miss(r["name"], r.get("careers_url") or ""),
+                lambda r: r["name"], max_workers, with_item=True,
+                stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
+            tag, detail = await settle(r["name"], hit, reason)
+            tags[tag] += 1
+            if detail:
+                print(f"    {f'[{tag}]':9} {r['name'][:30]:30} {detail}")
         for r in stalled:
             await miss(r["name"], "fetch-error:stalled")
             still.append((r["name"], "fetch-error:stalled"))
@@ -468,7 +477,7 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
               + ("re-resolved and queued for review "
                  "(active=0, review pending)" if commit
                  else "would be re-resolved (preview: nothing written)")
-              + (f", {len(dups)} already tracked under another name" if dups else "")
+              + (f", {tags['dup']} already tracked under another name" if tags["dup"] else "")
               + f", {len(still)} still missing, of {len(rows)} tried.")
         if written and commit:
             print("  confirm or reject them in the roster review queue.")

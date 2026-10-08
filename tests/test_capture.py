@@ -47,7 +47,7 @@ class TestGenericBoards:
         assert j["title"] == "Microfabrication Cleanroom Manager"
         assert j["company"] == "Acme Neuro"
         assert j["company_url"] == "https://acmeneuro.com"
-        assert j["location"] == "Cambridge, MA"
+        assert j["location"] == "Cambridge, MA, US"   # jsonld.read_posting's reading
         assert "<" not in j["description"] and "cleanroom" in j["description"]
 
     def test_workday_fed_table_on_a_company_site(self):

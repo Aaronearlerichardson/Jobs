@@ -15,11 +15,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import sqlite3
 from typing import cast
 from urllib.parse import unquote_plus
 
-from src import config, store
+from src import config
 from src.claude import api as claude_api
 from src.claude.reply import Reply
 from src.match.names import junk_name_reason, name_key
@@ -36,12 +35,6 @@ SEED_COMPANIES = config.DISCOVERY_SEED_NAMES   # names only; seeds.py keeps note
 MAJORS = config.DISCOVERY_SCAN_MAJORS          # worth the slow scan (probe_scan)
 _MAJORS_KEYS = {name_key(m) for m in MAJORS}
 NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
-
-
-def blocked_keys(conn: sqlite3.Connection) -> set[str]:
-    """Name keys no path may add: the store's rejection blocklist plus the
-    profile's [discovery] name_blocklist."""
-    return store.blocked_name_keys(conn) | set(NAME_BLOCKLIST)
 
 
 # Site chrome seen in a PASTED LinkedIn/Indeed/Glassdoor page (nav bar items,

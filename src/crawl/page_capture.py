@@ -15,8 +15,6 @@ layers hit, results are merged and de-duplicated by job id.
 
 from __future__ import annotations
 
-import json
-import logging
 import re
 from collections.abc import Callable, Iterator, Mapping
 from typing import TYPE_CHECKING, cast
@@ -24,11 +22,9 @@ from urllib.parse import urljoin
 
 from src import config
 from src.ats.board.custom import find_job_links
-from src.net.util import (JSON, first, host_of, jsonld_scripts, links, node_text, parse_markup,
-                          stable_id, strip_html, xpath)
+from src.ats.board.jsonld import is_jobposting, jsonld_objects, read_posting
+from src.net.util import first, host_of, links, node_text, parse_markup, stable_id, xpath
 from src.rows import FetchedJob
-
-_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from lxml import etree
@@ -322,7 +318,8 @@ def parse_metacareers(tree: etree._Element, page_url: str = "") -> list[FetchedJ
 # ─── Generic (JSON-LD + job-link sweep + job-card sweep) ─────────────────
 
 def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
-    """A page's schema.org JobPostings, the employer's own site kept as
+    """A page's schema.org JobPostings (an ItemList's items too) as
+    `jsonld.read_posting` reads them, the employer's own site kept as
     `company_url`.
 
     >>> page = ('<script type="application/ld+json">{"@type": "JobPosting", "title": "Chemist",'
@@ -333,41 +330,30 @@ def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
     ...  for j in parse_jsonld(parse_markup(page))]
     [('Chemist', 'Acme', 'Durham, NC', 'https://acme.example')]
 
-    A string, list or otherwise non-object `address` is read without error:
-    a string gives no location, a list its first object.
+    An @graph, an ItemList and every jobLocation are read; a string address
+    gives no location:
 
-    >>> def loc(addr):
-    ...     d = {"@type": "JobPosting", "title": "T", "url": "https://x.test/1",
-    ...          "jobLocation": {"address": addr}}
+    >>> import json
+    >>> def locs(d):
     ...     tag = '<script type="application/ld+json">%s</script>' % json.dumps(d)
     ...     return [j["location"] for j in parse_jsonld(parse_markup(tag))]
-    >>> loc("Durham, NC"), loc({"addressLocality": "Cary"}), loc([{"addressRegion": "NC"}])
-    ([''], ['Cary'], ['NC'])
+    >>> post = {"@type": "JobPosting", "title": "T", "url": "https://x.test/1",
+    ...         "jobLocation": [{"address": {"addressLocality": "Cary"}},
+    ...                         {"address": {"addressLocality": "Remote"}}]}
+    >>> locs({"@graph": [post]}), locs({"itemListElement": [{"item": post}]})
+    (['Cary; Remote'], ['Cary; Remote'])
+    >>> locs({**post, "jobLocation": {"address": "Durham, NC"}})
+    ['']
     """
     jobs = []
-    for tag in jsonld_scripts(tree):
-        try:
-            data: JSON = json.loads(tag.text or "")
-        except json.JSONDecodeError as e:
-            _log.debug("unparseable JSON-LD block: %s", e)
-            continue
-        listed = data.get("itemListElement", [data]) if isinstance(data, Mapping) else data
+    for obj in jsonld_objects(tree):
+        listed = obj.get("itemListElement", [obj]) if isinstance(obj, Mapping) else [obj]
         for it in listed if isinstance(listed, list) else []:
             jp = it.get("item", it) if isinstance(it, Mapping) else None
-            if not isinstance(jp, Mapping) or jp.get("@type") != "JobPosting":
+            if not is_jobposting(jp):
                 continue
+            p = read_posting(jp, page_url)
             org = jp.get("hiringOrganization") or {}
-            loc = jp.get("jobLocation")
-            if isinstance(loc, list):
-                loc = loc[0] if loc else None
-            addr = loc.get("address") if isinstance(loc, Mapping) else None
-            if isinstance(addr, list):
-                addr = addr[0] if addr else None
-            parts: list[JSON] = ([addr.get("addressLocality"), addr.get("addressRegion")]
-                     if isinstance(addr, Mapping) else [])
-            location = ", ".join(x for x in parts if x and isinstance(x, str))
-            url = jp.get("url")
-            url = url if url and isinstance(url, str) else page_url
             # schema.org marks the employer's own site in hiringOrganization
             # (sameAs / url) — capture it as the lead's careers_url hint.
             org_site = ""
@@ -375,14 +361,10 @@ def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
                 same = org.get("sameAs")
                 same = same if isinstance(same, list) else [same]
                 org_site = _company_site(*same, org.get("url"))
-            name = jp.get("title") or jp.get("name") or ""
             org_name = org.get("name", "") if isinstance(org, Mapping) else str(org)
-            j = _job(f"cap_{stable_id(url, jp.get('title'))}",
-                     name if isinstance(name, str) else None,
+            j = _job(f"cap_{stable_id(p['url'], jp.get('title'))}", p["title"],
                      org_name if isinstance(org_name, str) else None,
-                     url, location,
-                     strip_html(jp.get("description")),
-                     company_url=org_site)
+                     p["url"], p["location"], p["description"], company_url=org_site)
             if j:
                 jobs.append(j)
     return jobs

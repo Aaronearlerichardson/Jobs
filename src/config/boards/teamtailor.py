@@ -1,16 +1,17 @@
-"""The `teamtailor` board spec."""
+"""The `teamtailor` board spec.
+
+Notes:
+    Reads the tenant's JSON Feed (`/jobs.json`); endpoint shape credited
+    to kalil0321/ats-scrapers (MIT). The handle is the tenant's host. The
+    RSS twin also names state, remote status and department but needs a
+    decoder for RSS `item`s that does not exist. A pulled posting answers
+    404; its JSON-LD holds raw line breaks no JSON parser takes.
+"""
 
 from __future__ import annotations
 
 from src.rows import JSON
 
-# Teamtailor: the tenant's JSON Feed (`/jobs.json`, JSON Feed 1.1 with a
-# schema.org posting beside each item), endpoint shape credited to
-# kalil0321/ats-scrapers (MIT). The handle is the tenant's host, so a
-# tenant on its own domain is a board too once something names it. The
-# RSS twin (`/jobs.rss`) also names the state ("Raleigh, North Carolina,
-# United States"), a remote status and a department, but is RSS `item`s
-# no decoder reads; the feed's places are city and country code.
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "teamtailor.com", "re": [r"(?i)([a-z0-9-]+\.teamtailor\.com)"],
                 "blocklist": ["www.teamtailor.com", "app.teamtailor.com", "api.teamtailor.com",
@@ -38,8 +39,7 @@ SPEC: dict[str, JSON] = {
                                               "do": {"join": ["address.addressLocality",
                                                               "address.addressRegion",
                                                               "address.addressCountry"],
-                                                     "sep": ", "}}},
-                         "default": "Unknown"},
+                                                     "sep": ", "}}}},
             "description": {"of": "content_html", "transform": "html_text"},
             "posted_at": "date_published",
         },

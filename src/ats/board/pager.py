@@ -175,7 +175,8 @@ def _fresh(listed: list[EngineRow], seen: set[str | None]) -> list[EngineRow]:
 
 async def walk(spec: Listing,
                ask: Callable[[int, Vals, str | None],
-                             Awaitable[tuple[dict[str, str], JSON, str | Exception | None]]],
+                             Awaitable[tuple[dict[str, str], int | None, JSON,
+                                             str | Exception | None]]],
                rows_of: Callable[[dict[str, str], JSON], tuple[int, list[EngineRow]]],
                size: int | None = None, pages: int | None = None, cheap: bool = False,
                scoped: bool = False, budget: int | None = None,
@@ -183,7 +184,7 @@ async def walk(spec: Listing,
     """(rows, total) for one listing `spec`; (None, None) when the first
     request failed. `await ask(n, vals, url)` makes page `n`'s request
     with the named values `vals` (`page_vals`), or follows a cursor's
-    served `url`, and answers (parts, payload, error); `rows_of(parts,
+    served `url`, and answers (parts, status, payload, error); `rows_of(parts,
     payload)` maps a page to (its entry count, its rows); rows are
     deduplicated (`_fresh`), both off the loop. Pages are read one at a
     time, PAGE_DELAY_S apart.
@@ -202,10 +203,9 @@ async def walk(spec: Listing,
     the served count: the server caps its pages (three Phenom tenants
     serve 10 whatever the size, and a 250-row step read 20 of ~300 rows).
 
-    A later page's failure is asked again config.PAGE_RETRIES times,
-    config.PAGE_RETRY_PAUSE_S apart (a repaired failure no longer counts),
-    then ends the walk with the rows so far (reported, so the snapshot
-    reads incomplete); `label` names the board in the recovery line. The walk ends at a page listing no
+    A later page's failure, once `_ask_page` has retried it, ends the walk
+    with the rows so far (reported, so the snapshot reads incomplete);
+    `label` names the board in the recovery line. The walk ends at a page listing no
     posting (no row with an id), where `ended` says, or where a cursor's
     `has_next` says so; a total at the pager's `ceiling` is the most the
     server reports, not the board's size, so it ends nothing. The walk
@@ -224,43 +224,19 @@ async def walk(spec: Listing,
     widen = not (pages or cheap)
     pages = 1 if not pager else pages or (1 if cheap else page_cap(pager, budget,
                                                                    size and pager.stride))
-    ceiling = pager.ceiling if pager else None
     rows: list[EngineRow] = []
     seen: set[str | None] = set()
     total, size_known, capped, url, n = None, None, False, None, 0
     while True:
-        mark = http.failure_mark()
-        parts, payload, err = await ask(n, page_vals(pager, n, step), url)
-        # A later page that fails is asked again before the walk gives up
-        # the rest of the board: one lost page left the whole pass
-        # incomplete, closing nothing (Pfizer read 20 of ~600, 2026-10-06).
-        retried = bool(err and n and config.PAGE_RETRIES)
-        for _ in range(config.PAGE_RETRIES if err and n else 0):
-            await asyncio.sleep(config.PAGE_RETRY_PAUSE_S)
-            parts, payload, err = await ask(n, page_vals(pager, n, step), url)
-            if not err:
-                break
-        if retried:
-            http.withdraw_failures(mark, f"{label or 'listing'} p{n}", keep=1 if err else 0)
+        parts, payload, err = await _ask_page(ask, n, page_vals(pager, n, step), url, label)
         if err:
             return (None, None) if n == 0 else (rows, total)
-        if n == 0 and pager and pager.total:
-            total = total_of(pager, payload)
-            size_known = None if total is not None and ceiling and total == ceiling else total
         n_entries, listed = await asyncio.to_thread(rows_of, parts, payload)
         if learn:
             n_entries = len(set(_ids(listed)))
-            if n == 0:
-                size = n_entries
-                step = size - 1 if size_known is None and size > 1 else size
-                pages = page_cap(pager, budget, step) if widen and pager else pages
-        elif n == 0 and widen and pager and not size:
-            pages = page_cap(pager, budget, len(set(_ids(listed))))
-        elif n == 0 and pager and pager.kind in ("offset", "overlap") \
-                and 0 < n_entries < min(size, size_known or 0):
-            size = step = n_entries
-            stride = pager.offset(1, step) - pager.offset(0, step)
-            pages = page_cap(pager, budget, stride) if widen else pages
+        if n == 0 and pager:
+            total, size_known, size, step, pages = _first_page(
+                pager, payload, listed, n_entries, size, pages, budget, widen, learn)
         new = await asyncio.to_thread(_fresh, listed, seen)
         rows += new
         if not pager:
@@ -281,10 +257,69 @@ async def walk(spec: Listing,
             break
         await asyncio.sleep(config.PAGE_DELAY_S)
         n += 1
-    at_ceiling = bool(ceiling and len(rows) <= ceiling <= max(total or 0, len(rows)))
-    complete = size_known is not None and len(rows) >= size_known
-    short = size_known is not None and len(rows) < size_known and not scoped
-    if not cheap and ((capped and not complete) or short or at_ceiling):
-        note_capped(max(total, len(rows))
-                    if total is not None and (at_ceiling or not scoped) else None)
+    if not cheap:
+        _note(len(rows), total, size_known, capped, pager.ceiling if pager else None, scoped)
     return rows, total
+
+
+async def _ask_page(ask: Callable[[int, Vals, str | None],
+                                  Awaitable[tuple[dict[str, str], int | None, JSON,
+                                                  str | Exception | None]]],
+                    n: int, vals: Vals, url: str | None, label: str | None
+                    ) -> tuple[dict[str, str], JSON, str | Exception | None]:
+    """Page `n`'s (parts, payload, error). A later page's transient failure
+    (a transport exception, 429 or 5xx) is asked again config.PAGE_RETRIES
+    times, config.PAGE_RETRY_PAUSE_S apart, and the failures a retry repairs
+    are withdrawn. An answer is never asked again: a 404, a 200 that would
+    not parse, or a failure decided before any request (a message, not an
+    exception: a handle missing a part, an unresolvable prelude).
+
+    Notes:
+        One lost page left the whole pass incomplete, closing nothing
+        (Pfizer read 20 of ~600, 2026-10-06).
+    """
+    mark = http.failure_mark()
+    parts, status, payload, err = await ask(n, vals, url)
+    retried = False
+    for _ in range(config.PAGE_RETRIES if n else 0):
+        if not (isinstance(err, Exception) or status == 429 or (status or 0) >= 500):
+            break
+        retried = True
+        await asyncio.sleep(config.PAGE_RETRY_PAUSE_S)
+        parts, status, payload, err = await ask(n, vals, url)
+    if retried:
+        http.withdraw_failures(mark, f"{label or 'listing'} p{n}", keep=1 if err else 0)
+    return parts, payload, err
+
+
+def _first_page(pager: Pager, payload: JSON, listed: list[EngineRow], n_entries: int,
+                size: int, pages: int, budget: int | None, widen: bool, learn: bool
+                ) -> tuple[int | None, int | None, int, int, int]:
+    """(total, size_known, size, step, pages) once page 0 is read: the
+    total it reports (unknown at the ceiling), and the size, step and page
+    cap `walk` learns from it."""
+    total = total_of(pager, payload)
+    size_known = None if total is not None and pager.ceiling and total == pager.ceiling else total
+    step = size
+    if learn:
+        size = n_entries
+        step = size - 1 if size_known is None and size > 1 else size
+        pages = page_cap(pager, budget, step) if widen else pages
+    elif widen and not size:
+        pages = page_cap(pager, budget, len(set(_ids(listed))))
+    elif pager.kind in ("offset", "overlap") and 0 < n_entries < min(size, size_known or 0):
+        size = step = n_entries
+        stride = pager.offset(1, step) - pager.offset(0, step)
+        pages = page_cap(pager, budget, stride) if widen else pages
+    return total, size_known, size, step, pages
+
+
+def _note(n_rows: int, total: int | None, size_known: int | None, capped: bool,
+          ceiling: int | None, scoped: bool) -> None:
+    """Note a walk's snapshot capped where `walk` says it reads so."""
+    at_ceiling = bool(ceiling and n_rows <= ceiling <= max(total or 0, n_rows))
+    complete = size_known is not None and n_rows >= size_known
+    short = size_known is not None and n_rows < size_known and not scoped
+    if (capped and not complete) or short or at_ceiling:
+        note_capped(max(total, n_rows)
+                    if total is not None and (at_ceiling or not scoped) else None)

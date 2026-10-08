@@ -25,9 +25,8 @@ from src.match.names import junk_name_reason, name_key, strip_suffixes
 from src.net import http
 from src.net.util import cache_dir, json_cache_get, json_cache_put
 from src.net.util import JSON
-from src.rows import BoardHit, str_or_none
+from src.rows import str_or_none
 from .local_sourcing import queue_names
-from .name_sources import blocked_keys
 from .vocab import title_vocab, word_score, words
 
 
@@ -212,7 +211,7 @@ def _known_keys(conn: sqlite3.Connection) -> set[str]:
     suffix-stripped (registry names arrive stripped), and every blocked one."""
     names = [r[0] for r in conn.execute("SELECT name FROM companies")]
     return ({name_key(s) for n in names for s in (n, strip_suffixes(n))}
-            | blocked_keys(conn))
+            | store.blocked_keys(conn))
 
 
 async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str, int]:
@@ -259,15 +258,10 @@ async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str,
     if not apply:
         print("  dry run: nothing written (--apply to resolve and queue the batch)")
         return counts
-    queued: list[BoardHit] = []
-    missed: list[tuple[str, str]] = []
+    part = [gathered[k] for k in batch]
     async with store.Writer() as db:
-        for source in sorted({gathered[k].source for k in batch}):
-            part = [gathered[k] for k in batch if gathered[k].source == source]
-            q, m = await queue_names(db, [s.name for s in part], source,
-                                     {s.name: s.website for s in part if s.website})
-            queued += q
-            missed += m
+        queued, missed = await queue_names(db, {s.name: s.source for s in part},
+                                           {s.name: s.website for s in part if s.website})
     if batch:
         json_cache_put(path, {"done": sorted(done | set(batch))})
     counts |= {"queued": len(queued), "missed": len(missed)}

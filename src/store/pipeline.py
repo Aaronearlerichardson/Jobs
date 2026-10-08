@@ -24,17 +24,8 @@ from src.rows import JobRow, str_or_none
 from src.validation import OneOf, Text, blank_is_none, error_lines
 from .schema import _norm_url, apply_update, as_job, sql
 
-# The user's recorded decision on a job. `saved` = shortlisted, still shown
-# in ranking; the rest leave the ranking: applied/interviewing move to the
-# digest's pipeline section, rejected/dismissed disappear (and dismissed
-# rows become negative few-shot examples for the fit scorer — 
-# fit.py reads them, so a --note saying WHY is worth writing).
-DISPOSITIONS = ("saved", "applied", "interviewing", "rejected", "dismissed")
+# The decisions that leave the ranking (set_disposition lists them all).
 RANKING_EXCLUDED_DISPOSITIONS = ("applied", "interviewing", "rejected", "dismissed")
-
-# A live application: one that went out and has not come back. followups_due
-# only chases these, and conversion_report counts everything else as closed.
-LIVE_DISPOSITIONS = ("applied", "interviewing")
 
 # An application that actually went out, however it ended. The denominator
 # conversion_report divides by; `saved` and `dismissed` never applied.
@@ -107,8 +98,8 @@ def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
                     note: str | None = None, reason: str | None = None
                     ) -> tuple[JobRow | None, str | None]:
     """Record the user's decision on one job. `ref` is a job_id, a unique
-    job_id fragment, or the posting URL; `disposition` is one of
-    DISPOSITIONS, or 'none'/'clear' to erase. Returns (row, error) — row is
+    job_id fragment, or the posting URL; `disposition` is one of saved,
+    applied, interviewing, rejected, dismissed, or 'none'/'clear' to erase. Returns (row, error) — row is
     the matched job on success, error a printable message otherwise.
 
     Marking a row 'applied' also stamps `applied_at`, once: a later
@@ -133,11 +124,17 @@ def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
     >>> tuple(conn.execute("SELECT outcome_reason FROM jobs").fetchone())
     (None,)
     """
+    # `saved` = shortlisted, still shown in ranking; the rest leave the
+    # ranking: applied/interviewing move to the digest's pipeline section,
+    # rejected/dismissed disappear (and dismissed rows become negative
+    # few-shot examples for the fit scorer -- fit.py reads them, so a
+    # --note saying WHY is worth writing).
+    dispositions = ("saved", "applied", "interviewing", "rejected", "dismissed")
     d = (disposition or "").strip().lower()
     clearing = d in ("none", "clear")
-    if not clearing and d not in DISPOSITIONS:
+    if not clearing and d not in dispositions:
         return None, (f"unknown disposition {disposition!r} — use one of "
-                      f"{', '.join(DISPOSITIONS)} (or 'clear')")
+                      f"{', '.join(dispositions)} (or 'clear')")
     reason = (reason or "").strip().lower() or None
     if reason and d != "dismissed":
         return None, "a reason goes with 'dismissed' only"
@@ -388,13 +385,13 @@ def followups_due(conn: sqlite3.Connection, today: str | None = None) -> list[Jo
     """Live applications whose follow-up date has arrived, oldest first.
 
     A row qualifies when `followup_at` is set and not in the future and the
-    application is still live (LIVE_DISPOSITIONS) — nudging a rejected row
+    application is still live (applied or interviewing: it went out and has
+    not come back) — nudging a rejected row
     is noise. `today` is a 'YYYY-MM-DD' string and defaults to today. See
     tests/test_store.py::TestPipelineTracking.
     """
     today = today or datetime.now().strftime("%Y-%m-%d")
-    ph = ",".join("?" for _ in LIVE_DISPOSITIONS)
     return [as_job(r) for r in conn.execute(
-        f"SELECT * FROM jobs WHERE COALESCE(followup_at,'') != '' "
-        f"AND followup_at <= ? AND disposition IN ({ph}) "
-        f"ORDER BY followup_at", (today, *LIVE_DISPOSITIONS)).fetchall()]
+        "SELECT * FROM jobs WHERE COALESCE(followup_at,'') != '' "
+        "AND followup_at <= ? AND disposition IN ('applied', 'interviewing') "
+        "ORDER BY followup_at", (today,)).fetchall()]

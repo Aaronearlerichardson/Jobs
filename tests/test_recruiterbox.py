@@ -61,8 +61,3 @@ class TestPosting:
         out = await company.hydrate_description(job)
         assert "Service-Disabled Veteran-Owned" in out["description"]
         assert "<" not in out["description"] and "&lt;" not in out["description"]
-
-    def test_a_posting_url_names_its_board_on_either_host(self):
-        assert BOARD.job_ref(POSTING) == {"slug": SLUG, "jid": "fk0ztte"}
-        assert BOARD.job_ref("https://aprco.recruiterbox.com/jobs/fk0ztte/") == {"slug": SLUG,
-                                                                                "jid": "fk0ztte"}

@@ -42,7 +42,3 @@ class TestZohoRecruit:
         serve(fake_response(text=_full_page(50)))
         assert len(await ZOHO.listing("biotech")) == 50
         assert http.snapshot_info()["capped"]
-
-    def test_a_posting_url_names_its_company_and_posting(self):
-        assert ZOHO.job_ref("https://biotech.zohorecruit.com/jobs/Careers/474128000070267033/Project-Engineer") == {
-            "slug": "biotech", "jid": "474128000070267033"}

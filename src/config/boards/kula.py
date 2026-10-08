@@ -15,7 +15,7 @@ SPEC: dict[str, JSON] = {
         "decoder": {"kind": "html", "select": "a[href*='/{slug}/']", "context": "lines",
                     "base": "https://careers.kula.ai"},
         "fields": {
-            "_n": {"of": "url", "transform": "group:/(\\d+)/?$"},
+            "_n": {"of": "url", "transform": "group:/(\\d+)(?:-[^/]*)?/?$"},
             "id": {"format": "kula_{slug}_{_n}"},
             "title": {"first": ["lines[1]", "lines[0]"], "default": "Unknown"},
             "url": "url",

@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Callable, Collection, Mapping
 from contextlib import aclosing
 from datetime import datetime
 from typing import TYPE_CHECKING, TypedDict, cast
@@ -351,6 +351,25 @@ VERIFY_HEAD = 25
 _GIVEN_UP: set[str] = set()
 
 
+def _finalists[R: Mapping[str, object]](ranked: list[R], stale: Callable[[R], bool],
+                                        floor: float, force: bool) -> tuple[list[R], int]:
+    """The `stale` rows of `ranked` a verify round checks: every one ranked
+    above VERIFY_HEAD, past it only those stored at or above `floor` (all
+    of them under `force`); and how many stale rows the floor left out.
+
+    >>> rows = [{"resume_fit_score": s} for s in [0.1] * VERIFY_HEAD + [0.2, 0.5]]
+    >>> top, skipped = _finalists(rows, lambda r: True, 0.35, False)
+    >>> len(top), top[-1], skipped
+    (26, {'resume_fit_score': 0.5}, 1)
+    >>> len(_finalists(rows, lambda r: True, 0.35, True)[0])
+    27
+    """
+    stale_all = [(i, r) for i, r in enumerate(ranked) if stale(r)]
+    top = [r for i, r in stale_all
+           if force or i < VERIFY_HEAD or cast(float, r.get("resume_fit_score") or 0) >= floor]
+    return top, len(stale_all) - len(top)
+
+
 async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                      db: store.Writer | None = None, t: RuntimeTrack | None = None,
                      force: bool = False) -> int:
@@ -419,12 +438,9 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                 break
             ranked = await db.run(_ranked, t, limit=top_n, with_description=True)
             floor = t.verify_floor
-            stale_all = [(i, r) for i, r in enumerate(ranked) if _stale(r)]
-            stale_top = [r for i, r in stale_all
-                         if force or i < VERIFY_HEAD
-                         or (r.get("resume_fit_score") or 0) >= floor]
-            if len(stale_top) < len(stale_all):
-                print(f"  {len(stale_all) - len(stale_top)} stale row(s) ranked "
+            stale_top, n_skipped = _finalists(ranked, _stale, floor, force)
+            if n_skipped:
+                print(f"  {n_skipped} stale row(s) ranked "
                       f"{VERIFY_HEAD}-{len(ranked)} below the {floor:.2f} floor "
                       f"left unverified")
             remaining = top_n - len(stale_top)
@@ -482,20 +498,17 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                         print(f"    [?] kept   {(r['title'] or '')[:46]} - {res.reason}")
                         done_ids.add(r["job_id"])
                         continue
-                    await db.run(store.update_job_scores, r["job_id"], res.as_columns())
-                    done_ids.add(r["job_id"])
-                    if text and len(text) > len(r.get("description") or ""):
-                        await db.run(store.store_body, r["job_id"], text)
                     # A floor candidate that reaches the track's digest_min_fit
                     # on the deep score surfaces exactly as triage would have
                     # surfaced it first-pass; one that doesn't keeps
                     # triage_status='fit' -- its corrected score is still
-                    # recorded above either way.
-                    if (r.get("triage_status") == "fit"
-                            and score >= t.digest_min_fit):
-                        await db.run(store.record_triage, r["job_id"], store.TRIAGE_OK,
-                                     r.get("triage_detail") or "",
-                                     tracks=[t.track])
+                    # recorded either way.
+                    promote = r.get("triage_status") == "fit" and score >= t.digest_min_fit
+                    await db.run(
+                        store.record_verified, r["job_id"], res.as_columns(),
+                        text if text and len(text) > len(r.get("description") or "") else None,
+                        (r.get("triage_detail") or "") if promote else None, [t.track])
+                    done_ids.add(r["job_id"])
                     old = r.get("resume_fit_score")
                     was = f"{old:.2f}" if isinstance(old, float) else "?   "
                     move = f"{was} -> {score:.2f}"
@@ -544,8 +557,7 @@ async def verify_top_cli(top_n: int = 15, max_workers: int = 4, t: RuntimeTrack 
     async with track_writer(t) as db:
         n = await verify_top(top_n=top_n, max_workers=max_workers, db=db, t=t,
                              force=force)
-        n_open = len(await db.run(_ranked, t))
         await db.run(rewrite_digest, t, top_n,
-                     f"\n  {n} job(s) deep-verified; corrected top "
-                     f"{min(top_n, n_open)}:")
+                     lambda n_open: f"\n  {n} job(s) deep-verified; corrected "
+                                    f"top {min(top_n, n_open)}:")
     return n

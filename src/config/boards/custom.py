@@ -19,7 +19,6 @@ SPEC: dict[str, JSON] = {
             "title": "title",
             "url": "url",
             "location": "location",
-            "department": None,
         },
     },
 }

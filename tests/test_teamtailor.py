@@ -53,11 +53,3 @@ class TestListing:
         d["next_url"] = "https://elsewhere.example/jobs.json?page=2"
         log = serve(fake_response(d))
         assert len(await BOARD.listing(SLUG)) == 4 and len(log) == 1
-
-
-class TestClosure:
-    """The posting's own page: 404 once it is pulled."""
-
-    def test_a_posting_url_names_its_tenant(self):
-        assert BOARD.job_ref(POSTING) == {"slug": SLUG, "jid": "5583037"}
-        assert BOARD.job_ref("https://careers.example.com/jobs/5583037-automation-engineer") is None

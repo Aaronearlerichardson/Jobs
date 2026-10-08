@@ -500,11 +500,7 @@ def api_import() -> ResponseReturnValue:
 @app.get("/api/export/companies")
 def api_export() -> ResponseReturnValue:
     with track_store(_track()) as conn:
-        rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM companies_effective ORDER BY name").fetchall()]
-    for r in rows:
-        r.pop("id", None)
-        r.pop("employer_id", None)
+        rows = store.roster_rows(conn)
     buf = io.BytesIO(json.dumps(rows, indent=1, ensure_ascii=False).encode("utf-8"))
     return send_file(buf, mimetype="application/json", as_attachment=True,
                      download_name="company_roster.json")
@@ -597,47 +593,52 @@ def api_config_put_raw() -> ResponseReturnValue:
 @app.get("/api/stats")
 def api_stats() -> ResponseReturnValue:
     t = _track()
-    today = _today()
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     with track_store(t) as conn:
-
-        def one(q: str, args: tuple[str, ...] = ()) -> object:
-            return conn.execute(q, args).fetchone()[0]
-
+        # Each statement seeks one index (migrations 0002, 0011): one COUNT
+        # per tile scanned the whole jobs table, 2.7 s a call.
+        live = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(substr(first_seen,1,10) = ?), 0),"
+            " COUNT(posted_at) FROM live_jobs", (_today(),)).fetchone()
+        disp = conn.execute(
+            "SELECT COALESCE(SUM(disposition IN ('applied','interviewing')), 0),"
+            " COALESCE(SUM(disposition = 'saved'), 0)"
+            " FROM jobs WHERE disposition IS NOT NULL").fetchone()
+        # Companies actually crawled every run: a dormant row is still
+        # active, but only comes round weekly, so counting it here
+        # overstated the roster by roughly 60%.
+        roster = conn.execute(
+            "SELECT COALESCE(SUM(active = 1 AND"
+            " COALESCE(crawl_state,'active') = 'active'), 0),"
+            " COALESCE(SUM(watch = 1), 0), COALESCE(SUM(review = 'pending'), 0)"
+            " FROM companies_effective").fetchone()
         stats = {
-            "open": one("SELECT COUNT(*) FROM live_jobs"),
-            "closed": one("SELECT COUNT(*) FROM jobs WHERE status='closed'"),
-            "new_today": one("SELECT COUNT(*) FROM live_jobs WHERE substr(first_seen,1,10)=?",
-                             (today,)),
-            "dated": one("SELECT COUNT(posted_at) FROM live_jobs"),
-            "pipeline": one("SELECT COUNT(*) FROM jobs "
-                            "WHERE disposition IN ('applied','interviewing')"),
-            "saved": one("SELECT COUNT(*) FROM jobs WHERE disposition='saved'"),
+            "open": live[0],
+            "closed": conn.execute("SELECT COUNT(*) FROM jobs WHERE status = 'closed'")
+                          .fetchone()[0],
+            "new_today": live[1],
+            "dated": live[2],
+            "pipeline": disp[0],
+            "saved": disp[1],
             # Applications that went out in the last 7 days: the volume the
             # apply band exists to raise. applied_at is stamped once, on the
             # first 'applied', so a row since moved to interviewing/rejected
             # still counts toward the week it went out in.
-            "applied_7d": one("SELECT COUNT(*) FROM jobs "
-                              "WHERE substr(applied_at,1,10) >= ?",
-                              ((datetime.now() - timedelta(days=7))
-                               .strftime("%Y-%m-%d"),)),
-            # Companies actually crawled every run: a dormant row is still
-            # active, but only comes round weekly, so counting it here
-            # overstated the roster by roughly 60%.
-            "companies_active": one("SELECT COUNT(*) FROM companies_effective WHERE "
-                                    "active=1 AND "
-                                    "COALESCE(crawl_state,'active')='active'"),
+            "applied_7d": conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
+                " AND substr(applied_at,1,10) >= ?", (week_ago,)).fetchone()[0],
+            "companies_active": roster[0],
             # Roster GROWTH, from companies.created_at. last_probed cannot
             # answer this: a bulk mission re-score rewrites it on every row.
             "companies_new_7d": store.roster_growth(conn, days=7),
             # Candidates that failed to become crawlable companies, per reason
             # family — the worklist behind a roster that stopped growing.
             "company_misses": dict(store.miss_counts(conn)),
-            "watched": one("SELECT COUNT(*) FROM companies_effective WHERE watch = 1"),
+            "watched": roster[1],
             # Platforms whose latest pass broke across their boards (crawl.health).
             "platform_alerts": health.alerts(conn),
             # Roster candidates waiting on a human — the Review tab's badge.
-            "pending_review": one("SELECT COUNT(*) FROM companies_effective "
-                                  "WHERE review = 'pending'"),
+            "pending_review": roster[2],
             "api_key": have_api_key(),
             "screen_model": config.CLAUDE_MODEL,
             "verify_model": config.CLAUDE_VERIFY_MODEL,
@@ -650,6 +651,12 @@ def api_stats() -> ResponseReturnValue:
             "boot_id": BOOT_ID,
         }
     return jsonify(stats)
+
+
+@app.get("/api/boot")
+def api_boot() -> ResponseReturnValue:
+    """This process's BOOT_ID: the restart overlay polls it until it changes."""
+    return jsonify(boot_id=BOOT_ID)
 
 
 def _asset_version() -> str:
@@ -672,8 +679,9 @@ def index() -> Response:
     # renders the shell with no tiles, no jobs, and no error you'd notice).
     html = (Path(app.root_path) / "templates" / "index.html").read_text(
         encoding="utf-8")
+    v = _asset_version()
     html = re.sub(r'(?<=["\'])(/static/[^"\']+?)(?:\?v=[^"\']*)?(?=["\'])',
-                  lambda m: f"{m.group(1)}?v={_asset_version()}", html)
+                  lambda m: f"{m.group(1)}?v={v}", html)
     resp = make_response(html)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     resp.headers["Cache-Control"] = "no-store"

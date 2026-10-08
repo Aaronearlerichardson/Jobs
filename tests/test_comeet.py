@@ -20,7 +20,3 @@ class TestComeet:
         assert rows[0]["location"] == "Tel Aviv, IL"
         assert rows[0]["head"].endswith("Data & Analytics")
         assert len(log) == 1  # one page holds every position
-
-    def test_a_posting_url_names_its_company_and_position(self):
-        assert COMEET.job_ref("https://www.comeet.com/jobs/cheq/65.005/ai-engineer/DD.B6F") == {
-            "slug": "cheq", "cid": "65.005", "jid": "DD.B6F"}

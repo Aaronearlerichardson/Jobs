@@ -156,7 +156,6 @@ jobs:
           python discover.py --help  > /dev/null
           python capture.py --help   > /dev/null
           python harvest.py --help   > /dev/null
-          python crawler.py --help   > /dev/null   # deprecation shim
 
       - name: Web app serves on the example profile
         # Boots the real server, exercises the API surface the UI depends

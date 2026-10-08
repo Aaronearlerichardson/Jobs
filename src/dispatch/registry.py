@@ -326,13 +326,6 @@ REGISTRY: dict[str, RegistryEntry] = {
         "target": backfill.backfill_board_descriptions,
         "params": Rows,
     },
-    "backfill-axes": {
-        "label": "Backfill fit axes",
-        "engine": None,
-        "target": roster.backfill_axes,
-        "params": Tracked,
-        "ui": False,      # offline column fill; a CLI repair, not a button
-    },
     "reresolve": {
         "label": "Retry unresolved companies",
         "engine": None,

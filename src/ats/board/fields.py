@@ -34,7 +34,7 @@ import functools
 import html
 import re
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
 from typing import Literal, overload
 from urllib.parse import unquote
 
@@ -489,13 +489,6 @@ def _as_str(v: JSON) -> str:
     return v
 
 
-def _as_seq(v: JSON) -> Sequence[JSON]:
-    """`v` as a sequence; `check` has vouched for a loaded spec."""
-    if not isinstance(v, Sequence):
-        raise TypeError(f"not a sequence: {v!r}")
-    return v
-
-
 def _as_iter(v: JSON) -> Iterable[JSON]:
     """`v` as something to iterate; `check` has vouched for a loaded spec."""
     if not isinstance(v, Iterable):
@@ -615,7 +608,7 @@ def _check_cond(cond: JSON) -> None:
         for c in _as_iter(arg):
             _check_cond(c)
     elif op in ("eq", "contains"):
-        check(_as_seq(arg)[0])
+        check(list(_as_iter(arg))[0])
     else:
         check(arg)
 
@@ -658,7 +651,7 @@ def _condition(cond: Mapping[str, JSON]) -> Callable[[JSON, Mapping[str, JSON]],
             v = str(f(entry, ctx) or "")
             return bool(re.match(r"\d{4}-\d{2}-\d{2}", v)) and v[:10] < time.strftime("%Y-%m-%d")
         return past
-    pair = _as_seq(arg)
+    pair = list(_as_iter(arg))
     f = reader(pair[0])
     if op == "eq":
         want = pair[1]

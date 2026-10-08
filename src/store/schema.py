@@ -13,19 +13,16 @@ import contextvars
 import re
 import sqlite3
 import threading
-from collections.abc import Callable, Coroutine, Hashable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Concatenate, Literal, cast
+from typing import Concatenate, Literal, cast
 
 from src import config
 from src.match.names import name_key
 from src.rows import JobRow
 from .migrate import migrate
-
-if TYPE_CHECKING:
-    from _typeshed import SupportsRichComparison
 
 # How long a writer waits on another process's write lock before giving up.
 # The web UI, the scheduled crawl and the background harvester all write to
@@ -359,56 +356,3 @@ def as_job(row: sqlite3.Row) -> JobRow:
     return cast(JobRow, dict(row))
 
 
-def dedup_groups[K: Hashable, R: Mapping[str, object]](conn: sqlite3.Connection, table: str, id_col: str,
-                 groups: Mapping[K, list[R]],
-                 rank: Callable[[R], SupportsRichComparison],
-                 describe: Callable[[R, list[R]], str],
-                 merge: Callable[[R, list[R]], object] | None = None
-                 ) -> int:
-    """Keep one row per group, delete the rest, say so. Returns rows deleted.
-
-    The two dedup passes (companies that turned out to share a board, jobs
-    that turned out to be one posting) disagree about everything that
-    matters -- how rows group, which survivor wins, what has to move off a
-    loser before it goes -- and agreed, line for line, about the part that
-    does not: skip the singletons, sort, split keep/losers, delete by id,
-    count, print one line. That skeleton lives here; the judgment stays
-    with each caller.
-
-    `groups` maps any key to a list of row dicts. `rank` is a sort key
-    where the SURVIVOR sorts FIRST. `describe(keep, losers)` returns the
-    line to print under the pass's own indent. `merge(keep, losers)`, when
-    given, runs BEFORE the delete -- the hook for carrying a loser's rows
-    or tags over to the survivor.
-
-    >>> conn = connect(":memory:")
-    >>> for n in ("Acme", "Acme Inc", "Solo"):
-    ...     _ = conn.execute("INSERT INTO companies (name) VALUES (?)", (n,))
-    >>> rows = [dict(r) for r in conn.execute("SELECT id, name FROM companies")]
-    >>> groups = {"acme": rows[:2], "solo": rows[2:]}
-    >>> dedup_groups(conn, "companies", "id", groups,
-    ...              rank=lambda r: len(r["name"]),
-    ...              describe=lambda k, l: f"{k['name']} <- {len(l)}")
-        Acme <- 1
-    1
-    >>> [r["name"] for r in conn.execute("SELECT name FROM companies "
-    ...                                  "ORDER BY name")]
-    ['Acme', 'Solo']
-
-    Notes:
-        Commits through `_commit`, like every other writer here.
-    """
-    deleted = 0
-    for members in groups.values():
-        if len(members) < 2:
-            continue
-        members.sort(key=rank)
-        keep, losers = members[0], members[1:]
-        if merge is not None:
-            merge(keep, losers)
-        conn.executemany(f"DELETE FROM {table} WHERE {id_col}=?",
-                         [(l[id_col],) for l in losers])
-        deleted += len(losers)
-        print(f"    {describe(keep, losers)}")
-    _commit(conn)
-    return deleted

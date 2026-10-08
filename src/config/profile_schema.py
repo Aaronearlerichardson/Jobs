@@ -9,6 +9,7 @@ error rather than a silent default.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -20,6 +21,8 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator,
 
 from src import tags
 from src.validation import Regex, error_lines
+
+from .tables import DEFAULT_TRACKS
 
 
 class ProfileError(ValueError):
@@ -119,6 +122,24 @@ class Exclude(_Table):
     title_phrases: list[str] = []
     title_exempt_phrases: list[str] = []
     boilerplate_phrases: list[Regex] = []
+
+    @field_validator("boilerplate_phrases")
+    @classmethod
+    def _lowercase_fragments(cls, v: list[str]) -> list[str]:
+        """Reject an uppercase letter outside an escape: the scrub runs
+        without re.I over lowercased text.
+
+        >>> Exclude(boilerplate_phrases=[r"health\\s+plans?"]).boilerplate_phrases
+        ['health\\\\s+plans?']
+        >>> Exclude(boilerplate_phrases=["Health plan"])
+        Traceback (most recent call last):
+        pydantic_core._pydantic_core.ValidationError: 1 validation error for Exclude
+        ...
+        """
+        bad = [f for f in v if re.sub(r"\\.", "", f) != re.sub(r"\\.", "", f).lower()]
+        if bad:
+            raise ValueError(f"boilerplate_phrases must be lowercase: {bad}")
+        return v
 
     @model_validator(mode="after")
     def _read_tracks(self) -> Self:
@@ -255,23 +276,6 @@ class Track(Methodology):
             mine = mine if isinstance(mine, dict) else mine.model_dump(exclude_unset=True)
             fill["sources"] = {**eng.sources.model_dump(), **mine}
         return {**data, **fill}
-
-
-#: The built-in pair used when a profile has no [tracks] section.
-DEFAULT_TRACKS = {
-    "local": {
-        "label": "Local", "db": "jobs.db", "track": "local", "engine": "local",
-        "rank_by": "fit", "min_mission": 0.2, "min_fit_default": 0.0,
-        "willing_to_move_default": False, "remote_requires_watch": True,
-        "default": True,
-    },
-    "remote": {
-        "label": "Remote", "db": "jobs.db", "track": "remote",
-        "engine": "sweep", "rank_by": "fit", "min_fit_default": 0.5,
-        "willing_to_move_default": True, "remote_requires_watch": False,
-        "default": False,
-    },
-}
 
 
 # --- [policy] ----------------------------------------------------------------
@@ -462,6 +466,8 @@ class Discovery(_Table):
     brainstorm_names: Count = 50
     name_blocklist: list[str] = []
     websearch_cap: Count = 20
+    # Days a name that missed is skipped by every discovery rerun; 0 = never.
+    miss_retry_days: Count = 14
     aggregator_hosts: list[str] = []
     generic_name_words: list[str] = []
     priority_companies: list[PriorityCompany] = []

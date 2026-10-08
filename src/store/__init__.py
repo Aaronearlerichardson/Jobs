@@ -39,30 +39,29 @@ from .companies import (  # noqa: F401
     add_board, as_company, board_key, company_by_board, plan_board, realign_job_names,
     company_by_host, company_id_by_name, crawlable_companies,
     deactivate_company, dedup_companies, export_companies, get_companies,
-    HARVEST_DEAD_AFTER_DAYS, blocked_name_keys, get_company, harvestable_companies,
+    HARVEST_DEAD_AFTER_DAYS, blocked_keys, blocked_name_keys, get_company, harvestable_companies,
     import_companies, mark_harvest_attempted, mark_harvested,
-    miss_counts, miss_family, reactivate_company, recent_miss_names,
-    record_alias, record_crawl_outcome, record_miss, roster_growth, set_company_tag,
+    miss_counts, miss_family, miss_family_in, reactivate_company, recent_miss_names,
+    record_alias, record_crawl_outcome, record_miss, roster_growth, roster_rows,
     upsert_company,
 )
 from .employers import (  # noqa: F401
-    clear_board_override, set_board_mission, set_mission, set_pending, set_watch,
+    set_board_mission, set_watch,
 )
 from .health import (  # noqa: F401
     latest_platform_health, platform_health_history, record_platform_health,
 )
 from .jobs import (  # noqa: F401
-    TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, backfill_axis_columns, clear_triage,
+    TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, clear_triage, close_dead_board_jobs,
     combined_score, crawl_seen, dedup_jobs, descriptions_for_company,
     flag_duplicate_jobs, job_exists, join_tracks, mark_desc_checked, merge_jobs, open_in_track_clause,
-    ranked_jobs, record_probe_outcome, record_triage, remote_admitted,
+    ranked_jobs, record_probe_outcome, record_triage, record_verified, remote_admitted,
     retire_stopped, same_posting, store_body, sync_job_statuses, touch_job, track_set,
     triage_counts, triage_pending, update_job_scores, upsert_job,
 )
 from .pipeline import (  # noqa: F401
-    DISPOSITIONS, RANKING_EXCLUDED_DISPOSITIONS, LIVE_DISPOSITIONS,
-    APPLIED_DISPOSITIONS, PipelineFields, OUTCOME_REASONS, DISMISS_REASONS,
-    NOT_A_FIT_SIGNAL, Prior, prior_lookup, FIT_BANDS,
+    RANKING_EXCLUDED_DISPOSITIONS, PipelineFields, OUTCOME_REASONS, DISMISS_REASONS,
+    NOT_A_FIT_SIGNAL, Prior, prior_lookup,
     set_job_status, set_disposition, get_pipeline, update_pipeline_fields,
     conversion_report, followups_due,
 )

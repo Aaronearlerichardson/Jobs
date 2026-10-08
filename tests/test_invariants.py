@@ -27,6 +27,7 @@ import pytest
 
 from src import config
 from src.config import ACTIVE_MISSION_TIERS, is_active_mission
+from src.config.tables import load_table
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -88,11 +89,8 @@ def multi_division(monkeypatch):
 
 
 class TestActivationRule:
-    """`is_active_mission` is the single source of the active=1/0 decision."""
-
-    def test_active_tier_is_active(self):
-        for tier in ACTIVE_MISSION_TIERS:
-            assert is_active_mission(tier, "Nowhere Robotics") == 1
+    """`is_active_mission` against the loaded profile (the doctest covers
+    the rule with literal tiers)."""
 
     def test_inactive_tier_is_inactive(self):
         inactive = [t.name for t in config.MISSION_TIERS if not t.active]
@@ -100,60 +98,9 @@ class TestActivationRule:
         for tier in inactive:
             assert is_active_mission(tier, "Nowhere Robotics") == 0
 
-    def test_unknown_tier_is_inactive(self):
-        assert is_active_mission("not-a-configured-tier", "Nowhere Robotics") == 0
-
-    def test_unavailable_scoring_stays_active(self):
-        """The regression this whole invariant exists for."""
-        assert is_active_mission(None, "Nowhere Robotics") == 1
-
     def test_multi_division_overrides_the_tier(self, multi_division):
         for tier in ALL_TIERS:
             assert is_active_mission(tier, multi_division) == 1
-
-    def test_include_missions_overrides_the_profile(self):
-        assert is_active_mission("green", "Nowhere Robotics", ("green",)) == 1
-        assert is_active_mission("green", "Nowhere Robotics", ("blue",)) == 0
-        # ...but never at the cost of the unavailable arm.
-        assert is_active_mission(None, "Nowhere Robotics", ("blue",)) == 1
-
-    def test_returns_int_not_bool(self):
-        """It goes straight into an INTEGER column; keep it 1/0."""
-        for val in (is_active_mission(None, "X"), is_active_mission("nope", "X")):
-            assert type(val) is int
-
-    @pytest.mark.parametrize("tier", ALL_TIERS)
-    @pytest.mark.parametrize("multi", [True, False])
-    def test_matches_the_pre_refactor_rule(self, tier, multi, multi_division):
-        """Truth table: the helper agrees with every inline copy it replaced.
-
-        The lambdas below are the five expressions as they were written at
-        the call sites, transcribed verbatim (the arms were in three
-        different orders, which is exactly how the drift went unnoticed).
-        """
-        name = multi_division if multi else "Nowhere Robotics"
-        old_rules = [
-            # src/discovery/dork.py:138 (harvest_urls), post-fix
-            lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS or t is None
-                               or config.is_multi_division(n)) else 0,
-            # src/discovery/local_sourcing.py:640 (populate_companies), with
-            # include_missions defaulted to ACTIVE_MISSION_TIERS by the caller
-            lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS or t is None
-                               or config.is_multi_division(n)) else 0,
-            # src/discovery/local_sourcing.py:1114 (resolve_leads)
-            lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS
-                               or config.is_multi_division(n)
-                               or t is None) else 0,
-            # src/discovery/local_sourcing.py:1387 (add_names)
-            lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS or t is None
-                               or config.is_multi_division(n)) else 0,
-            # src/ops/maintenance.py:697 (add_manual_job)
-            lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS
-                               or config.is_multi_division(n) or t is None) else 0,
-        ]
-        new = is_active_mission(tier, name)
-        for i, old in enumerate(old_rules):
-            assert new == old(tier, name), (i, tier, name)
 
 
 class TestOffmissionInactiveIsNotTheActivationRule:
@@ -460,6 +407,15 @@ def test_board_specs_are_json():
     against the schema when src.ats.board.engine builds its engine.)"""
     import json
     assert json.loads(json.dumps(config.BOARDS)) == config.BOARDS
+
+
+@pytest.mark.parametrize("name", sorted(p.stem for p in (ROOT / "src" / "config").glob("*.toml")))
+def test_toml_tables_are_json(name):
+    """Every shipped src/config/*.toml table holds only what JSON can (no
+    datetimes), as the loader returns it."""
+    import json
+    table = load_table(name)
+    assert json.loads(json.dumps(table)) == table
 
 
 # --------------------------------------------------------------------------- #

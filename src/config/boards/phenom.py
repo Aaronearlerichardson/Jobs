@@ -1,4 +1,12 @@
-"""The `phenom` board spec."""
+"""The `phenom` board spec.
+
+Notes:
+    The tenant's own site is the board, so no vendor host names it; every
+    page embeds its widget API origin, the handle. The listing lives under
+    a locale prefix only the root redirect names; a tenant whose bare root
+    answers 403 (2026-10) serves its locale paths, tried next. Last in
+    the table: its URLs are on the tenant's own host.
+"""
 
 from __future__ import annotations
 

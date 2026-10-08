@@ -1,4 +1,10 @@
-"""The `jazzhr` board spec."""
+"""The `jazzhr` board spec.
+
+Notes:
+    Postings carry JSON-LD where present, 60 pages a pull. A redirect to
+    the vendor's job-seekers page reads as 404, not an empty board (20
+    phantom boards a pass, 2026-10-08).
+"""
 
 from __future__ import annotations
 
@@ -26,7 +32,6 @@ SPEC: dict[str, JSON] = {
             "title": {"of": "text", "when": {"truthy": "_path"}},
             "url": "_url",
             "location": "location",
-            "department": None,
         },
     },
     # Each posting page's JSON-LD, where it carries one, 60 pages a pull.

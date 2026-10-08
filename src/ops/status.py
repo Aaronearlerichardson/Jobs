@@ -19,7 +19,7 @@ from src.ats.board import company as company_fetch
 from src.config import RuntimeTrack
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out, fetch_all
-from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _ranked, _t, whole_board,
+from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _t, whole_board,
                                  group_by_company, rewrite_digest, track_writer)
 from src.rows import CompanyRow
 
@@ -134,11 +134,10 @@ async def sync_status_all(top_n: int = 15, t: RuntimeTrack | None = None) -> tup
             if n_cl or n_re:
                 print(f"  {c['name'][:34]:34} {len(jobs):3} listed -> "
                       f"{n_cl:2} closed, {n_re:2} reopened")
-        n_open = len(await db.run(_ranked, t))
+        tally = (f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
+                 f"{n_reopened} reopened{_sync_skip_note(skipped)}; ")
         await db.run(rewrite_digest, t, top_n,
-                     f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
-                     f"{n_reopened} reopened{_sync_skip_note(skipped)}; "
-                     f"{n_open} open job(s) in ranking.")
+                     lambda n_open: f"{tally}{n_open} open job(s) in ranking.")
         return (n_closed, n_reopened)
 
 
@@ -157,7 +156,7 @@ DEAD_BOARD_CLOSE_DAYS = 14
 # running is a property of the endpoint, not a bad afternoon, and the row is
 # only parked from PROBING -- it stays open, keeps its rank, and still
 # closes the moment its board stops listing it (store.sync_job_statuses) or
-# its board dies (_dead_board_open_rows below). A live sighting clears the
+# its board dies (store.close_dead_board_jobs). A live sighting clears the
 # streak (store.record_probe_outcome, touch_job, sync_job_statuses).
 CLOSED_PROBE_GIVE_UP = 10
 
@@ -179,38 +178,32 @@ def _probe_label(url: str | None) -> str:
     return re.sub(r"^https?://", "", url or "").split("/")[0].lower() or "?"
 
 
-def _probe_tally_lines(counts: Mapping[str, Counter[str]],
+def _probe_tally_lines(counts: Counter[tuple[str, str]],
                        reasons: Mapping[str, Counter[str]]) -> list[str]:
     """The per-family outcome lines for a probe pass's summary, so the next
     audit reads "icims: 17 closed [icims api HTTP 410 x17]" instead of one
-    undifferentiated "36 unverifiable". Sorted by how much of the pass each
-    family accounted for.
+    undifferentiated "36 unverifiable". `counts` is keyed (family, verdict);
+    sorted by how much of the pass each family accounted for.
 
-    >>> t = {"lever": Counter(live=12, closed=3),
-    ...      "www.linkedin.com": Counter(unverifiable=2)}
+    >>> t = Counter({("lever", "live"): 12, ("lever", "closed"): 3,
+    ...              ("www.linkedin.com", "unverifiable"): 2})
     >>> r = {"lever": Counter({"lever api: posting live": 12}),
     ...      "www.linkedin.com": Counter({"bot-gated aggregator host": 2})}
     >>> for ln in _probe_tally_lines(t, r): print(ln)
         lever            12 live, 3 closed [lever api: posting live x12]
         www.linkedin.com 2 unverifiable [bot-gated aggregator host x2]
     """
+    size: Counter[str] = Counter()
+    for (label, _), n in counts.items():
+        size[label] += n
     out: list[str] = []
-    for label in sorted(counts, key=lambda k: (-sum(counts[k].values()), k)):
-        got = ", ".join(f"{counts[label][k]} {k}" for k in
-                        ("live", "closed", "unverifiable") if counts[label][k])
+    for label in sorted(size, key=lambda k: (-size[k], k)):
+        got = ", ".join(f"{counts[label, k]} {k}" for k in
+                        ("live", "closed", "unverifiable") if counts[label, k])
         why = ", ".join(f"{r} x{n}" if n > 1 else r
                         for r, n in reasons[label].most_common(3))
         out.append(f"    {label:<16} {got}" + (f" [{why}]" if why else ""))
     return out
-
-
-class DeadBoardRow(TypedDict):
-    """An open job at a company whose board is dead."""
-    job_id: str
-    title: str | None
-    company_id: int
-    company_name: str | None
-    miss_reason: str
 
 
 class OpenRow(TypedDict):
@@ -227,74 +220,35 @@ class ProbeRow(OpenRow):
     origin: str
 
 
-def _dead_board_open_rows(conn: sqlite3.Connection, days: int) -> list[DeadBoardRow]:
-    """OPEN rows at a company whose CURRENT miss_reason is in the
-    'board-dead' family (store.miss_family) and whose last board-verified
-    sighting (last_seen, or first_seen for a row a board never re-confirmed)
-    is older than `days`: nobody has vouched for it since the board itself
-    started returning nothing, so these are dead by inference rather than
-    by a URL probe. Ordered by company name, which is how its one caller
-    reports them (group_by_company); nothing bounds this query, so the
-    order is a reporting choice rather than a rotation one.
-
-    A quiet-but-not-missing board (stale rows, but no miss_reason at all,
-    or a miss in some OTHER family such as 'no-local-jobs') is excluded:
-    only a row whose OWN company carries this exact family qualifies.
-
-    A promoted board-dead company (store.companies.mark_harvested's
-    HARVEST_DEAD_AFTER_DAYS cycle, or a manual src.ops.roster.prune) writes
-    miss_reason with a raw UPDATE rather than through record_miss -- the
-    whole point of the promotion is demoting a company record_miss's own
-    "never demote an ACTIVE company" guard would otherwise protect -- so
-    that is what these fixtures do too:
-
-    >>> from src.store import connect, upsert_company, upsert_job
-    >>> conn = connect(":memory:")
-    >>> cid = upsert_company(conn, {"name": "Judi Health", "ats": "greenhouse"})
-    >>> _ = upsert_job(conn, {"job_id": "j1", "title": "T", "company_id": cid,
-    ...                       "company_name": "Judi Health"})
-    >>> _ = conn.execute("UPDATE jobs SET last_seen='2020-01-01' "
-    ...                  "WHERE job_id='j1'")
-    >>> _dead_board_open_rows(conn, 14)
-    []
-    >>> _ = conn.execute("UPDATE companies SET miss_reason='board-dead:greenhouse' "
-    ...                  "WHERE name='Judi Health'")
-    >>> [r['job_id'] for r in _dead_board_open_rows(conn, 14)]
-    ['j1']
-
-    A quiet board that never missed is never touched, however stale:
-
-    >>> cid2 = upsert_company(conn, {"name": "Quiet Co", "ats": "lever"})
-    >>> _ = upsert_job(conn, {"job_id": "j2", "title": "T", "company_id": cid2,
-    ...                       "company_name": "Quiet Co"})
-    >>> _ = conn.execute("UPDATE jobs SET last_seen='2020-01-01' "
-    ...                  "WHERE job_id='j2'")
-    >>> [r['job_id'] for r in _dead_board_open_rows(conn, 14)]
-    ['j1']
-
-    Nor is a miss in a DIFFERENT family, however dead-sounding the row's own
-    situation looks otherwise:
-
-    >>> cid3 = upsert_company(conn, {"name": "Ats Gap"})
-    >>> _ = upsert_job(conn, {"job_id": "j3", "title": "T", "company_id": cid3,
-    ...                       "company_name": "Ats Gap"})
-    >>> _ = conn.execute("UPDATE jobs SET last_seen='2020-01-01' "
-    ...                  "WHERE job_id='j3'")
-    >>> _ = conn.execute("UPDATE companies SET miss_reason='ats-unsupported:ukg' "
-    ...                  "WHERE name='Ats Gap'")
-    >>> [r['job_id'] for r in _dead_board_open_rows(conn, 14)]
-    ['j1']
-    """
-    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-    rows = [cast(DeadBoardRow, dict(r)) for r in conn.execute(
-        "SELECT j.job_id, j.title, j.company_id, j.company_name, "
-        "c.miss_reason FROM open_jobs j JOIN companies c ON c.id = j.company_id "
-        "WHERE c.miss_reason IS NOT NULL "
-        "AND COALESCE(j.last_seen, j.first_seen, '') < ? "
-        "ORDER BY j.company_name",
-        (cutoff,)).fetchall()]
-    return [r for r in rows
-            if store.miss_family(r["miss_reason"]) == _DEAD_BOARD_FAMILY]
+def _probe_queue(conn: sqlite3.Connection, stale_days: int,
+                 limit: int | None) -> tuple[list[ProbeRow], int, int]:
+    """check_closed_jobs' probe queue (its Selection and Pacing paragraphs),
+    with how many stale rows waited on their board's walk and how many
+    were left to probe before the per-origin cap and `limit`."""
+    cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
+    rows = [cast(OpenRow, dict(r)) for r in conn.execute(
+        "SELECT job_id, title, company_name, company_id, url FROM open_jobs "
+        "WHERE COALESCE(last_seen, first_seen, '') < ? "
+        "AND COALESCE(probe_streak, 0) < ? "
+        "ORDER BY COALESCE(desc_checked_at, ''), company_name",
+        (cutoff, CLOSED_PROBE_GIVE_UP)).fetchall()]
+    # The harvester's OWN view of which boards it walks and when
+    # (store.harvestable_companies, companies.last_harvested_at), not a
+    # second copy of that rule. "" covers both "no board the harvester
+    # walks" and "walked none yet": either way no board snapshot has ever
+    # ruled on the row.
+    walked: dict[int | None, str] = {c["id"]: (c.get("last_harvested_at") or "")
+                                     for c in store.harvestable_companies(conn)}
+    kept = [r for r in rows if not walked.get(r["company_id"])
+            or walked[r["company_id"]] > cutoff]
+    # A row with no URL has nothing to probe (probe_origin used to crash on it).
+    hosts = group_by_company(
+        [ProbeRow(job_id=r["job_id"], title=r["title"], company_name=r["company_name"],
+                  company_id=r["company_id"], url=url, origin=closure.probe_origin(url))
+         for r in kept if (url := r["url"])], "origin")
+    ranks = itertools.zip_longest(*(q[:config.CLOSED_PROBE_PER_HOST] for q in hosts.values()))
+    queue = [r for rank in ranks for r in rank if r is not None][:limit if limit else None]
+    return queue, len(rows) - len(kept), len(kept)
 
 
 async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
@@ -397,31 +351,7 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
         AI.
     """
     async with track_writer(t, db) as db:
-        cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
-        rows = await db.run(lambda conn: [cast(OpenRow, dict(r)) for r in conn.execute(
-            "SELECT job_id, title, company_name, company_id, url FROM open_jobs "
-            "WHERE COALESCE(last_seen, first_seen, '') < ? "
-            "AND COALESCE(probe_streak, 0) < ? "
-            "ORDER BY COALESCE(desc_checked_at, ''), company_name",
-            (cutoff, CLOSED_PROBE_GIVE_UP)).fetchall()])
-        # The harvester's OWN view of which boards it walks and when
-        # (store.harvestable_companies, companies.last_harvested_at), not a
-        # second copy of that rule.
-        walked: dict[int | None, str] = {c["id"]: (c.get("last_harvested_at") or "")
-                  for c in await db.run(store.harvestable_companies)}
-        n_rows = len(rows)
-        # "" covers both "no board the harvester walks" and "walked none
-        # yet": either way no board snapshot has ever ruled on the row.
-        rows = [r for r in rows if not walked.get(r["company_id"])
-                or walked[r["company_id"]] > cutoff]
-        n_deferred, n_queued = n_rows - len(rows), len(rows)
-        # A row with no URL has nothing to probe (probe_origin used to crash on it).
-        hosts = group_by_company(await asyncio.to_thread(
-            lambda: [ProbeRow(job_id=r["job_id"], title=r["title"], company_name=r["company_name"],
-                              company_id=r["company_id"], url=url, origin=closure.probe_origin(url))
-                     for r in rows if (url := r["url"])]), "origin")
-        ranks = itertools.zip_longest(*(q[:config.CLOSED_PROBE_PER_HOST] for q in hosts.values()))
-        rows = [r for rank in ranks for r in rank if r is not None][:limit if limit else None]
+        rows, n_deferred, n_queued = await db.run(_probe_queue, stale_days, limit)
         print(f"  probing {len(rows)} open job(s) on "
               f"{len({r['origin'] for r in rows})} host(s) not "
               f"board-verified in {stale_days}+ day(s)"
@@ -444,8 +374,8 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
             return got
 
         now = datetime.now()
-        n_closed = n_live = n_unknown = n_parked = 0
-        counts: defaultdict[str, Counter[str]] = defaultdict(Counter)
+        n_parked = 0
+        counts: Counter[tuple[str, str]] = Counter()
         reasons: defaultdict[str, Counter[str]] = defaultdict(Counter)
         # An abandoned probe is never yielded, so it closes nothing and
         # records no outcome: the row waits for the next pass as it was.
@@ -460,26 +390,22 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
             # A quoted page phrase is per-row detail, not a reason of its
             # own -- one tally bucket per KIND of answer.
             reasons[bucket][re.sub(r"'[^']*'", "...", reason or "?")] += 1
+            verdict = "closed" if is_open is False else "live" if is_open else "unverifiable"
+            counts[bucket, verdict] += 1
             if is_open is False:
                 await db.run(store.set_job_status, r["job_id"], "closed")
-                n_closed += 1
-                counts[bucket]["closed"] += 1
                 print(f"    [closed] {label} {reason}")
-            elif is_open:
-                await db.run(store.record_probe_outcome, r["job_id"], True, now)
-                n_live += 1
-                counts[bucket]["live"] += 1
-            else:
-                streak = await db.run(store.record_probe_outcome, r["job_id"],
-                                      False, now)
-                n_unknown += 1
-                counts[bucket]["unverifiable"] += 1
-                if streak >= CLOSED_PROBE_GIVE_UP:
-                    n_parked += 1
-                    print(f"    [give-up] {label} {streak} unverifiable "
-                          f"probes; not probing again ({reason})")
-        print(f"  {n_closed} closed, {n_live} confirmed live, "
-              f"{n_unknown} unverifiable (left open)"
+                continue
+            streak = await db.run(store.record_probe_outcome, r["job_id"], bool(is_open), now)
+            if is_open is None and streak >= CLOSED_PROBE_GIVE_UP:
+                n_parked += 1
+                print(f"    [give-up] {label} {streak} unverifiable "
+                      f"probes; not probing again ({reason})")
+        total: Counter[str] = Counter()
+        for (_, verdict), n in counts.items():
+            total[verdict] += n
+        print(f"  {total['closed']} closed, {total['live']} confirmed live, "
+              f"{total['unverifiable']} unverifiable (left open)"
               + (f", {len(abandoned)} abandoned (left open)" if abandoned else "")
               + f" of {len(rows)} probed.")
         for line in _probe_tally_lines(counts, reasons):
@@ -488,17 +414,14 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
             print(f"  {n_parked} row(s) hit {CLOSED_PROBE_GIVE_UP} "
                   f"unverifiable probes and left the probe queue.")
 
-        dead = group_by_company(await db.run(_dead_board_open_rows,
+        dead = group_by_company(await db.run(store.close_dead_board_jobs, _DEAD_BOARD_FAMILY,
                                              DEAD_BOARD_CLOSE_DAYS))
-        n_dead = 0
         for rs in dead.values():
-            for r in rs:
-                await db.run(store.set_job_status, r["job_id"], "closed")
-            n_dead += len(rs)
             print(f"    [dead-board] {(rs[0]['company_name'] or '?')[:34]:34} "
                   f"{len(rs):3} row(s) closed ({rs[0]['miss_reason']})")
+        n_dead = sum(map(len, dead.values()))
         if dead:
             print(f"  {n_dead} row(s) closed at {len(dead)} dead-board "
                   f"compan(ies) not board-verified in "
                   f"{DEAD_BOARD_CLOSE_DAYS}+ day(s).")
-    return n_closed + n_dead
+    return total["closed"] + n_dead

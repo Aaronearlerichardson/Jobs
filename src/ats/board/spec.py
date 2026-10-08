@@ -35,7 +35,7 @@ FillField = Literal["location", "description", "posted_at", "remote_hint"]
 class EngineRow(TypedDict, total=False, closed=True):
     """A listing entry as a board's row mapper builds it, until `board_jobs`
     turns it into a job. Its names are checked against `ROW_FIELDS` by
-    tests/test_boards_spec.py::test_the_engine_row_names_the_spec_row_fields.
+    tests/test_board_specs.py::test_the_engine_row_names_the_spec_row_fields.
 
     Notes:
         `department` is a row field the mapper reads and never stores: it

@@ -1,11 +1,14 @@
-"""The `breezy` board spec."""
+"""The `breezy` board spec.
+
+Notes:
+    Breezy, Recruitee and Pinpoint: public JSON, endpoint shapes credited
+    to kalil0321/ats-scrapers (MIT).
+"""
 
 from __future__ import annotations
 
 from src.rows import JSON
 
-# Breezy, Recruitee and Pinpoint: public JSON, endpoint shapes credited to
-# kalil0321/ats-scrapers (MIT).
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "breezy.hr", "re": [r"(?i)([a-z0-9][a-z0-9-]*)\.breezy\.hr"],
                 "blocklist": ["www", "app", "api", "help", "support", "blog"],
@@ -22,8 +25,7 @@ SPEC: dict[str, JSON] = {
             "url": "url",
             "location": {"first": [{"merge": {"primary": "location.name",
                                               "extras": "locations[].name"}},
-                                   {"const": "Remote", "when": {"truthy": "location.is_remote"}}],
-                         "default": "Unknown"},
+                                   {"const": "Remote", "when": {"truthy": "location.is_remote"}}]},
             "posted_at": "published_date",
             "remote_hint": {"const": "breezy:is_remote",
                             "when": {"truthy": "location.is_remote"}},

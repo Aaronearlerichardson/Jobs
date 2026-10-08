@@ -8,7 +8,6 @@ their posting titles read like the roster's mission-aligned employers (a
 free pre-screen, `prescreen`), and hands the best to `dork.intake_boards`,
 which validates, scores and queues them for review.
 
-    directory_boards()   every local board in the directory, grouped
     title_vocab(conn)    the roster's title words, by mission log-odds
     prescreen(board, v)  a board's title words' mean log-odds
     import_boards()      the op behind `discover.py --import-boards`
@@ -36,7 +35,6 @@ from src import config, store
 from src.ats import coords
 from src.ats.board import BOARDS
 from src.discovery.dork import intake_boards
-from src.discovery.name_sources import blocked_keys
 from src.discovery.resolve import directory
 from src.discovery.resolve.probes import Slug
 from src.discovery.resolve.directory import Detected, Row, board_of, cache_path, is_url, locate, query
@@ -293,14 +291,6 @@ async def _scan() -> Scan:
     return scan
 
 
-async def directory_boards() -> list[DirectoryBoard]:
-    """Every board in the directory with postings in your locality, over
-    the configured platforms, the most title-gate passes first, then the
-    most local postings (`import_boards` adds the roster's pre-screen). A
-    board on a platform with no fetcher is left out."""
-    return _ranked((await _scan()).boards.values())
-
-
 def prescreen(board: DirectoryBoard, vocab: dict[str, float], shrink: int = 3) -> float:
     """How much a board's posting titles read like the mission-aligned
     employers' (`title_vocab`): the `word_score` of its title words.
@@ -370,7 +360,7 @@ def classify(conn: sqlite3.Connection, boards: Iterable[DirectoryBoard]
     {'new': ['Zeta Labs Inc', 'Zeta Labs', 'Other'], 'alternate': ['Acme Bio'], 'tracked': ['Acme Bio'], 'blocked': ['Junk Co']}
     """
     by_name = {name_key(c["name"]): c for c in store.get_companies(conn, active_only=False)}
-    blocked = blocked_keys(conn)
+    blocked = store.blocked_keys(conn)
     out: dict[str, list[DirectoryBoard]] = {s: [] for s in STATUSES}
     for b in boards:
         nk = name_key(b["name"])

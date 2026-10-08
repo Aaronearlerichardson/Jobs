@@ -1,4 +1,9 @@
-"""The `adp` board spec."""
+"""The `adp` board spec.
+
+Notes:
+    The host names no board: the two ids ride in the query string.
+    A pulled requisition answers 200 with an empty record (2026-09-23).
+"""
 
 from __future__ import annotations
 
@@ -28,8 +33,7 @@ SPEC: dict[str, JSON] = {
             "title": "requisitionTitle",
             "url": {"format": "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html"
                               "?cid={cid}&ccId={ccid}&jobId={itemID}&lang=en_US"},
-            "location": {"join": ["requisitionLocations[].nameCode.shortName"], "sep": "; ",
-                         "default": "Unknown"},
+            "location": {"join": ["requisitionLocations[].nameCode.shortName"], "sep": "; "},
             "department": {"join": ["organizationalUnits[].nameCode.shortName"]},
         },
     },

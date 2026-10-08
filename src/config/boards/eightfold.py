@@ -1,4 +1,11 @@
-"""The `eightfold` board spec."""
+"""The `eightfold` board spec.
+
+Notes:
+    Endpoint shapes credited to kalil0321/ats-scrapers (MIT). A tenant's
+    API wants its company domain, which the host does not name: the first
+    TLD that answers is the domain. The table's detection-only entries
+    follow it; Eightfold, Taleo and Avature became fetchable in 2026-10.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +17,6 @@ from src.rows import JSON
 # vendor's host and detects nothing. Eightfold, Taleo and Avature among
 # them are fetchable since 2026-10, left in place: this order is
 # detection order (signatures.detect).
-#
-# Eightfold: endpoint shapes credited to kalil0321/ats-scrapers (MIT). A tenant's
-# API wants its company domain, which the host (acme.eightfold.ai) does
-# not name: the first TLD that answers is the domain.
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "eightfold.ai", "re": [r"(?i)([a-z0-9-]+\.eightfold\.ai)"],
                 "blocklist": ["www.eightfold.ai", "app.eightfold.ai", "apply.eightfold.ai",
@@ -36,7 +39,7 @@ SPEC: dict[str, JSON] = {
                 "id": {"format": "eightfold_{slug|host_label}_{id}"},
                 "title": "name",
                 "url": {"format": "https://{slug}/careers/job/{id}"},
-                "location": {"join": ["locations[]"], "sep": "; ", "default": "Unknown"},
+                "location": {"join": ["locations[]"], "sep": "; "},
                 "posted_at": "postedTs",
                 "remote_hint": {"const": "eightfold:workLocationOption",
                                 "when": {"eq": ["workLocationOption", "remote"]}},
@@ -51,7 +54,7 @@ SPEC: dict[str, JSON] = {
                 "id": {"format": "eightfold_{slug|host_label}_{id}"},
                 "title": "name",
                 "url": {"format": "https://{slug}/careers/job/{id}"},
-                "location": {"join": ["locations[]"], "sep": "; ", "default": "Unknown"},
+                "location": {"join": ["locations[]"], "sep": "; "},
                 "posted_at": "t_create",
                 "remote_hint": {"const": "eightfold:workLocationOption",
                                 "when": {"eq": ["work_location_option", "remote"]}},

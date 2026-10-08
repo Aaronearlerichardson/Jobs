@@ -45,20 +45,36 @@ def stale_body_rows(conn: sqlite3.Connection, where: str,
     `retry_days=0` retries everything. The skip count is reported, not
     hidden: "0 of 4 backfilled" with no explanation was undiagnosable from
     the session log.
+
+    >>> conn = store.connect(":memory:")
+    >>> for j in ("a", "b", "c"):
+    ...     _ = store.upsert_job(conn, {"job_id": j, "title": j, "company_id": 1})
+    >>> store.mark_desc_checked(conn, "c")
+    >>> [r["job_id"] for r in stale_body_rows(conn, "company_id IS NOT NULL", limit=1)]
+      backfilling 1 description(s)... (1 skipped: failed in the last 3d)
+    ['a']
+    >>> store.mark_desc_checked(conn, "a"); store.mark_desc_checked(conn, "b")
+    >>> stale_body_rows(conn, "company_id IS NOT NULL")
+      backfilling 0 description(s)... (3 skipped: failed in the last 3d)
+    []
     """
     cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
               if retry_days else "9999")
-    rows = [cast(StaleRow, dict(r)) for r in conn.execute(
-        f"SELECT {columns}, desc_checked_at FROM open_jobs "
-        f"WHERE {where} "
-        "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
-    recent = [r for r in rows if (r.get("desc_checked_at") or "") >= cutoff]
-    rows = [r for r in rows if (r.get("desc_checked_at") or "") < cutoff]
-    if limit:
-        rows = rows[:limit]
+    # One row per selected job, each carrying the skip count; one row of
+    # NULLs with it when nothing is selected.
+    got = conn.execute(
+        f"WITH pool AS MATERIALIZED (SELECT {columns}, desc_checked_at FROM open_jobs "
+        f"WHERE {where} AND length(COALESCE(description,'')) < ?) "
+        "SELECT p.*, s.n AS _skipped FROM "
+        "(SELECT COUNT(*) AS n FROM pool WHERE COALESCE(desc_checked_at, '') >= ?) s "
+        "LEFT JOIN (SELECT * FROM pool WHERE COALESCE(desc_checked_at, '') < ? LIMIT ?) p",
+        (min_len, cutoff, cutoff, limit or -1)).fetchall()
+    skipped = got[0]["_skipped"]
+    rows = [cast(StaleRow, {k: r[k] for k in r.keys() if k != "_skipped"})
+            for r in got if r["job_id"] is not None]
     print(f"  backfilling {len(rows)} {label}..."
-          + (f" ({len(recent)} skipped: failed in the last {retry_days}d)"
-             if recent else ""))
+          + (f" ({skipped} skipped: failed in the last {retry_days}d)"
+             if skipped else ""))
     return rows
 
 

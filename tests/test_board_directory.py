@@ -63,24 +63,17 @@ def directory(tmp_path, monkeypatch, local_addr, elsewhere):
     return tmp_path
 
 
-async def test_local_boards_are_grouped_named_and_ranked(directory):
-    got = await bd.directory_boards()
-    assert [(b["name"], b["nc_postings"], b["gate_passes"]) for b in got] == [
-        ("Big Co Inc", 4, 3), ("Smallco", 1, 1)]
-    assert got[0]["ats"] == "greenhouse" and got[0]["handle"] == "bigco"
-    assert got[0]["sample_titles"] == ["Engineer"] * 3
-
-
 async def test_a_platform_with_no_fetcher_is_counted_never_listed(directory):
     scan = await bd._scan()
     assert scan.leads == {"gohire": {"acme.gohire.io"}}
     assert all(b["ats"] != "gohire" for b in scan.boards.values())
 
 
-async def test_configured_files_replace_the_manifest(directory, monkeypatch):
+async def test_configured_files_replace_the_manifest(directory, db, monkeypatch):
+    keep_store_open(monkeypatch, db)
     monkeypatch.setattr(config, "BOARD_DIRECTORY",
                         config.BOARD_DIRECTORY.model_copy(update={"files": ["gohire"]}))
-    assert await bd.directory_boards() == []
+    assert (await bd.import_boards())["new"] == 0
 
 
 def test_lookup_name_matches_the_whole_name(directory):
@@ -99,7 +92,10 @@ async def test_a_dry_run_reports_and_writes_nothing(directory, db, monkeypatch, 
     rows = list(csv.DictReader(report.open(encoding="utf-8")))
     assert list(rows[0]) == ["name", "ats", "slug", "nc_postings", "title_gate_passes",
                              "sample_titles", "sample_url", "status", "prescreen"]
-    assert [r["name"] for r in rows] == ["Big Co Inc", "Smallco"]
+    assert [(r["name"], r["nc_postings"], r["title_gate_passes"]) for r in rows] == [
+        ("Big Co Inc", "4", "3"), ("Smallco", "1", "1")]
+    assert (rows[0]["ats"], rows[0]["slug"]) == ("greenhouse", "bigco")
+    assert rows[0]["sample_titles"] == " | ".join(["Engineer"] * 3)
 
 
 async def test_the_roster_s_mission_tiers_rank_the_boards(directory, db, monkeypatch):
@@ -170,7 +166,6 @@ class TestIntake:
 
     async def test_a_directory_board_needs_a_live_local_posting(self, monkeypatch, db, capsys):
         monkeypatch.setattr(dork, "validate_board", answer((5, 0)))
-        monkeypatch.setattr(dork, "nc_hq_signal", answer(True))      # not consulted
         cand = {"name": "Acme Bio", "ats": "lever", "slug": "acmebio"}
         assert await dork.intake_boards([cand], "board_directory", require_live=True) == (0, 1)
         assert "skipped: 1 no live local posting" in capsys.readouterr().out

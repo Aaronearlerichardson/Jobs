@@ -5,12 +5,28 @@ and mapped to rows, how one posting is read back, and how a posting's
 closure is judged. The engine that reads it is `src.ats.board` (its
 default the models in `src.ats.board.spec`, where each key's meaning and
 default are declared); outside them, no module in `src/` names a platform
-(tests/test_boards_spec.py).
+(tests/test_board_specs.py).
 
 The literal is JSON-compatible on purpose (str, int, float, bool, None,
 list, dict; regexes as strings): tests/test_invariants.py pins
 `json.loads(json.dumps(BOARDS)) == BOARDS`, so moving it to a JSON file
-later is mechanical.
+later is mechanical. Comments do not survive that move, so each spec
+module's docstring moves to a README.md beside the specs, one section per
+platform.
+
+Rules:
+
+- A value every platform shares is an engine default
+  (`src.ats.board.spec`), never repeated per spec. Decided 2026-10-08: no
+  spec sets location's default (the engine's "" is the one unknown
+  location, and `src.match.locality.location_unknown` also reads a literal
+  "Unknown" as unknown); no spec sets `"department": None` (a listing
+  alternative's `fields` replace the first's wholesale, and an absent key
+  already reads None).
+- A line-level comment explains one value. Reasoning about a whole
+  platform (canary choice, tenant quirks, why a rescue or transform
+  exists, dated incidents) goes in that spec module's docstring, under
+  `Notes:` for history.
 
 The host lists below it are derived from the specs' `detect` entries, so
 the layers under the engine (the store, the careers-page reader, the

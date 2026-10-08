@@ -40,7 +40,7 @@ from src.match.names import name_key as _name_key
 from src.net.util import dig
 from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
 from .employers import MISSION_COLS, apply_facts, write_mission
-from .schema import _commit, apply_update, dedup_groups
+from .schema import _commit, apply_update
 
 
 def as_company(row: sqlite3.Row) -> CompanyRow:
@@ -381,7 +381,24 @@ MISS_REASONS = (
     "no-local-jobs",    # board live and readable, zero openings in [locality]
     "fetch-error",      # the resolution attempt itself raised (:ExceptionName)
     "duplicate",        # the name's board is tracked under another name (record_alias)
+    "junk-name",        # not a company name (:why, match.names.junk_name_reason)
 )
+
+
+def miss_family_in(column: str = "miss_reason") -> str:
+    """SQL true when `column`'s family (miss_family) is in the JSON list
+    bound to its one `?`.
+
+    >>> from src.store.schema import connect
+    >>> conn = connect(":memory:")
+    >>> [r[0] for r in conn.execute(
+    ...     f"SELECT v FROM (SELECT 'board-dead:x' AS v UNION SELECT 'board-deadish' "
+    ...     f"UNION SELECT 'duplicate') WHERE {miss_family_in('v')} ORDER BY v",
+    ...     ('["board-dead", "duplicate"]',))]
+    ['board-dead:x', 'duplicate']
+    """
+    return (f"substr({column}, 1, instr({column} || ':', ':') - 1)"
+            " IN (SELECT value FROM json_each(?))")
 
 
 def miss_family(reason: str | None) -> str:
@@ -441,11 +458,20 @@ def record_miss(conn: sqlite3.Connection, name: str, reason: str, /,
     ...  if c["name"] == "Chiesi USA"]
     ['board-dead']
 
+    A reason outside the MISS_REASONS families is refused:
+
+    >>> record_miss(conn, "Chiesi USA", "gone-fishing")
+    Traceback (most recent call last):
+    ...
+    ValueError: miss reason 'gone-fishing' is not in a MISS_REASONS family
+
     Notes:
         The 2026-10-07 reresolve stalled on every name and stamped 50
         board-dead rows `fetch-error:stalled`, which the harvester reads
         as a live board: it pulled their dead slugs again that night.
     """
+    if miss_family(reason) not in MISS_REASONS:
+        raise ValueError(f"miss reason {reason!r} is not in a MISS_REASONS family")
     row = conn.execute("SELECT active, miss_reason FROM companies_effective WHERE name=?",
                        (name,)).fetchone()
     if row and row["active"]:
@@ -517,9 +543,9 @@ def miss_counts(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     return sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def recent_miss_names(conn: sqlite3.Connection, days: int = 14) -> set[str]:
-    """Names whose miss was recorded within `days`: the set a rerun skips
-    instead of re-probing.
+def recent_miss_names(conn: sqlite3.Connection, days: int | None = None) -> set[str]:
+    """Names whose miss was recorded within `days` (default [discovery]
+    miss_retry_days): the set a rerun skips instead of re-probing.
 
     >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
@@ -535,6 +561,7 @@ def recent_miss_names(conn: sqlite3.Connection, days: int = 14) -> set[str]:
     >>> recent_miss_names(conn, days=0)
     set()
     """
+    days = config.DISCOVERY_MISS_RETRY_DAYS if days is None else days
     if not days:
         return set()
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
@@ -928,11 +955,12 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
         apply_facts(conn, keep["id"], any(m["review"] == "pending" for m in everyone),
                     any(m["watch"] for m in everyone))
 
-    merged = dedup_groups(
-        conn, "companies", "id", groups, rank=lambda r: r["rn"], merge=carry_over,
-        describe=lambda keep, losers: (
-            f"{keep['name'][:30]:30} <- merged {len(losers)}: "
-            + ", ".join(l["name"][:20] for l in losers)))
+    for keep, *losers in groups.values():
+        carry_over(keep, losers)
+        conn.executemany("DELETE FROM companies WHERE id=?", [(l["id"],) for l in losers])
+        print(f"    {keep['name'][:30]:30} <- merged {len(losers)}: "
+              + ", ".join(l["name"][:20] for l in losers))
+    merged = sum(len(g) - 1 for g in groups.values())
     realign_job_names(conn)
     conn.execute("DELETE FROM employers WHERE NOT EXISTS "
                  "(SELECT 1 FROM companies WHERE employer_id = employers.id)")
@@ -971,16 +999,21 @@ def realign_job_names(conn: sqlite3.Connection) -> int:
     return renamed
 
 
-def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
-    """Dump the company roster to JSON — the shareable/bootstrap artifact
-    that replaced config.py's seed lists. Secrets-free by construction. A
-    row carries its board's EFFECTIVE facts, flat: employer links and board
-    overrides are not exported."""
+def roster_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    """The exportable roster, by name: each board's EFFECTIVE facts, flat,
+    without the per-database ids (id, employer_id)."""
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM companies_effective ORDER BY name").fetchall()]
     for r in rows:
-        r.pop("id", None)          # ids are per-database
+        r.pop("id", None)
         r.pop("employer_id", None)
+    return rows
+
+
+def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
+    """Dump `roster_rows` to JSON — the shareable/bootstrap artifact that
+    replaced config.py's seed lists. Secrets-free by construction."""
+    rows = roster_rows(conn)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=1, ensure_ascii=False)
     return len(rows)
@@ -1022,36 +1055,6 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     for row in rows:
         upsert_company(conn, row)
     return len(rows)
-
-
-def set_company_tag(conn: sqlite3.Connection, name: str, tag: str,
-                    add: bool = True) -> str | None:
-    """Add or remove one scope tag on a company (case-insensitive name
-    match). Returns its new comma-joined tags ('' when none), or None if no
-    such company exists. Watching is set_watch's, not a tag.
-
-    >>> from src.store.schema import connect
-    >>> conn = connect(":memory:")
-    >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
-    >>> set_company_tag(conn, "acme", "sweep")
-    'sweep'
-    >>> set_company_tag(conn, "ACME", "nc_local")
-    'local,sweep'
-    >>> set_company_tag(conn, "acme", "sweep", add=False)
-    'local'
-    >>> set_company_tag(conn, "nope", "sweep") is None
-    True
-    """
-    row = conn.execute("SELECT id, tags FROM companies WHERE lower(name)=lower(?)",
-                       (name,)).fetchone()
-    if not row:
-        return None
-    held = tags.parse(row["tags"])
-    (held.add if add else held.discard)(tags.canonical(tag))
-    new = tags.join(held)
-    conn.execute("UPDATE companies SET tags=? WHERE id=?", (new, row["id"]))
-    _commit(conn)
-    return new or ""
 
 
 # NEAR-MISS, DELIBERATE: different queries (row-by-id vs column-by-name);
@@ -1275,11 +1278,18 @@ def blocked_name_keys(conn: sqlite3.Connection) -> set[str]:
             conn.execute("SELECT key FROM name_blocklist").fetchall()}
 
 
+def blocked_keys(conn: sqlite3.Connection) -> set[str]:
+    """Name keys no path may add or harvest: the store's rejection blocklist
+    (blocked_name_keys) plus the profile's [discovery] name_blocklist."""
+    return blocked_name_keys(conn) | config.DISCOVERY_NAME_BLOCKLIST
+
+
 def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     """Every company with a fetchable board, for the background harvester:
     active or not, dormant or not, any tag, any mission score. Skipped only
     when there is no board to fetch (capture rows, no ATS, a dead-board,
-    no-board or duplicate miss) or the name is blocklisted.
+    no-board or duplicate miss) or the name is blocklisted, in the store or
+    in the profile's [discovery] name_blocklist.
 
     >>> from src.store.schema import connect
     >>> from src.store import block_name, mark_pending
@@ -1298,23 +1308,22 @@ def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     >>> _ = block_name(conn, "Guess")
     >>> sorted(c["name"] for c in harvestable_companies(conn))
     ['Dormant']
+    >>> from unittest import mock
+    >>> with mock.patch.object(config, "DISCOVERY_NAME_BLOCKLIST", {"dormant"}):
+    ...     [c["name"] for c in harvestable_companies(conn)]
+    []
     """
-    blocked = blocked_name_keys(conn)
-    out: list[CompanyRow] = []
-    for c in get_companies(conn, active_only=False):
-        ats = c.get("ats")
-        if not ats or ats == CAPTURE_ATS:
-            continue
-        # miss_reason families that mean there is nothing at the board's
-        # address. Everything else (inactive, dormant, pending review,
-        # off-mission, even 'no-local-jobs') still HAS a board, and the
-        # harvester pulls it.
-        if (c.get("miss_reason") or "").startswith(("board-dead", "no-board-found", "duplicate")):
-            continue
-        if _name_key(c.get("name") or "") in blocked:
-            continue
-        out.append(c)
-    return out
+    blocked = blocked_keys(conn)
+    # miss_reason families that mean there is nothing at the board's
+    # address. Everything else (inactive, dormant, pending review,
+    # off-mission, even 'no-local-jobs') still HAS a board, and the
+    # harvester pulls it.
+    rows = conn.execute(
+        "SELECT * FROM companies_effective WHERE COALESCE(ats, '') NOT IN ('', ?) "
+        f"AND (miss_reason IS NULL OR NOT {miss_family_in()}) "
+        "ORDER BY mission_score DESC, local_job_count DESC",
+        (CAPTURE_ATS, json.dumps(["board-dead", "no-board-found", "duplicate"]))).fetchall()
+    return [c for c in map(as_company, rows) if _name_key(c.get("name") or "") not in blocked]
 
 
 # Consecutive calendar days a board may carry the harvester's own

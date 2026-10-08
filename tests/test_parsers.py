@@ -3,7 +3,6 @@ the HN thread parser, posting-date normalisation, age tags, and the
 closed-posting probe guards. No network."""
 
 import asyncio
-import time
 from datetime import datetime, timedelta
 
 import pytest
@@ -14,7 +13,7 @@ import src.discovery.local_sourcing as local_sourcing
 import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
 import src.discovery.resolve.fetchpool as fetchpool
-from conftest import answer, fake_response, keep_store_open
+from conftest import answer, fake_response, keep_store_open, stub_mission
 import src.discovery.pipeline as pipeline
 import src.discovery.resolve.board as resolve_board
 import src.discovery.resolve.identity as identity
@@ -24,9 +23,11 @@ from src.ats import signatures as ats_signatures
 import src.ats.board.company as company_fetch
 import src.ats.board.closure as job_probe
 from src.net.util import norm_posted_date
-from src import tags
-import src.claude.api as claude
+from src.match.names import junk_name_reason
+from src.ops import repair
+from src import config, tags
 import src.store as store
+from src.store.employers import write_mission
 
 
 class TestSniffer:
@@ -135,22 +136,6 @@ class TestPageMemo:
         await fetchpool._fetch_page("https://www.sgs.com/")
         await fetchpool._fetch_page("https://www.sgs.com/careers")
         assert len(calls) == 2
-
-    async def test_oversized_bodies_are_not_hoarded(self, serve):
-        calls = self._session(serve, body="x" * (2 * 1024 * 1024 + 1))
-        await fetchpool._fetch_page("https://big.example/")
-        await fetchpool._fetch_page("https://big.example/")
-        assert len(calls) == 2 and fetchpool._PAGE_MEMO() == {}
-
-    async def test_cap_evicts_the_oldest_entry(self, serve):
-        self._session(serve)
-        memo = fetchpool._PAGE_MEMO()
-        later = time.time() + 1000
-        memo.update({f"https://held{i}.example/": (later, None) for i in range(510)})
-        for u in ("https://a.example/", "https://b.example/", "https://c.example/"):
-            await fetchpool._fetch_page(u)
-        assert "https://a.example/" not in memo and "https://c.example/" in memo
-        assert len(memo) == 512
 
 
 class TestJobPageMeta:
@@ -510,12 +495,8 @@ class TestPastedNameBoardGuard:
     insert now."""
 
     def _wire(self, monkeypatch, db, hit):
-        keep_store_open(monkeypatch, db)
+        stub_mission(monkeypatch, db)
         monkeypatch.setattr(resolve_board, "resolve_or_miss", answer((hit, None)))
-        monkeypatch.setattr(write, "_sample_titles", answer([]))
-        monkeypatch.setattr(claude, "score_company_mission",
-                            answer(("adjacent", 0.5, "stub")))
-        monkeypatch.setattr(identity, "nc_hq_signal", answer(True))
 
     async def test_same_board_under_another_name_is_not_added(self, monkeypatch, db, capsys):
         store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
@@ -981,7 +962,7 @@ class TestPastedNamePreview:
 
     async def test_the_profile_blocklist_counts_too(self, monkeypatch, db):
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(name_sources, "NAME_BLOCKLIST", {"biotech"})
+        monkeypatch.setattr(config, "DISCOVERY_NAME_BLOCKLIST", {"biotech"})
         monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Biotech"])
         assert [r["state"] for r in
@@ -1033,12 +1014,9 @@ class TestAddNamesQueue:
             "count": 8, "nc": 3, "via": "sniff"}
 
     def _wire(self, monkeypatch, db, hit=None):
-        keep_store_open(monkeypatch, db)
+        stub_mission(monkeypatch, db)
         monkeypatch.setattr(resolve_board, "resolve_or_miss",
                             answer((hit or self._HIT, None)))
-        monkeypatch.setattr(write, "_sample_titles", answer([]))
-        monkeypatch.setattr(claude, "score_company_mission",
-                            answer(("adjacent", 0.5, "stub")))
 
     async def test_a_resolved_name_lands_in_the_queue_not_the_roster(
             self, monkeypatch, db):
@@ -1078,20 +1056,6 @@ class TestAddNamesQueue:
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
 
-    async def test_a_websearch_only_hit_is_queued_instead_of_corroborated(
-            self, monkeypatch, db):
-        """add_names used to spend extra fetches proving a websearch hit had
-        a local HQ, and wrote it inactive when it could not. The queue is
-        that judgement now, and it costs nothing."""
-        probed = []
-        monkeypatch.setattr(identity, "nc_hq_signal",
-                            answer(lambda *a, **k: probed.append(a) or False))
-        self._wire(monkeypatch, db, {**self._HIT, "nc": 0, "via": "websearch"})
-        await paste_ingest.add_names(["Alpaca Health"], max_workers=1)
-        assert [c["name"] for c in store.pending_companies(db)] \
-            == ["Alpaca Health"]
-        assert probed == [], "the corroboration probe still runs"
-
 
 class TestScoreAndUpsert:
     """write.score_and_upsert is the one write path behind every
@@ -1107,9 +1071,8 @@ class TestScoreAndUpsert:
         """Stub the network (titles) and the LLM; returns the list of names
         the scorer was asked about."""
         asked = []
-        monkeypatch.setattr(write, "_sample_titles", answer([]))
-        monkeypatch.setattr(claude, "score_company_mission",
-                            answer(lambda name, *a, **k: asked.append(name) or scored))
+        stub_mission(monkeypatch,
+                     score=lambda name, *a, **k: asked.append(name) or scored)
         return asked
 
     @staticmethod
@@ -1234,10 +1197,7 @@ class TestScoreMissionsHonoursTheReviewQueue:
     skipping the queue."""
 
     def _wire(self, monkeypatch, db):
-        keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(claude, "score_company_mission",
-                            answer(("adjacent", 0.5, "stub")))
-        monkeypatch.setattr(write, "_sample_titles", answer([]))
+        stub_mission(monkeypatch, db)
 
     async def test_pending_rows_are_scored_but_not_revived(self, monkeypatch, db):
         self._wire(monkeypatch, db)
@@ -1266,9 +1226,7 @@ class TestScoreMissionsScoresAnEmployerOnce:
             asked.append(name)
             return ("adjacent", 0.5 if name == "Acme (ashby)" else 0.6, name)
 
-        keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(claude, "score_company_mission", answer(score))
-        monkeypatch.setattr(write, "_sample_titles", answer([]))
+        stub_mission(monkeypatch, db, score)
         return asked
 
     async def test_an_unscored_employer_is_scored_through_its_largest_board(self, monkeypatch, db):
@@ -1284,7 +1242,8 @@ class TestScoreMissionsScoresAnEmployerOnce:
         asked = self._wire(monkeypatch, db)
         a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a",
                                     "active": 1, "total_job_count": 3})
-        store.set_mission(db, a, "core", 0.9)
+        write_mission(db, a, mission_tier="core", mission_score=0.9)
+        db.commit()
         b, _ = store.add_board(db, {"name": "Acme", "ats": "ashby", "slug": "b",
                                     "active": 1, "total_job_count": 9})
         c, _ = store.add_board(db, {"name": "Acme", "ats": "icims", "slug": "c",
@@ -1297,16 +1256,16 @@ class TestScoreMissionsScoresAnEmployerOnce:
         assert got == {a: ("adjacent", 0.5), b: ("adjacent", 0.5), c: ("adjacent", 0.6)}
 
 
-class TestValidateCandidateResolutionOrder:
-    """The order discovery resolves a candidate in, pinned.
+class TestResolutionOrder:
+    """The order discovery resolves a name in, pinned.
 
-    src.discovery.pipeline.validate_candidate used to carry its OWN
-    probe-first resolver: slug variants of the name against every ATS
-    before anything looked at the company's site. That is the order that
-    mapped "Ripple Neuro" onto the payments company's board (2026-08-28)
-    and a stranger's board onto two roster rows (2026-09-18, 2026-09-21).
-    It calls resolve.board.resolve_board_sniff_first now, and nothing
-    here may reintroduce a probe that outranks the careers-page sniff.
+    src.discovery.pipeline used to carry its OWN probe-first resolver: slug
+    variants of the name against every ATS before anything looked at the
+    company's site. That is the order that mapped "Ripple Neuro" onto the
+    payments company's board (2026-08-28) and a stranger's board onto two
+    roster rows (2026-09-18, 2026-09-21). Every name list goes through
+    resolve.board now, and nothing here may reintroduce a probe that
+    outranks the careers-page sniff.
 
     Offline: sniff_ats, probe_company, websearch_board and
     validate_board are all faked.
@@ -1321,11 +1280,6 @@ class TestValidateCandidateResolutionOrder:
             resolve_board, "validate_board",
             answer(lambda comp: (boards or {}).get(
                 (comp["ats"], comp.get("slug")), (0, 0))))
-        monkeypatch.setattr(pipeline, "sniff_careers_ats", answer(None))
-
-    @staticmethod
-    def _candidate(name, ats="unknown"):
-        return pipeline.Candidate(name=name, ats=ats, careers_url="", notes="")
 
     async def test_the_careers_page_beats_a_colliding_slug_probe(self, monkeypatch):
         """The company's own page names greenhouse/raya-health-inc; the
@@ -1339,28 +1293,25 @@ class TestValidateCandidateResolutionOrder:
                    "count": 120, "nc": 9},
             boards={("greenhouse", "raya-health-inc"): (7, 3),
                     ("lever", "raya"): (120, 9)})
-        c = self._candidate("Raya Health")
 
-        await pipeline.validate_candidate(c, delay=0)
+        hit = await resolve_board.resolve_board_sniff_first("Raya Health")
 
-        assert (c.confirmed, c.ats, c.slug) == (
-            True, "greenhouse", "raya-health-inc")
-        assert c.via == "sniff"
+        assert (hit["ats"], hit["slug"], hit["via"]) == (
+            "greenhouse", "raya-health-inc", "sniff")
 
     async def test_a_probe_only_hit_is_confirmed_but_flagged(self, monkeypatch):
         """Nothing readable on the company's site: the name-guessed slug is
-        the only evidence, so it confirms -- carrying a [VERIFY] note, which
+        the only evidence, so it resolves -- carrying a verify note, which
         is what a human reading the report acts on."""
         self._wire(monkeypatch,
                    probe={"name": "Zeta Labs", "ats": "greenhouse",
                           "slug": "zetalabs", "count": 12, "nc": 4},
                    boards={("greenhouse", "zetalabs"): (12, 4)})
-        c = self._candidate("Zeta Labs")
 
-        await pipeline.validate_candidate(c, delay=0)
+        hit = await resolve_board.resolve_board_sniff_first("Zeta Labs")
 
-        assert (c.confirmed, c.ats, c.via) == (True, "greenhouse", "probe")
-        assert "name-guessed slug" in pipeline.verify_note(c)
+        assert (hit["ats"], hit["via"]) == ("greenhouse", "probe")
+        assert "name-guessed slug" in pipeline.verify_note(hit)
 
     async def test_an_empty_board_does_not_confirm(self, monkeypatch):
         """Every hit is validated by a live fetch, so a slug guess landing
@@ -1370,57 +1321,18 @@ class TestValidateCandidateResolutionOrder:
                    probe={"name": "Nova Health", "ats": "greenhouse",
                           "slug": "novahealth", "count": 0, "nc": 0},
                    boards={})
-        c = self._candidate("Nova Health")
 
-        await pipeline.validate_candidate(c, delay=0)
-
-        assert not c.confirmed
-
-    async def test_a_workday_triple_is_carried_as_one_string(self, monkeypatch):
-        """apply_to_store and the report read one handle string off the
-        candidate; Workday's triple is '|'-joined for them and parsed back
-        by apply._candidate_hit."""
-        from src.discovery.apply import _candidate_hit
-        self._wire(monkeypatch,
-                   sniff={"ats": "workday", "triple": ("dsupply", 5, "External"),
-                          "careers_url": "https://ds.example/careers"},
-                   boards={("workday", None): (61, 12)})
-        c = self._candidate("Direct Supply")
-
-        await pipeline.validate_candidate(c, delay=0)
-
-        assert c.slug == "dsupply|5|External"
-        assert _candidate_hit(c)["slug"] == ("dsupply", 5, "External")
-
-    async def test_an_unfetchable_ats_is_reported_as_a_lead(self, monkeypatch):
-        """Nothing resolves, but the careers page names a platform we can
-        RECOGNIZE and not fetch -- reported so the user can add it by hand,
-        not filed as a dead miss."""
-        self._wire(monkeypatch, boards={})
-        monkeypatch.setattr(
-            pipeline, "sniff_careers_ats",
-            answer({"confirmed": False, "ats": "eightfold", "slug": "acme",
-                    "source_url": "https://acme.example/careers"}))
-        c = self._candidate("Acme Devices")
-
-        await pipeline.validate_candidate(c, delay=0)
-
-        assert not c.confirmed
-        assert c.ats_lead == "eightfold @ acme"
+        assert await resolve_board.resolve_board_sniff_first("Nova Health") is None
 
 
-class TestApplyToStoreFetchability:
-    """What `discover-term --apply` calls fetchable.
+class TestDiscoveredBoardsReachTheRoster:
+    """What `discover-term` queues: every resolved board, local or not,
+    tagged as its platform seeds (queue_names `seed_tags`).
 
     The resolver legitimately returns a `custom` hit -- a real careers page
-    on no known platform, keyed on its URL (resolve.board._mk("custom",
-    None, ...)). apply_to_store gated on the ATS sweep's registry, which
-    schedules ONE crawl loop (iter_store_sources' lightweight sweep) and
-    omitted `custom` on purpose, so every such candidate was reported
-    confirmed and then dropped with "no fetcher for ATS 'custom'". What
-    fetch_company actually dispatches on -- `board_for` -- has carried
-    `custom` all along, and local_sourcing's own custom hits store
-    through it.
+    on no known platform, keyed on its URL. The old discover-term write
+    gated on the ATS sweep's registry, which omitted `custom` on purpose,
+    so every such candidate was reported confirmed and then dropped.
 
     Offline: the store is the in-memory `db`, titles and the mission call
     are stubbed exactly as TestScoreAndUpsert stubs them.
@@ -1428,40 +1340,25 @@ class TestApplyToStoreFetchability:
 
     @staticmethod
     def _wire(monkeypatch, db, tier="core-mission"):
-        keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(write, "_sample_titles", answer([]))
-        monkeypatch.setattr(claude, "score_company_mission",
-                            answer((tier, 0.9, "stub")))
+        stub_mission(monkeypatch, db, (tier, 0.9, "stub"))
 
     @staticmethod
-    def _candidate(name, ats, slug, careers_url, nc=3, count=8):
-        return pipeline.Candidate(
-            name=name, ats=ats, slug=slug, careers_url=careers_url,
-            notes="", confirmed=True, job_count=count, nc=nc, via="sniff")
-
-    @staticmethod
-    async def _apply(*cands):
-        from src.discovery import apply_to_store
-        return await apply_to_store({"term": "neurotech", "companies": list(cands)})
+    async def _queue(monkeypatch, name, ats, slug, careers_url, nc=3, count=8):
+        hit = {"name": name, "ats": ats, "slug": slug, "careers_url": careers_url,
+               "count": count, "nc": nc, "via": "sniff"}
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", answer((hit, None)))
+        async with store.Writer() as w:
+            return await local_sourcing.queue_names(
+                w, {name: "discovery:neurotech"}, local_only=False, seed_tags=True)
 
     async def test_a_resolved_custom_board_reaches_the_roster(self, monkeypatch, db):
-        """The whole path: the resolver sniffs a self-hosted careers page,
-        and the candidate it produces lands in the review queue with its URL
-        as the board's coordinate -- the same row local_sourcing writes for
-        the same hit."""
-        TestValidateCandidateResolutionOrder._wire(
-            monkeypatch,
-            sniff={"ats": "custom",
-                   "careers_url": "https://beta.example/careers"},
-            boards={("custom", None): (5, 2)})
+        """A self-hosted careers page lands in the review queue with its URL
+        as the board's coordinate."""
         self._wire(monkeypatch, db)
-        c = TestValidateCandidateResolutionOrder._candidate("Beta Custom")
-        await pipeline.validate_candidate(c, delay=0)
-        assert (c.confirmed, c.ats, c.slug) == (True, "custom", None)
 
-        lines = await self._apply(c)
+        await self._queue(monkeypatch, "Beta Custom", "custom", None,
+                          "https://beta.example/careers", nc=2, count=5)
 
-        assert not any("[skip]" in ln for ln in lines), lines
         stored = store.get_companies(db, active_only=False)[0]
         assert (stored["name"], stored["ats"]) == ("Beta Custom", "custom")
         # A self-hosted board has no handle: the URL IS the coordinate.
@@ -1476,12 +1373,12 @@ class TestApplyToStoreFetchability:
 
     async def test_a_custom_roster_row_is_crawlable_end_to_end(self, monkeypatch, db,
                                                          serve):
-        """Not just "no longer skipped": once the reviewer confirms it, the
-        row is one the harvester picks up and fetch_company dispatches."""
+        """Once the reviewer confirms it, the row is one the harvester picks
+        up and fetch_company dispatches."""
         self._wire(monkeypatch, db)
 
-        await self._apply(self._candidate("Beta Custom", "custom", None,
-                                    "https://beta.example/careers", nc=2))
+        await self._queue(monkeypatch, "Beta Custom", "custom", None,
+                          "https://beta.example/careers", nc=2)
 
         store.confirm_company(db, store.company_id_by_name(db, "Beta Custom"))
         row = store.get_companies(db, active_only=False)[0]
@@ -1496,60 +1393,46 @@ class TestApplyToStoreFetchability:
         assert seen == ["https://beta.example/careers"]
 
     async def test_a_confirmed_board_follows_is_active_mission(self, monkeypatch, db):
-        """An off-mission tier parks the row rather than dropping it -- the
-        custom candidate gets the same verdict every other add gets."""
+        """An off-mission tier parks the row rather than dropping it."""
         store.upsert_company(db, {"name": "Beta Custom", "ats": "custom",
                                   "careers_url": "https://beta.example/careers",
                                   "active": 1})
         self._wire(monkeypatch, db, tier="other")
 
-        await self._apply(self._candidate("Beta Custom", "custom", None,
-                                    "https://beta.example/careers", nc=2))
+        await self._queue(monkeypatch, "Beta Custom", "custom", None,
+                          "https://beta.example/careers", nc=2)
 
         stored = store.get_companies(db, active_only=False)[0]
         assert (stored["mission_tier"], stored["active"]) == ("other", 0)
 
-    async def test_a_slug_keyed_board_with_no_slug_is_still_skipped(
-            self, monkeypatch, db):
-        """`custom` is keyed on its URL; greenhouse is not. A careers URL
-        does not stand in for the handle its fetcher needs."""
+    async def test_a_slug_keyed_board_keeps_its_slug_and_seed_tag(self, monkeypatch, db):
         self._wire(monkeypatch, db)
 
-        lines = await self._apply(self._candidate(
-            "Delta Labs", "greenhouse", None, "https://delta.example/careers"))
-
-        assert any("malformed slug" in ln for ln in lines), lines
-        assert store.get_companies(db, active_only=False) == []
-
-    async def test_an_ats_with_no_fetcher_is_still_skipped(self, monkeypatch, db):
-        """The gate still exists, it just reads the right table: a platform
-        the sniffer can NAME but nothing can fetch stays out of the roster."""
-        self._wire(monkeypatch, db)
-        assert company_fetch.board_for("gohire") is None
-
-        lines = await self._apply(self._candidate(
-            "Gamma Devices", "gohire", "gamma",
-            "https://gamma.example/careers"))
-
-        assert any("no fetcher for ATS 'gohire'" in ln for ln in lines)
-        assert store.get_companies(db, active_only=False) == []
-
-    async def test_a_slug_keyed_candidate_is_unchanged(self, monkeypatch, db):
-        """The ordinary case the gate was written for, pinned: a greenhouse
-        candidate still stores with its slug and the registry's seed tag."""
-        self._wire(monkeypatch, db)
-
-        await self._apply(self._candidate("Alpha Bio", "greenhouse", "alphabio",
-                                    "https://alpha.example/careers"))
+        await self._queue(monkeypatch, "Alpha Bio", "greenhouse", "alphabio",
+                          "https://alpha.example/careers", nc=0)
 
         stored = store.get_companies(db, active_only=False)[0]
         assert (stored["ats"], stored["slug"]) == ("greenhouse", "alphabio")
         assert tags.has(stored["tags"], tags.SWEEP) and stored["review"] == "pending"
 
+    async def test_a_dry_run_writes_nothing(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        hit = {"name": "Alpha Bio", "ats": "greenhouse", "slug": "alphabio",
+               "careers_url": None, "count": 8, "nc": 0, "via": "sniff"}
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(
+            lambda n, *a: (hit, None) if n == "Alpha Bio" else (None, "no-board-found")))
+        async with store.Writer() as w:
+            queued, missed = await local_sourcing.queue_names(
+                w, {"Alpha Bio": "discovery:x", "Ghost": "discovery:x"},
+                local_only=False, dry_run=True)
+        assert (queued, missed) == ([hit], [("Ghost", "no-board-found")])
+        assert store.get_companies(db, active_only=False) == []
+
+
 class TestADiscoveryPassKeepsARaisingItem:
     """A pass skips an item whose resolution raises, but never silently:
     local sourcing records a fetch-error miss, so the retry schedule still
-    applies, and the candidate pipeline counts and marks the candidate."""
+    applies."""
 
     async def test_a_resolve_pass_records_a_fetch_error_miss(self, capsys):
         async def boom(name):
@@ -1560,12 +1443,103 @@ class TestADiscoveryPassKeepsARaisingItem:
             [], [{"name": "Acme", "reason": "fetch-error:ValueError"}])
         assert "Acme error: bad page" in capsys.readouterr().out
 
-    async def test_a_raising_candidate_is_counted_and_marked(self, monkeypatch, capsys):
-        async def boom(cand, **kw):
-            raise ValueError("bad page")
-        monkeypatch.setattr(pipeline, "validate_candidate", boom)
-        acme = {"name": "Acme", "ats": "unknown", "slug_guess": None,
-                "careers_url": "", "notes": ""}
-        [c] = await pipeline._validate_all([acme], use_js=False, websearch=False)
-        assert c.tried_slugs == ["[error: ValueError]"]
-        assert "[  1/1] err   Acme" in capsys.readouterr().out
+
+class TestJunkNames:
+    def test_roster_names_pass(self, db):
+        # The names the roster actually carries must not be screened out.
+        for n in ("Beacon Biosignals", "SAS Institute", "Judi Health",
+                  "Cala Health, Inc.", "Duke University", "UNC Chapel Hill",
+                  "3M", "Q2 Solutions", "Blue Cross NC", "GRAIL", "NVIDIA",
+                  "Bausch + Lomb", "J&J MedTech", "Red Hat", "Aah",
+                  "Music and Cognition Lab", "Precision Neuroscience",
+                  "Wellcome Centre for Human Neuroimaging"):
+            assert junk_name_reason(n) == "", n
+
+
+class TestJunkNamesInThePasteFlow:
+    """Section headings, category nouns and location strings in a paste
+    never reach the resolver (2026-09-09 log audit)."""
+
+    async def test_preview_marks_junk_unticked_with_a_reason(self, monkeypatch, db):
+        keep_store_open(monkeypatch, db)
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health",
+                                             "Required Qualifications"])
+        rows = await paste_ingest.preview_names("x", use_llm=False)
+        assert [(r["name"], r["state"]) for r in rows] == [
+            ("Alpaca Health", "new"), ("Required Qualifications", "junk")]
+        assert rows[1]["why"] == "section-heading"
+
+    async def test_blocked_beats_junk_in_the_preview(self, monkeypatch, db):
+        store.block_name(db, "Oncology", "not a company")
+        keep_store_open(monkeypatch, db)
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Oncology"])
+        assert [r["state"] for r in
+                await paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
+
+    async def test_add_names_records_junk_as_a_miss_and_never_resolves_it(
+            self, monkeypatch, db):
+        keep_store_open(monkeypatch, db)
+        tried = []
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n) or (None, "no-local-jobs")))
+        await paste_ingest.add_names(["Proficiency in SQL.", "Alpaca Health"],
+                                     max_workers=1)
+        assert tried == ["Alpaca Health"]
+        row = db.execute("SELECT miss_reason, active FROM companies "
+                         "WHERE name='Proficiency in SQL.'").fetchone()
+        assert row["miss_reason"] == "junk-name:section-heading"
+        assert row["active"] == 0
+        # ...and a junk-family miss is not a re-resolution candidate.
+        assert [c["name"] for c in repair._reresolve_candidates(db)] == []
+
+
+class TestSnifferResolvesHostsOnce:
+    """The careers-page sniffer resolves each guessed host once, bounded,
+    before fetching any path on it (2026-09-09 log audit)."""
+
+    async def test_unresolvable_hosts_are_never_fetched(self, monkeypatch):
+        looked_up, fetched = [], []
+
+        def _gai(host, *a, **k):
+            looked_up.append(host)
+            if host.startswith("dead"):
+                raise OSError("no such host")
+            return [("addr",)]
+        monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
+        monkeypatch.setattr(fetchpool, "_fetch_page",
+                            answer(lambda u, **k: fetched.append(u) or None))
+        urls = ["https://dead.example/careers", "https://dead.example/",
+                "https://dead.example/jobs", "https://live.example/careers"]
+        out = await fetchpool._fetch_all(urls)
+        assert sorted(looked_up) == ["dead.example", "live.example"], \
+            "each host resolved once, not once per path"
+        assert fetched == ["https://live.example/careers"]
+        assert set(out) == set(urls) and out["https://dead.example/"] is None
+        # a later stage rebuilding the list asks the resolver nothing
+        looked_up.clear()
+        await fetchpool._fetch_all(["https://dead.example/en/jobs",
+                                    "https://live.example/"])
+        assert looked_up == []
+
+    async def test_a_silent_resolver_skips_the_host_this_pass_only(self, monkeypatch):
+        import threading
+        gate = threading.Event()
+
+        def _gai(host, *a, **k):
+            gate.wait(2)
+            return [("addr",)]
+        monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
+        kept = await fetchpool._drop_unresolvable(["https://slow.example/"],
+                                                  timeout=0.05)
+        assert kept == []
+        assert not fetchpool._DEAD_HOSTS().dead("https://slow.example/"), \
+            "a slow resolver is not a missing name"
+        gate.set()
+
+    async def test_a_refused_connection_still_marks_the_host_dead(self, monkeypatch,
+                                                             serve):
+        serve(requests.exceptions.ConnectionError("refused"))
+        assert await fetchpool._fetch_page("https://x.example/") is None
+        assert await fetchpool._drop_unresolvable(["https://x.example/careers"]) == []

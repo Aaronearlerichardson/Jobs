@@ -1,4 +1,11 @@
-"""The `peopleadmin` board spec."""
+"""The `peopleadmin` board spec.
+
+Notes:
+    Only hosted tenants carry a signature; a university serving the
+    software from its own hostname is added by hand. A tenant is one
+    campus, so a posting naming no place is on it. No detail: a posting's
+    page is under the host's robots disallow.
+"""
 
 from __future__ import annotations
 

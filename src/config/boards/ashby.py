@@ -1,4 +1,9 @@
-"""The `ashby` board spec."""
+"""The `ashby` board spec.
+
+Notes:
+    The API answers a slug in any case alike, so the handle folds
+    (2026-10-08). No per-posting endpoint: closure is board membership.
+"""
 
 from __future__ import annotations
 
@@ -23,8 +28,7 @@ SPEC: dict[str, JSON] = {
             "title": "title",
             "url": {"first": ["jobUrl", {"format": "https://jobs.ashbyhq.com/{slug}/{id}"}]},
             "location": {"merge": {"primary": "location",
-                                   "extras": "secondaryLocations[].location"},
-                         "default": "Unknown"},
+                                   "extras": "secondaryLocations[].location"}},
             "description": "descriptionPlain",
             "posted_at": {"first": ["publishedDate", "publishedAt"]},
             "remote_hint": {"const": "ashby:isRemote",

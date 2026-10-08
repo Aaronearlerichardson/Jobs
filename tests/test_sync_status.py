@@ -32,10 +32,9 @@ class TestSyncStatusReportsSkippedBoards:
                             answer(lambda sources, *a, **k: [(*answers[name], None)[:3]
                                                              for name, _ats, _fn
                                                              in sources]))
-        monkeypatch.setattr(ops, "_ranked", lambda *a, **k: [])
         monkeypatch.setattr(
             ops, "rewrite_digest",
-            lambda conn, t, top_n=15, heading="": print(heading) or [])
+            lambda conn, t, top_n=15, heading="": print(heading(0)) or [])
 
     async def _run(self, tmp_path, monkeypatch, capsys, local_track):
         dbp = tmp_path / "t.db"

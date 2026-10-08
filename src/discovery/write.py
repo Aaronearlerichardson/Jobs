@@ -14,6 +14,7 @@ from src import tags as company_tags
 from src.ats import coords
 from src.ats.board import company as company_fetch
 from src.claude import api as claude_api
+from src.digest.render import score_text
 from src.match.names import name_key
 from src.rows import BoardCoords, BoardHit, CompanyIn, CompanyRow
 from src.store.companies import BoardPlan
@@ -263,7 +264,6 @@ def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
 
 def _print_scored(name: str, row: CompanyRow | CompanyIn, flag: str) -> None:
     """One populate_companies line: `row`'s mission verdict and `flag`."""
-    score = row.get("mission_score")
-    ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-    print(f"    {name:30} {str(row.get('mission_tier')):20} {ss}  [{flag}]  "
+    print(f"    {name:30} {str(row.get('mission_tier')):20} "
+          f"{score_text(row.get('mission_score'))}  [{flag}]  "
           f"({row.get('mission_reason')})")

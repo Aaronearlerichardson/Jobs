@@ -530,6 +530,9 @@ name_blocklist = []
 # after probe+sniff leave them unboarded (DDG rate-limits, so this is capped
 # rather than run over the whole gather). Omit for the built-in default (20).
 # websearch_cap = 20
+# Days a name that missed (no board found) is skipped by every discovery
+# rerun before it is tried again; 0 retries every miss every run.
+# miss_retry_days = 14
 # How many company names the LLM brainstorm source proposes per discovery
 # run (each is verified downstream); 0 turns it off.
 # brainstorm_names = 50

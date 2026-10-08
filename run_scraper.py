@@ -9,8 +9,7 @@
     python run_scraper.py --where           # where are my profile and data?
 
 Tracks come from your profile's [tracks.*] tables — the ids are whatever you
-named them, and a track's jobs.track value works too. The old crawler.py
-forwards here, so scheduled tasks keep working.
+named them, and a track's jobs.track value works too.
 
 Most flags are the CLI spelling of an operation in src/dispatch/registry.py,
 the same table the web UI's buttons run from, so a flag and a button pass
@@ -157,7 +156,6 @@ _COMMANDS = [
         "limit": a.limit, "stale_days": a.stale_days})),
     ("backfill_board_descriptions", _op("backfill-descriptions", lambda a: {
         "workers": a.workers, "limit": a.limit})),
-    ("backfill_axes", _op("backfill-axes", lambda a: {})),
     ("triage", _op("triage", lambda a: {
         "limit": a.limit, "workers": a.workers, "score_cap": a.score_cap,
         "requeue": a.requeue, "requeue_apply": a.requeue_apply})),
@@ -239,8 +237,6 @@ def main(argv: list[str] | None = None) -> None:
                     help="With --rescore: only rows with a real JD body")
     ap.add_argument("--backfill-board-descriptions", action="store_true",
                     help="Fetch missing JD text via each company's own board")
-    ap.add_argument("--backfill-axes", action="store_true",
-                    help="Populate per-axis fit columns from fit_reason (offline)")
     ap.add_argument("--rekey-jobs", metavar="ATS",
                     help="Report the stored jobs under ATS companies whose id "
                          "the board spec now spells differently; writes "

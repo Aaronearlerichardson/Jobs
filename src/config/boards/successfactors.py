@@ -1,4 +1,12 @@
-"""The `successfactors` board spec."""
+"""The `successfactors` board spec.
+
+Notes:
+    A signature names the vendor's asset host; the board is the site that
+    carried it. The vendor's own `career?company=` pages are excluded
+    (`off_page`, 2026-10-07): robots.txt disallows every path. Tenants
+    serve 10, 25 or 100 rows a page, and some wrap back to earlier rows
+    instead of running dry.
+"""
 
 from __future__ import annotations
 
@@ -55,7 +63,6 @@ SPEC: dict[str, JSON] = {
                  "when": {"contains": ["_path", "$_lead"]}},
                 {"of": {"first": ["cell", {"of": "context", "transform": "snippet"}]},
                  "transform": "cut_date_tail"}]},
-            "department": None,
         },
     },
 }

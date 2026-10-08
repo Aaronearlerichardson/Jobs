@@ -5,8 +5,8 @@ The LLM that suggests employers for a discovery term has blind spots — it
 reliably misses the mid-size employers that anchor a specific region or
 niche, however obvious they are to someone who lives there. Seeds are your
 override: names you KNOW belong in the roster, resolved exactly like
-suggested ones (validate_candidate hands the NAME to the shared resolver,
-which finds the ATS itself), so you never need to know a company's ATS to
+suggested ones (the shared resolver takes the NAME and finds the ATS
+itself), so you never need to know a company's ATS to
 seed it.
 
 Everything here is configuration, not code — it lives in your profile:
@@ -30,7 +30,6 @@ from __future__ import annotations
 import re
 from src import config
 
-SEED_COMPANIES: list[dict[str, str]] = config.DISCOVERY_SEED_COMPANIES
 SEED_TRIGGERS: tuple[str, ...] = tuple(
     t.strip().lower() for t in config.DISCOVERY_SEED_TRIGGERS if t.strip()
 )
@@ -54,23 +53,7 @@ def _matches_term(term: str) -> bool:
     return False
 
 
-def seed_candidates_for(term: str) -> list[dict[str, str | None]]:
-    """
-    Return raw candidate dicts to merge with the LLM's discovery output, or
-    [] if `term` doesn't match a configured trigger.
-
-    Dicts have the same shape as the LLM payload entries, so they flow
-    through candidate_from_dict / validate_candidate unchanged.
-    """
-    if not SEED_COMPANIES or not _matches_term(term):
-        return []
-    return [
-        {
-            "name":        s["name"],
-            "ats":         "unknown",     # the resolver finds the ATS
-            "slug_guess":  None,
-            "careers_url": "",
-            "notes":       f"[seed] {s['notes']}".strip(),
-        }
-        for s in SEED_COMPANIES
-    ]
+def seed_names_for(term: str) -> list[str]:
+    """The seed names to merge with the LLM's discovery output, or [] if
+    `term` doesn't match a configured trigger."""
+    return list(config.DISCOVERY_SEED_NAMES) if _matches_term(term) else []

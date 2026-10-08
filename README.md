@@ -176,7 +176,6 @@ The store's `companies` table **is** the roster. Ways to add to it:
 | `python discover.py --resolve-leads` | Resolve company leads left by page capture: slug probe → careers sniff → Workday probe → web-search fallback. Idempotent. |
 | `python discover.py --add-board "NVIDIA" URL` | You already know the board: paste its ATS or careers URL. Coordinates extracted, locality-verified, queued for review. |
 | `python discover.py --score-missions` | Tier any company with a board but no mission yet — a backfill for rows imported with `--import-companies` or left unscored by a failed pass. `--rescore-missions` re-scores everything. |
-| `python discover.py --from-bciwiki` | Bulk-import a public industry directory (bciwiki.org's ~700 brain-computer-interface companies). A worked example of the pattern; only useful if that's your field. |
 
 Every one of those paths writes **review candidates**, not roster members:
 an inactive `companies` row with `review` pending, which no crawl fetches.
@@ -672,9 +671,7 @@ your interactive shell). Add `[tracks.local] notify = true` and
 `pip install winotify` for a desktop toast linking to the digest file.
 
 (Or the Task Scheduler GUI: daily trigger → program `python`, arguments
-`run_scraper.py --track ... --send`, "Start in" = the repo folder. Tasks still
-pointing at `crawler.py` keep working — it's a shim that forwards to
-`run_scraper.py`. Note that `run_scraper.py` with NO flags refreshes EVERY
+`run_scraper.py --track ... --send`, "Start in" = the repo folder. Note that `run_scraper.py` with NO flags refreshes EVERY
 configured track.)
 
 ### The background harvester
@@ -935,7 +932,7 @@ identically to a dead one.
 
 | Module | Role |
 |---|---|
-| `run_scraper.py` / `webapp.py` | entry points: daily refresh + maintenance CLI, web UI launcher (`crawler.py` = deprecation shim) |
+| `run_scraper.py` / `webapp.py` | entry points: daily refresh + maintenance CLI, web UI launcher |
 | `discover.py` / `capture.py` | entry points: roster growth, manual page capture |
 | `config/` / `profile.toml` | plumbing (secrets, paths, profile load, track tables, policy, sources; `import config` re-exports it all) vs. all search criteria |
 | `src/config/bootstrap.py` | first-run setup: seeds your profile, reports where data lives |

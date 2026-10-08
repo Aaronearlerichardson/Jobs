@@ -19,6 +19,7 @@ import src.match.locality as locality
 import src.store as store
 from src.rows import (BoardCoords, CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn, JobRow,
                       RankedJob)
+from src.store.employers import write_mission
 from src.store.migrate import MIGRATIONS_DIR, _statements, migrate
 from src.claude import fit as claude_fit
 from src.claude.fit import disposition_examples_block
@@ -108,6 +109,7 @@ class TestSchema:
                      "DROP TRIGGER companies_employer_renamed", "DROP VIEW board_employers",
                      "DROP VIEW live_jobs", "DROP INDEX ix_companies_employer",
                      "ALTER TABLE companies DROP COLUMN employer_id", "DROP TABLE employers",
+                     "DROP INDEX ix_jobs_live_stats",
                      "DROP INDEX ix_jobs_dup", "ALTER TABLE jobs DROP COLUMN dup_of",
                      "PRAGMA user_version = 2"):
             conn.execute(stmt)
@@ -1750,7 +1752,8 @@ class TestPlanBoardVerdict:
 
     def test_a_replaced_board_with_an_override_inherits_the_employers_verdict(self, db):
         a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a"})
-        store.set_mission(db, a, "core", 0.9, "the lab")
+        write_mission(db, a, mission_tier="core", mission_score=0.9, mission_reason="the lab")
+        db.commit()
         b, _ = store.add_board(db, {"name": "Acme", "ats": "workday",
                                     "handle": "acme|5|ext"})
         store.set_board_mission(db, b, "other", 0.1, "the hospital division")

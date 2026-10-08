@@ -1,11 +1,16 @@
-"""The `taleo` board spec."""
+"""The `taleo` board spec.
+
+Taleo Business Edition: an org on a site path, career center the (org, cws) pair.
+
+Notes:
+    Enterprise Taleo stays a lead. Rows 10 a page; later pages read the
+    session the first opens.
+"""
 
 from __future__ import annotations
 
 from src.rows import JSON
 
-# Taleo Business Edition ("tbe"): an org on a site path, its career
-# center the (org, cws) pair. Enterprise Taleo stays a lead below.
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "tbe.taleo.net",
                 "re": [r"(?i)([a-z0-9-]+\.tbe\.taleo\.net/[a-z0-9]+)/ats/careers/v2/"
@@ -31,7 +36,7 @@ SPEC: dict[str, JSON] = {
             "id": {"format": "taleo_{org|lower}_{cws}_{_rid}", "when": {"truthy": "_rid"}},
             "title": "text",
             "url": "url",
-            "location": {"of": "place", "transform": "one_line", "default": "Unknown"},
+            "location": {"of": "place", "transform": "one_line"},
             "department": "dept",
         },
     },

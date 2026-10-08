@@ -1,4 +1,9 @@
-"""The `workable` board spec."""
+"""The `workable` board spec.
+
+Notes:
+    Not in the lightweight sweep (it seeds LOCAL). The tenant-path posting
+    URL names both coordinates; the listing's short link names no account.
+"""
 
 from __future__ import annotations
 
@@ -25,8 +30,7 @@ SPEC: dict[str, JSON] = {
                            "extras": {"each": "locations",
                                       "do": {"join": ["city", "region", "country"], "sep": ", "},
                                       "skip": {"truthy": "hidden"}}}},
-                {"const": "Remote", "when": {"truthy": "telecommuting"}}],
-                "default": "Unknown"},
+                {"const": "Remote", "when": {"truthy": "telecommuting"}}]},
             "posted_at": {"first": ["published_on", "created_at"]},
             "remote_hint": {"const": "workable:telecommuting",
                             "when": {"eq": ["telecommuting", True]}},

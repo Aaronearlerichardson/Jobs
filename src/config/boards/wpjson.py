@@ -1,4 +1,10 @@
-"""The `wpjson` board spec."""
+"""The `wpjson` board spec.
+
+Notes:
+    A WordPress theme's careers route, keyed on any page of the site. A
+    posting's URL is its outbound apply page on the applicant portal's
+    host, so there is no job_ref.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +31,6 @@ SPEC: dict[str, JSON] = {
                                   {"of": "location.state", "transform": "one_line"}],
                          "sep": ", ", "default": "See posting"},
             "posted_at": "post_date",
-            "department": None,
         },
     },
     # A posting's URL is its outbound apply page on the applicant

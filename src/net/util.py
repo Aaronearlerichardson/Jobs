@@ -209,7 +209,8 @@ def parse_markup(markup: str | bytes | None, xml: bool = False, url: str = "") -
     XML when `xml` (a feed: HTML reads <link> as a void tag and loses its
     URL). The one parser choice in src/.
 
-    Blank markup is an empty document (a childless <html>). HTML lxml
+    Blank markup is an empty document (a childless <html>). Content after
+    a doctyped page's </html> joins the root. HTML lxml
     cannot parse, or gives up on partway (a fatal error), is parsed by
     html5lib instead; XML lxml cannot parse is an empty document. Either is
     logged with `url`'s host and the reason.
@@ -221,6 +222,8 @@ def parse_markup(markup: str | bytes | None, xml: bool = False, url: str = "") -
     >>> len(parse_markup(b'<b class="x\\x00"></b><a href="/2">').findall(".//a")), len(parse_markup(
     ...     b"<svg\\x00><title>t</title></svg>").findall(".//title"))
     (1, 1)
+    >>> parse_markup("<!DOCTYPE html><html><body></body></html><input id=jobs>").find(".//input").get("id")
+    'jobs'
 
     Notes:
         A str is parsed as its UTF-8 bytes: lxml refuses a str carrying an
@@ -243,6 +246,8 @@ def parse_markup(markup: str | bytes | None, xml: bool = False, url: str = "") -
     else:
         fatal = None if xml else parser.error_log.filter_from_fatals()
         if root is not None and not fatal:
+            for sib in list(root.itersiblings(etree.Element)):
+                root.extend(sib)
             return root
         reason = f"lxml gave up: {fatal[0].message.strip()}" if fatal else "lxml found no document"
     host = host_of(url) or "?"
@@ -498,11 +503,15 @@ def norm_posted_date(value: object) -> str | None:
         "Posted 30+ Days Ago", "Posted Today"). "30+" parses as 30, so
         treat old Workday dates as a floor, not an exact day.
       * spelled dates — Amazon's "August 20, 2026" and "July  8, 2026"
+      * US numeric dates anywhere in the text — iCIMS's "3 hours ago
+        (10/8/2026 2:04 PM)"
 
     >>> norm_posted_date("August 20, 2026"), norm_posted_date("Jul 8, 2026")
     ('2026-08-20', '2026-07-08')
     >>> norm_posted_date("Smarch 3, 2026") is None
     True
+    >>> norm_posted_date("3 hours ago (10/8/2026 2:04 PM)"), norm_posted_date("13/8/2026") is None
+    ('2026-10-08', True)
     """
     if value is None:
         return None
@@ -520,6 +529,9 @@ def norm_posted_date(value: object) -> str | None:
     m = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
     if m:
         return m.group(1)
+    m = re.search(r"\b(1[0-2]|0?[1-9])/(3[01]|[12]\d|0?[1-9])/(\d{4})\b", text)
+    if m:
+        return f"{m[3]}-{int(m[1]):02d}-{int(m[2]):02d}"
     low = text.lower()
     if "today" in low or "just posted" in low:
         return datetime.now().strftime("%Y-%m-%d")

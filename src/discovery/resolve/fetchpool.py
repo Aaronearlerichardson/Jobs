@@ -170,8 +170,8 @@ _DEAD_HOSTS = runstate.per_run(functools.partial(HostBreaker, ttl=_DEAD_HOST_TTL
 # sniff, diagnosis) each rebuild the candidate list and fetch it again, so
 # a LIVE host answered the same GET up to seven times per name (sgs.com,
 # intertek.com, and a 403ing infosys.com in the 2026-09-01 add-names runs).
-# Same URL, same run, same answer: hand back the first one. Bounded (see
-# _memo_put) so a long discovery run can't hoard page bodies.
+# Same URL, same run, same answer: hand back the first one. Unbounded:
+# entries expire after _DEAD_HOST_TTL.
 _PAGE_MEMO: Callable[[], dict[str, tuple[float, Page | None]]] = \
     runstate.per_run(dict)
 
@@ -185,17 +185,6 @@ def _memo_get(url: str) -> tuple[bool, Page | None]:
         del memo[url]
         return False, None
     return True, hit[1]
-
-
-def _memo_put(url: str, resp: Page | None) -> None:
-    """Remember `url`'s outcome: 512 URLs at most, the oldest dropped
-    first, and no body over 2 MB."""
-    if resp is not None and len(resp.content or b"") > 2 * 1024 * 1024:
-        return
-    memo = _PAGE_MEMO()
-    if len(memo) >= 512:
-        del memo[min(memo, key=lambda u: memo[u][0])]
-    memo[url] = (time.time(), resp)
 
 
 async def _fetch_page(url: str,
@@ -226,7 +215,7 @@ async def _fetch_page(url: str,
     except FETCH_ERRORS as e:
         _log.debug("fetch %s: %s", url, type(e).__name__)
         return None
-    _memo_put(url, resp)
+    _PAGE_MEMO()[url] = (time.time(), resp)
     return resp
 
 

@@ -1,4 +1,12 @@
-"""The `workday` board spec."""
+"""The `workday` board spec.
+
+Notes:
+    A (tenant, pod, site) triple no name guess reaches; a parent's tenant
+    can list its subsidiaries' postings. Boards run to thousands of rows,
+    so it stays out of the lightweight sweep and is pulled scoped to the
+    locality. A pulled posting can also answer 403 "S22"; its page then
+    renders no posting (60 listed live, 63 pulled, 2026-09-28).
+"""
 
 from __future__ import annotations
 
@@ -64,8 +72,6 @@ SPEC: dict[str, JSON] = {
                     "else": {"format": "https://{tenant}.wd{pod}.myworkdayjobs.com"}},
             "location": "locationsText",
             "posted_at": {"first": ["postedOnDate", "postedOn"]},
-            # A listing entry carries six keys, none a department (2026-09-23).
-            "department": None,
         },
     },
     # A posting's path names one of its sites (`free`).

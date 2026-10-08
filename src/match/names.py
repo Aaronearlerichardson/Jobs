@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
+from src.config.tables import JUNK_NAME_WORDS
+
 # Corporate suffixes stripped when guessing a domain or slug from a name: the
 # domain rarely carries them (redhat.com, not redhatinc.com), and ATS slugs
 # are far more often the head word than the full legal name. Field-flavoured
@@ -158,6 +160,30 @@ def strip_suffixes(name: str | None) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+#: junk_name_reason's word lists, as sets.
+_JUNK_WORDS = {k: frozenset(v) for k, v in JUNK_NAME_WORDS.items()}
+
+#: (pattern, reason) junk_name_reason tries first, in order.
+_JUNK_PATTERNS = tuple((re.compile(p, flags), reason) for p, flags, reason in (
+    # A count glued to what it counts, or to a match grade: LinkedIn chrome
+    # ("1 benefit", "8 benefits", "25Low Match", "3 days ago") that the
+    # 2026-09-22 reresolve spent full resolve cycles on. "Day" alone is not
+    # chrome ("3 Day Blinds"), so only "days ago" counts.
+    (r"^\s*\d+\+?\s*(?:results?|jobs?|benefits?|match(?:es)?|days?\s+ago|"
+     r"(?:low|medium|high|good|strong)\s+match)\b", re.I, "listing-chrome"),
+    # "2nd", "12": a stray list index or ordinal. Digits WITH letters are
+    # names ("3M", "23andMe", "Q2"), so only a bare number is rejected.
+    (r"^\d+(?:st|nd|rd|th)?$", re.I, "number-only"),
+    # A person's name with credential suffixes (", MSHR, PHR"): a
+    # recruiter's byline off a pasted posting. Two or more are required,
+    # since one is a legal form or a state ("Acme, LLC", "Durham, NC").
+    # Case-sensitive: credentials are capitals.
+    (r"(?:,\s*[A-Z]{2,5}){2,}\s*$", 0, "person-credentials"),
+    (r"\barea\b|\(on-?site|\(remote|\(hybrid|\bmetropolitan\b|\bcounty\b", re.I,
+     "location-string"),
+))
+
+
 def junk_name_reason(name: str | None) -> str:
     """Why `name` is not an employer, or '' when it may be one.
 
@@ -223,6 +249,16 @@ def junk_name_reason(name: str | None) -> str:
     >>> junk_name_reason("Luna Physical Therapy 1")
     'numbered-duplicate'
 
+    Pasted headings, a pronoun phrase or a modifier with a heading noun,
+    and a truncation marker:
+
+    >>> junk_name_reason("Who We Are"), junk_name_reason("Minimum Requirements")
+    ('heading-phrase', 'heading-phrase')
+    >>> junk_name_reason("... more")
+    'listing-chrome'
+    >>> junk_name_reason("Who Cares Labs"), junk_name_reason("Acme Requirements Inc")
+    ('', '')
+
     Too short, too long, or empty:
 
     >>> junk_name_reason("A")
@@ -253,84 +289,50 @@ def junk_name_reason(name: str | None) -> str:
     s = (name or "").strip()
     if not s:
         return "empty"
-    # A count glued to what it counts, or to a match grade: LinkedIn chrome
-    # ("1 benefit", "8 benefits", "25Low Match", "3 days ago") that the
-    # 2026-09-22 reresolve spent full resolve cycles on. "Day" alone is not
-    # chrome ("3 Day Blinds"), so only "days ago" counts.
-    if re.match(r"^\s*\d+\+?\s*(?:results?|jobs?|benefits?|match(?:es)?|days?\s+ago|"
-                r"(?:low|medium|high|good|strong)\s+match)\b", s, re.IGNORECASE):
-        return "listing-chrome"
-    # "2nd", "12": a stray list index or ordinal. Digits WITH letters are
-    # names ("3M", "23andMe", "Q2"), so only a bare number is rejected.
-    if re.match(r"^\d+(?:st|nd|rd|th)?$", s, re.IGNORECASE):
-        return "number-only"
-    # A person's name with credential suffixes (", MSHR, PHR"): a
-    # recruiter's byline off a pasted posting. Two or more are required,
-    # since one is a legal form or a state ("Acme, LLC", "Durham, NC").
-    if re.search(r"(?:,\s*[A-Z]{2,5}){2,}\s*$", s):
-        return "person-credentials"
-    if re.search(r"\barea\b|\(on-?site|\(remote|\(hybrid|\bmetropolitan\b|\bcounty\b",
-                 s, re.IGNORECASE):
-        return "location-string"
+    hit = next((reason for rx, reason in _JUNK_PATTERNS if rx.search(s)), "")
+    if hit:
+        return hit
     words = name_words(s)
     if not words or (len(s) < 2):
         return "too-short"
     if len(words) > 7:
-        return "too-long"
-    # Words that, alone, name a job-posting section rather than an employer.
-    section = {
-        "qualifications", "qualification", "requirements", "requirement",
-        "responsibilities", "responsibility", "proficiency", "proficient",
-        "experience", "skills", "skill", "benefits", "salary", "compensation",
-        "preferred", "required", "results", "result", "title", "summary",
-        "description", "overview", "about", "apply", "applicants", "duties",
-        "education", "degree", "years", "location", "remote", "hybrid",
-        "onsite", "on-site", "position", "positions", "role", "roles", "job",
-        "jobs", "career", "careers", "posted", "ago", "full-time", "part-time",
-    }
-    if s[-1] in ".:;,!?" and not re.search(
-            r"\b(?:inc|co|corp|ltd|llc|plc|sa|ag|gmbh|bv|nv|jr|sr)\.$", s, re.IGNORECASE):
+        return _heading_reason(s, words) or "too-long"
+    section = _JUNK_WORDS["section"]
+    legal = re.search(r"(\w+)\.$", s)
+    if s[-1] in ".:;,!?" and not (legal and legal.group(1).lower() in _JUNK_WORDS["legal_abbreviations"]):
         # A trailing period belongs to a legal abbreviation ("Cala Health,
         # Inc.") or to a sentence; any other end punctuation to a sentence.
         if s[-1] == "." and any(w in section for w in words):
             return "section-heading"
         return "sentence-fragment"
-    if all(w in section or w in {"in", "with", "and", "or", "of", "the", "a", "to"}
-           for w in words):
+    if all(w in section or w in _JUNK_WORDS["connectives"] for w in words):
         return "section-heading"
-    if words[0] in section and len(words) >= 2 and words[1] in (
-            section | {"in", "with", "of"}):
+    if words[0] in section and len(words) >= 2 and words[1] in (section | {"in", "with", "of"}):
         return "section-heading"
-    # Category nouns a name may consist of ENTIRELY without naming anyone:
-    # "Oncology", "Medical Devices", "Health Care Services".
-    if all(w in {
-            "oncology", "medical", "devices", "device", "health", "healthcare",
-            "care", "services", "service", "biotech", "biotechnology", "pharma",
-            "pharmaceutical", "pharmaceuticals", "software", "engineering",
-            "research", "clinical", "data", "analytics", "technology",
-            "technologies", "university", "hospital", "laboratory", "laboratories",
-            "science", "sciences", "life", "solutions", "consulting", "staffing",
-            "recruiting", "diagnostics", "therapeutics", "and", "of", "the",
-            "group", "team", "company", "companies", "industry", "industries",
-            } for w in words):
+    if all(w in _JUNK_WORDS["category"] for w in words):
         return "category-only"
-    # One common word alone: "New" resolved to an unrelated Greenhouse board
-    # "new" in both 2026-10-08 discover-local passes.
-    if len(words) == 1 and words[0] in {
-            "new", "next", "first", "best", "top", "great", "general", "global",
-            "national", "international", "american", "inc", "llc", "corp", "ltd"}:
+    if len(words) == 1 and words[0] in _JUNK_WORDS["common"]:
         return "common-word"
-    # A single generic word describing a LISTING's own disposition, never an
-    # employer's name: a scraped roster entry that kept only a status column
-    # ("Retired") reads exactly like this, the same one-word-is-the-whole-name
-    # shape as a category, kept apart so the reason names what it saw.
-    if all(w in {"retired", "archived", "inactive", "expired", "discontinued",
-                 "disabled", "deprecated", "closed"} for w in words):
+    if all(w in _JUNK_WORDS["status"] for w in words):
         return "status-only"
     m = re.match(r"^(.*\S)\s+\d{1,2}$", s)
     if m and len(words) >= 2 and not re.search(r"\d", m.group(1)) \
-            and m.group(1).split()[-1].lower() not in {"studio", "area", "channel", "route", "no", "number"}:
+            and m.group(1).split()[-1].lower() not in _JUNK_WORDS["numbered_names"]:
         return "numbered-duplicate"
+    return _heading_reason(s, words)
+
+
+def _heading_reason(s: str, words: list[str]) -> str:
+    """Why `s` (its `words`) reads as a pasted heading or chrome, or ''."""
+    if all(w in _JUNK_WORDS["function"] for w in words):
+        return "heading-phrase"
+    if (len(words) == 2 and words[0] in _JUNK_WORDS["heading_modifiers"]
+            and words[1] in _JUNK_WORDS["heading_nouns"]):
+        return "heading-phrase"
+    if re.match(r"\s*(?:\u2026|\.\.\.)", s):
+        return "listing-chrome"
+    if "\ufffd" in s:
+        return "garbled"
     return ""
 
 

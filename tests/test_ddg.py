@@ -71,15 +71,14 @@ def _fake_ddgs(script):
 @pytest.fixture
 def wired(monkeypatch, tmp_path):
     """No DNS override (the breaker is the test's run's), a throwaway
-    cache, and the fake HTTP module."""
-    ddg.reset_resolver()
+    cache, and the fake HTTP module, the override patching only it."""
+    monkeypatch.setattr(ddg, "_RESOLVER_OVERRIDE", False)
     hc = _FakeHttpClient()
     monkeypatch.setattr(ddg, "CACHE_DIR", tmp_path / "ddg")
     monkeypatch.setattr(ddg, "_http_client_module", lambda: hc)
     monkeypatch.setattr(ddg, "_ensure_ddgs_engines", lambda: None)
     monkeypatch.setattr(ddg.config, "SEARCH_DNS_FALLBACK", ("1.1.1.1", "8.8.8.8"))
-    yield hc
-    ddg.reset_resolver()
+    return hc
 
 
 async def _search(monkeypatch, script, q="acme careers"):
@@ -139,12 +138,6 @@ class TestResolverFallback:
         assert "recovered" in capsys.readouterr().out
         out, made = await _search(monkeypatch, [hit], q="delta")
         assert out == hit and len(made) == 1        # breaker closed again
-
-    async def test_reset_restores_the_original_client(self, monkeypatch, wired):
-        await _search(monkeypatch, [REFUSED, [{"href": "https://a.example/"}]])
-        assert wired.primp.Client is not wired.original
-        ddg.reset_resolver()
-        assert wired.primp.Client is wired.original
 
     async def test_a_throttle_is_not_a_resolver_failure(self, monkeypatch, wired):
         monkeypatch.setattr(ddg, "RETRY_PAUSE", 0)

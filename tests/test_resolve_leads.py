@@ -10,11 +10,9 @@ The resolver and the mission scorer are faked; the store is the in-memory
 one, kept open past the op's own close.
 """
 
-import src.claude.api as claude
 import src.store as store
-from conftest import answer, keep_store_open
+from conftest import answer, stub_mission
 from src.discovery import local_sourcing
-from src.discovery import write
 from src.discovery.resolve import board as resolve_board
 
 _HIT = {"name": "Alpaca Health", "ats": "lever", "slug": "alpaca",
@@ -26,12 +24,10 @@ def _lead(db, name, source="page_capture"):
     store.upsert_company(db, {"name": name, "source": source, "active": 0})
 
 
-def _wire(monkeypatch, db, resolver):
-    keep_store_open(monkeypatch, db)
-    monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(resolver))
-    monkeypatch.setattr(write, "_sample_titles", answer([]))
-    monkeypatch.setattr(claude, "score_company_mission",
-                        answer(("adjacent", 0.5, "stub")))
+def _wire(monkeypatch, db, resolver=None):
+    stub_mission(monkeypatch, db)
+    if resolver:
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(resolver))
 
 
 def _miss_reason(db, name):
@@ -59,13 +55,14 @@ class TestResolveLeads:
 
     async def test_a_resolution_that_raises_becomes_a_miss(
             self, monkeypatch, db, capsys):
-        """The worker dying is the case `board.resolved` exists for; it is
+        """The worker dying is the case resolve_or_miss converts; it is
         also the call that used to hit the shadowing list."""
         def _boom(name, careers=""):
             raise RuntimeError("worker died")
 
         _lead(db, "Wedge Bio")
-        _wire(monkeypatch, db, _boom)
+        _wire(monkeypatch, db)
+        monkeypatch.setattr(resolve_board, "_resolve", answer(_boom))
         assert await local_sourcing.resolve_leads(max_workers=1) == []
         assert _miss_reason(db, "Wedge Bio") == "fetch-error:RuntimeError"
         assert "worker died" in capsys.readouterr().out

@@ -83,9 +83,9 @@ class TestLocation:
         # Workable lets a tenant leave any level blank.
         (dict(city="Copenhagen", state="", country="Denmark"), "Copenhagen, Denmark"),
         (dict(city="", state="", country="United States"), "United States"),
-        # No place named and not flagged remote: "Unknown", which
+        # No place named and not flagged remote: blank, which
         # `locality.location_unknown` reads as "nothing to judge yet".
-        (dict(city="", state="", country=""), "Unknown"),
+        (dict(city="", state="", country=""), ""),
         (dict(city="", state="", country="", telecommuting=True), "Remote"),
     ])
     async def test_normalizes_every_shape_a_tenant_fills_in(self, serve, entry, want):
@@ -149,7 +149,7 @@ class TestRegistry:
 
     def test_the_registry_knows_workable(self):
         # The seed-tag rule is "SWEEP iff the spec sets sweep"
-        # (tests/test_boards_spec.py pins it); Workable seeds LOCAL.
+        # (tests/test_board_specs.py pins it); Workable seeds LOCAL.
         assert seed_tag_for("workable") == tags.LOCAL
 
     async def test_the_registry_thunk_gates_and_names_the_company(self, workable_board):

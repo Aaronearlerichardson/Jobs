@@ -24,7 +24,7 @@ if isinstance(sys.stdout, io.TextIOWrapper):  # Windows consoles default to cp12
 
 app: Flask = Flask(__name__, static_folder="static", static_url_path="/static")
 
-# Changes on every process start; the restart overlay polls /api/stats until
+# Changes on every process start; the restart overlay polls /api/boot until
 # this differs from the value it remembered, i.e. the successor is up.
 BOOT_ID = uuid.uuid4().hex
 

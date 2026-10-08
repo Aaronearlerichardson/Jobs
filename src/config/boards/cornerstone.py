@@ -1,13 +1,16 @@
-"""The `cornerstone` board spec."""
+"""The `cornerstone` board spec.
+
+Notes:
+    Endpoint shapes credited to kalil0321/ats-scrapers (MIT). The board is
+    the tenant's host and career-site number. The search API lives on a
+    regional cloud host and wants the bearer token the site's home page
+    embeds (good about six hours).
+"""
 
 from __future__ import annotations
 
 from src.rows import JSON
 
-# Cornerstone OnDemand career sites; endpoint shapes credited to kalil0321/ats-scrapers
-# (MIT). The board is the tenant's host and its career-site number. The search API
-# lives on a regional cloud host and wants the bearer token the site's home page
-# embeds (good about six hours); both come off that page.
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "csod.com",
                 "re": [r"(?i)([a-z0-9-]+\.csod\.com)/ux/ats/careersite/(\d+)"],
@@ -44,10 +47,8 @@ SPEC: dict[str, JSON] = {
                                                "sep": ", "},
                                    "extras": {"each": "locations",
                                               "do": {"join": ["city", "state", "country"],
-                                                     "sep": ", "}}},
-                         "default": "Unknown"},
+                                                     "sep": ", "}}}},
             "description": {"of": "externalDescription", "transform": "unescape_html_text"},
-            "department": None,
         },
     },
     # The posting's page carries its JSON-LD while it is live; a closed

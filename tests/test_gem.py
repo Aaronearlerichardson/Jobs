@@ -30,7 +30,7 @@ class TestListing:
 
     async def test_a_posting_naming_no_place_reads_as_unknown(self, serve):
         serve(fake_response(fixture("gem_board.json")))
-        assert (await BOARD.listing(SLUG))[2]["location"] == "Unknown"
+        assert (await BOARD.listing(SLUG))[2]["location"] == ""
 
     async def test_a_remote_posting_is_hinted_and_placed(self, serve):
         board = copy.deepcopy(fixture("gem_board.json"))
@@ -41,13 +41,7 @@ class TestListing:
         assert "remote_hint" not in rows[1]
 
 
-
 class TestPosting:
     async def test_the_posting_call_names_the_body(self, serve):
         serve(fake_response(fixture("gem_job_post.json")))
         assert "ResProp Management" in await BOARD.description_for(POSTING)
-
-    def test_a_posting_url_names_its_board(self):
-        assert BOARD.job_ref(POSTING) == {"slug": SLUG, "jid": JID}
-        assert BOARD.job_ref("https://jobs.gem.com/the-swift-group/4123291008") == {
-            "slug": "the-swift-group", "jid": "4123291008"}

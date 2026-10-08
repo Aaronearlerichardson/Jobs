@@ -1,4 +1,9 @@
-"""The `greenhouse` board spec."""
+"""The `greenhouse` board spec.
+
+Notes:
+    The API answers a slug in any case alike, so the handle folds
+    (2026-10-08).
+"""
 
 from __future__ import annotations
 
@@ -24,8 +29,7 @@ SPEC: dict[str, JSON] = {
             "id": {"format": "gh_{slug}_{id}"},
             "title": "title",
             "url": "absolute_url",
-            "location": {"merge": {"primary": "location.name", "extras": "offices[].name"},
-                         "default": "Unknown"},
+            "location": {"merge": {"primary": "location.name", "extras": "offices[].name"}},
             "description": {"of": "content", "transform": "unescape_html_text"},
             "posted_at": {"first": ["first_published", "updated_at"]},
             "remote_hint": {"const": "greenhouse:office",

@@ -1,4 +1,9 @@
-"""The `recruitee` board spec."""
+"""The `recruitee` board spec.
+
+Notes:
+    Endpoint shape credited to kalil0321/ats-scrapers (MIT). An offer's URL
+    names its slug, not the row id, so closure is board membership.
+"""
 
 from __future__ import annotations
 
@@ -23,8 +28,7 @@ SPEC: dict[str, JSON] = {
                                               "extras": {"each": "locations",
                                                          "do": {"join": ["city", "state", "country"],
                                                                 "sep": ", "}}}},
-                                   {"const": "Remote", "when": {"truthy": "remote"}}],
-                         "default": "Unknown"},
+                                   {"const": "Remote", "when": {"truthy": "remote"}}]},
             "description": {"join": ["description", "requirements"], "sep": "\n",
                             "transform": "html_text"},
             "posted_at": {"first": ["published_at", "created_at"]},

@@ -255,7 +255,7 @@ Friction TypedDict adds, each seen in the prototype:
 `RowField` (a `Literal`) and a `TypedDict` cannot derive from each other under
 mypy. The copy that must stay is verified the way `CompanyRow` is, by a names
 test. Done for the engine row:
-`tests/test_boards_spec.py::test_the_engine_row_names_the_spec_row_fields`
+`tests/test_board_specs.py::test_the_engine_row_names_the_spec_row_fields`
 asserts `set(EngineRow.__annotations__) == (ROW_FIELDS - {"department"}) |
 {"head", "_free"}` and that `FillField` is a subset. Still to add in phase 4:
 that `FetchedJob` contains `ROW_FIELDS - {"department"}`, and that its fit

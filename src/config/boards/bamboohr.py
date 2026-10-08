@@ -29,7 +29,7 @@ SPEC: dict[str, JSON] = {
                                   {"truthy": "_loc"}]}},
                 {"const": "Remote",
                  "when": REMOTE},
-                "_loc"], "default": "Unknown"},
+                "_loc"]},
             "remote_hint": {"const": "bamboohr:locationType",
                             "when": REMOTE},
             "department": "departmentLabel",

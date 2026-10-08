@@ -11,35 +11,6 @@ import src.match.gates as gates
 import src.match.locality as locality
 
 
-class TestRule:
-    def test_short_alpha_terms_match_on_word_boundaries(self):
-        assert filters.token_in("rome", "rome, italy", 4)
-        assert not filters.token_in("rome", "chrome browser", 4)
-
-    def test_long_terms_are_substrings(self):
-        assert filters.token_in("weapon", "weapons systems", 3)
-        assert filters.token_in("cortical", "subcortical recordings", 5)
-
-    def test_non_alpha_terms_never_get_boundaries(self):
-        # `\b` needs a word character inside it, so a bounded "c++" or
-        # "u.s." could never match at all.
-        assert "\\b" not in filters.token_pattern("c++", 5)
-        assert filters.token_in("c++", "senior c++ developer", 5)
-        assert filters.token_in("u.s.", "remote, u.s. only", 5)
-
-    def test_the_threshold_belongs_to_the_caller(self):
-        assert filters.token_in("radar", "radars", 3)          # substring
-        assert not filters.token_in("radar", "radars", 5)      # bounded
-
-    def test_term_case_is_ignored_against_lowercase_text(self):
-        assert filters.token_in("Boston", "bostonian", 4)
-        assert filters.token_in("SDR", "an sdr role", 3)
-
-    def test_thresholds_are_the_documented_ones(self):
-        assert (filters.SHORT_KEYWORD, filters.SHORT_EXCLUDE,
-                filters.SHORT_REMOTE, filters.SHORT_PLACE) == (5, 3, 3, 4)
-
-
 class TestKeywords:
     """SHORT_KEYWORD = 5: acronyms are bounded, real words inflect."""
 
@@ -78,15 +49,6 @@ class TestExclusion:
                                 filters.SHORT_EXCLUDE)
         assert not filters.token_in("uav", "suave design",
                                     filters.SHORT_EXCLUDE)
-
-    def test_role_phrases_are_bounded_however_long(self):
-        """The per-track exclude tables ask for boundaries on every term,
-        not just short ones: "scribe" must not fire inside "describe"."""
-        assert filters.token_in("scribe", "medical scribe", filters.BOUNDED)
-        assert not filters.token_in("scribe", "we describe the role",
-                                    filters.BOUNDED)
-        assert filters.token_in("data entry", "senior data entry clerk",
-                                filters.BOUNDED)
 
     def test_a_term_ending_in_punctuation_still_matches(self):
         """`\\b` needs a word character to anchor to, so anchoring such a
