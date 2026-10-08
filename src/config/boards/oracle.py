@@ -16,11 +16,11 @@ SPEC: dict[str, JSON] = {
     "detect": [{"host": "oraclecloud.com",
                 "re": [r"(?i)([a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?oraclecloud\.com)"
                        r"/hcmUI/CandidateExperience/[A-Za-z_-]+/sites/([A-Za-z0-9_-]+)"],
-                "transform": ["lower", None]},
+                "transform": ["lower", "keep"]},
                {"host": "oraclecloud.com",
                 "re": [r"(?i)([a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?oraclecloud\.com)/?\?"
                        r"(?:[^\s\"'<>#]*&)?site_number=([A-Za-z0-9_-]+)"],
-                "transform": ["lower", None]}],
+                "transform": ["lower", "keep"]}],
     "canary": {"name": "UL Solutions",
                "handle": "fa-eups-saasfaprod1.fa.ocs.oraclecloud.com|ULSolutionsCareers",
                "min_jobs": 20},

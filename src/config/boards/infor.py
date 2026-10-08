@@ -18,7 +18,7 @@ SPEC: dict[str, JSON] = {
     "detect": [{"host": "inforcloudsuite.com",
                 "re": [r"(?i)([a-z0-9-]+\.inforcloudsuite\.com)/hcm/Jobs\b",
                        r"(?i)csk\.HROrganization=([A-Za-z0-9_-]+)"],
-                "transform": ["lower", None]}],
+                "transform": ["lower", "keep"]}],
     "canary": {"name": "UNC Health", "handle": "css-unchealthunc-prd.inforcloudsuite.com|9999"},
     "handle": {"parts": ["host", "org"]},
     # The posting key is a triple (org, requisition, posting revision),

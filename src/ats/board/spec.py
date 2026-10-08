@@ -132,8 +132,8 @@ class Detect(_Spec):
                                                   "are the handle's parts, in order")
     host: Str | None = Field(None, description="The vendor's host; an entry with no `re` "
                                                "names only that")
-    transform: tuple[Str | None, ...] = Field((), description="A fields.TRANSFORMS name (or "
-                                                              "None) per group; default none")
+    transform: tuple[Str, ...] = Field((), description='A fields.TRANSFORMS name per group '
+                                                       '("keep": as captured); default all kept')
     blocklist: tuple[Str, ...] = Field((), description="Part values that reject a match")
     careers_url: Template | None = Field(None, description="The board's URL, rebuilt from "
                                                            "the parts or the {page} that "
@@ -149,9 +149,9 @@ class Detect(_Spec):
             raise ValueError("detect: regexes, or a host")
         if self.re and not groups:
             raise ValueError("detect.re captures the handle")
-        if self.transform and (len(self.transform) != groups or any(
-                t is not None and t not in fields.TRANSFORMS for t in self.transform)):
-            raise ValueError("detect.transform: a known transform or None per group")
+        if self.transform and (len(self.transform) != groups
+                               or any(t not in fields.TRANSFORMS for t in self.transform)):
+            raise ValueError("detect.transform: a known transform per group")
         return self
 
 
@@ -529,11 +529,23 @@ class Closure(_Adaptation):
                                                         "proving it closed")
 
 
-def _default_of(model: type[BaseModel], key: str) -> object:
-    """The default of `model`'s field named (or aliased) `key`; a marker
-    no value equals when there is no such field."""
-    info = next((f for n, f in model.model_fields.items() if key in (n, f.alias)), None)
-    return info.get_default(call_default_factory=True) if info else object()
+def _completed(first: dict[str, object], alt: dict[str, object]) -> dict[str, object]:
+    """Listing alternative `alt` with what it neither sets nor names in
+    its `reset` taken from `first`.
+
+    >>> _completed({"url": "a", "pager": {}}, {"url": "b", "reset": ["pager"]})
+    {'url': 'b'}
+    >>> _completed({"url": "a"}, {"reset": ["pager"]})
+    Traceback (most recent call last):
+    ValueError: listing reset ['pager']: keys the first alternative sets and this one does not
+    """
+    reset = alt.get("reset", [])
+    if not (isinstance(reset, list)
+            and all(isinstance(k, str) and k in first and k not in alt for k in reset)):
+        raise ValueError(f"listing reset {reset!r}: keys the first alternative sets and this "
+                         "one does not")
+    return {**{k: v for k, v in first.items() if k not in alt and k not in reset},
+            **{k: v for k, v in alt.items() if k != "reset"}}
 
 
 class Discovery(_Spec):
@@ -563,7 +575,8 @@ class BoardSpec(_Spec):
     job_ref: JobRef | None = Field(None, description="Reads a stored posting URL")
     listing: tuple[Listing, ...] = Field(
         (), description="Alternatives tried in order until one yields a posting, each later "
-                        "one taking what it does not set from the first")
+                        "one taking what it does not set from the first, but for the keys "
+                        "its `reset` names")
     rescue: Rescue | None = Field(None, description="Fills vague listed rows from the detail")
     detail: Detail | None = Field(None, description="Reads one posting back")
     closure: Closure = Field(Closure(),
@@ -581,7 +594,7 @@ class BoardSpec(_Spec):
     @classmethod
     def _alternatives(cls, data: object) -> object:
         """A lone listing as the one alternative; a later one completed
-        from the first, a key it resets to its default left unset."""
+        from the first (`_completed`)."""
         if not isinstance(data, dict):
             return data
         listing = data.get("listing")
@@ -590,12 +603,10 @@ class BoardSpec(_Spec):
         if not (isinstance(listing, list) and listing
                 and all(isinstance(alt, dict) for alt in listing)):
             return data
-        first = listing[0]
-        alts = [{**{k: v for k, v in first.items() if k not in alt},
-                 **{k: v for k, v in alt.items()
-                    if not (k in first and v == _default_of(Listing, k))}}
-                for alt in listing[1:]]
-        return {**data, "listing": [first, *alts]}
+        first, *rest = listing
+        if "reset" in first:
+            raise ValueError("listing[0].reset: the first alternative inherits nothing")
+        return {**data, "listing": [first, *(_completed(first, alt) for alt in rest)]}
 
     @model_validator(mode="after")
     def _fallbacks_explained(self) -> Self:

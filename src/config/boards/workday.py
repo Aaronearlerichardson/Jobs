@@ -19,11 +19,11 @@ SPEC: dict[str, JSON] = {
     "detect": [{"host": "myworkdayjobs.com",
                 "re": [r"(?i)https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com"
                        r"/wday/cxs/[a-z0-9-]+/([A-Za-z0-9_-]+)/"],
-                "transform": ["lower", "int", None]},
+                "transform": ["lower", "int", "keep"]},
                {"host": "myworkdayjobs.com",
                 "re": [r"(?i)https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com"
                        r"(?:/[a-z]{2}-[A-Z]{2})?/([A-Za-z0-9_-]+)"],
-                "transform": ["lower", "int", None],
+                "transform": ["lower", "int", "keep"],
                 "blocklist": ["wday", "cxs", "api", "static", "assets", "login"]}],
     "canary": {"name": "ThermoFisher Scientific IT",
                "handle": "thermofisher|5|ThermoFisherCareers"},

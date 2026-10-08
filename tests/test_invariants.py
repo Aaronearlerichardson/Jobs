@@ -401,12 +401,20 @@ def test_store_connections_close_on_every_path():
     assert not offenders, f"store connections that can leak: {offenders}"
 
 
+def _leaves(v: object):
+    """Every scalar under `v`, a dict or a list."""
+    for x in v.values() if isinstance(v, dict) else v if isinstance(v, list) else ():
+        yield from _leaves(x) if isinstance(x, (dict, list)) else (x,)
+
+
 def test_board_specs_are_json():
-    """config.BOARDS holds only what JSON can: moving it to a JSON file
-    later must be a copy, not a rewrite. (Each spec is also checked
-    against the schema when src.ats.board.engine builds its engine.)"""
+    """config.BOARDS holds only what JSON can, and no None (TOML has no
+    null): moving it to data files later must be a copy, not a rewrite
+    (docs/board-spec-format.md). Each spec is also checked against the
+    schema when src.ats.board.engine builds its engine."""
     import json
     assert json.loads(json.dumps(config.BOARDS)) == config.BOARDS
+    assert None not in _leaves(config.BOARDS)
 
 
 @pytest.mark.parametrize("name", sorted(p.stem for p in (ROOT / "src" / "config").glob("*.toml")))

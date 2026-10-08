@@ -41,11 +41,11 @@ That moves this report's decision table from "Phase 1 only" to **Phase 1 plus Ph
 
 ### Revised plan
 
-**Phase 1: format-neutral; land first, while specs are still Python.**
+**Phase 1: format-neutral; land first, while specs are still Python.** Done on 2026-10-08, except the order file, which moved to Phase 2: while the specs are modules, a data-driven order would force dynamic imports and a temporary Nuitka flag. Instead, a test now pins that every module is one `BOARDS` entry.
 
 1. **Remove the nulls** with Changes A and B below. Then all 48 specs encode as TOML.
 2. **Add a precedence test.** Every fixture, canary and doctest URL must detect as its own spec, with `ultipro`>`ukg` and `jibe`>`icims` asserted by name. A new spec that steals another's input then fails CI instead of silently changing detection.
-3. **Make the order data.** Add `src/config/boards/order.toml` (`order = ["greenhouse", ...]`, the current `BOARDS` order unchanged). A test asserts it names every spec file exactly once. Adding a platform becomes one file plus one line, and `__init__.py` stops changing.
+3. **Make the order data (moved to Phase 2, step 3).** Add `src/config/boards/order.toml` (`order = ["greenhouse", ...]`, the current `BOARDS` order unchanged). A test asserts it names every spec file exactly once. Adding a platform becomes one file plus one line, and `__init__.py` stops changing.
 4. **Give each kind of rationale one home,** and write it into the `__init__` docstring and `docs/REVIEW.md`:
    - a value-level fact is a `#` comment on the line above the value;
    - a workaround is a `why` field;
@@ -65,7 +65,8 @@ That moves this report's decision table from "Phase 1 only" to **Phase 1 plus Ph
    - if it is identical to the bundled spec, warn that it can be deleted;
    - always log which overrides are active.
 
-   The host lists (`FETCHABLE_HOSTS`, `SHARED_HOSTS`) are derived after this, in the same module, so overrides reach them. Overrides replace existing specs only. A new platform still ships in a build, consistent with rule 2: new platforms usually need engine work.
+   The host lists (`FETCHABLE_HOSTS`, `SHARED_HOSTS`) are derived after this, in the same module, so overrides reach them.
+   - **Users can add platforms** (decided 2026-10-08). An override naming a platform that isn't bundled is added after every bundled spec in detection order, so it can't take an existing spec's input. The precedence test only covers bundled specs, so the loader logs every added platform. An added spec can use only what the engine's grammar already offers; a platform that needs new behaviour still ships in a build (rule 2).
 4. **Build:** change `build_app.py`'s `src/config` `.glob("*.toml")` to `.rglob`, and add a post-build smoke test that the binary lists all 48 boards.
 5. **CI:**
    - add `tombi format --check src/config/boards` (`tombi` in `envs/requirements-dev.txt`);

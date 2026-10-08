@@ -2,16 +2,20 @@
 
 Per spec: a dead board reads as nothing, a pulled posting is a 404, a
 vendor's own host is no board, a board URL resolves to its handle and a
-posting URL to its job reference. Over `config.BOARDS`: the schema refuses
-what it cannot read, no spec restates a default, every platform detected is
-a spec, every fetchable one has a canary, and nothing outside the spec names
-a platform. Each spec's listing and posting tests live in its own file
+posting URL to its job reference. Over `config.BOARDS`: every spec module
+is one entry, only the declared overlaps depend on its order, the
+generated catalog (src/config/boards/README.md) is current, the schema
+refuses what it cannot read, no spec restates a default, every platform
+detected is a spec, every fetchable one has a canary, and nothing outside
+the spec names a platform. Each spec's listing and posting tests live in its own file
 (`test_gem.py`, `test_teamtailor.py`, ...).
 
 Offline: fixtures are served, the source is parsed with `ast`.
 """
 
 import ast
+import importlib
+import pkgutil
 from pathlib import Path
 from typing import get_args
 
@@ -19,11 +23,13 @@ import pytest
 
 from conftest import fake_response, fixture
 from src import config, tags
+from src.config import boards
 from src.ats import signatures
 from src.ats.board import BOARDS, board_for, company, spec
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect
 from src.rows import FetchedJob, FitColumns
+from tools import board_catalog
 
 #: ats -> (handle, a posting URL on its board, a served posting). Only the
 #: platforms whose posting URL is judged by its own detail endpoint: a spec
@@ -243,6 +249,38 @@ def test_the_tables_name_only_platforms_in_boards():
     assert named <= set(FETCHABLE)
 
 
+def test_every_spec_module_is_one_boards_entry():
+    """A spec module left out of `BOARDS`, or listed under another name, is
+    never read: the package's modules and the table's keys are one set."""
+    modules = {m.name for m in pkgutil.iter_modules(boards.__path__)}
+    assert modules == set(config.BOARDS)
+    assert all(config.BOARDS[n] is importlib.import_module(f"{boards.__name__}.{n}").SPEC
+               for n in modules)
+
+
+def test_the_board_catalog_is_current():
+    """src/config/boards/README.md is rendered from the specs: a spec changed
+    without rerunning `python tools/board_catalog.py` leaves it stale."""
+    assert board_catalog.CATALOG.read_text("utf-8") == board_catalog.render()
+
+
+#: Inputs two specs both detect, by design: the first, earlier in `BOARDS`, wins.
+OVERLAPS = {("ultipro", "ukg"): "ukg claims every ultipro.com host; a board URL is ultipro's",
+            ("jibe", "icims"): "a Jibe front also names its iCIMS tenant"}
+JIBE_PAGE = ('<script>window._jibe = {"cid":"acme"};</script>'
+             '<a href="https://careers-acme.icims.com/jobs/login">Log in</a>')
+
+
+@pytest.mark.parametrize("text,url,ats", [*(("", u, a) for u, a, _s in BOARD_URLS),
+                                          (JIBE_PAGE, "", "jibe")])
+def test_a_board_is_read_first_by_its_own_spec(text, url, ats):
+    """Detection is the first match in `BOARDS` order, so an input two specs
+    read makes their order matter: only an OVERLAPS pair may, and its
+    winner comes first."""
+    readers = [n for n in config.BOARDS if detect(text, url, only=n)]
+    assert readers[0] == ats and all((ats, n) in OVERLAPS for n in readers[1:])
+
+
 @pytest.mark.parametrize("ats", sorted(POSTINGS))
 @pytest.mark.parametrize("status,want", [(200, True), (404, False)])
 async def test_a_pulled_posting_is_a_404(serve, ats, status, want):
@@ -311,6 +349,9 @@ REFUSED = [
     {"handle": {"accept": {"nope": 1}, "why": _WHY}},
     {"listing": [_L, {"url": "https://x.test/2"}]},
     {"listing": [{**_L, "why": _WHY}, {"url": "https://x.test/2", "why": _WHY}]},
+    {"listing": [{**_L, "reset": ["fields"]}]},
+    {"listing": [_L, {"reset": ["pager"], "why": _WHY}]},
+    {"listing": [_L, {"url": "https://x.test/2", "reset": ["url"], "why": _WHY}]},
     {**_listing(), "rescue": {"unknown": "x", "cap": 1, "why": _WHY}},
     {**_listing(), "detail": _D, "rescue": {"unknown": "x", "cap": 1, "why": _WHY}},
     _always(unknown="("), _always(cap="1"), _always(fields=["pay"]), _always(why=None),
@@ -326,6 +367,7 @@ REFUSED = [
     {"detect": [{}]}, {"detect": [{"re": ["abc"]}]},
     {"detect": [{"re": ["(a)"], "transform": ["x"]}]},
     {"detect": [{"re": ["(a)"], "transform": [None, None]}]},
+    {"detect": [{"re": ["(a)"], "transform": [None]}]},
     {"detect": [{"re": ["(a)"], "blocklist": [1]}]},
     {"detect": [{"re": ["(a)"], "careers_url": "{slug|nope}"}]},
 ]
@@ -336,6 +378,9 @@ def test_the_schema_refuses_what_it_cannot_read():
     adaptation key needs no `why`."""
     spec.parse("ok", _pager(kind="offset", size=2, ceiling=2000))
     spec.parse("ok", _pager(kind="offset", size=2, why=_WHY))
+    paged = {**_L, "pager": {"kind": "page", "size": 1}}
+    assert spec.parse("ok", {"listing": [paged, {"reset": ["pager"], "why": _WHY}]}
+                      ).listing[1].pager is None
     for i, raw in enumerate(REFUSED):
         with pytest.raises(ValueError, match=f"^case{i}: "):
             spec.parse(f"case{i}", raw)

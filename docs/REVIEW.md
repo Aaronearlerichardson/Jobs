@@ -100,7 +100,8 @@ Also:
 
 - A new board platform: a module `src/config/boards/<name>.py` exporting
   `SPEC`, registered (import + `BOARDS` entry, in detection order) in
-  `src/config/boards/__init__.py`.
+  `src/config/boards/__init__.py`, and its catalog row
+  (`python tools/board_catalog.py`).
 - A fetch-level signal: `src/net/http.py`, beside `fetch_failed`.
 - Closure rules: arguments on `store.jobs.sync_job_statuses`.
 - A scorer or hydrator parameter: threaded like triage's `mission_scorer`
@@ -242,7 +243,8 @@ first:
 - async code never blocks and nothing swallows cancellation or drops a task;
 - the one client session is made in `net/http`, with a timeout;
 - the environment is read only through `config.SETTINGS`;
-- board specs stay JSON;
+- board specs stay JSON-compatible data with no None, and hold no logic of
+  their own: a behaviour one platform needs is an engine grammar change;
 - the mechanical performance rules, and no `assert` or `__debug__` in
   compiled code.
 

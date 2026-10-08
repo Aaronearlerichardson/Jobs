@@ -7,12 +7,16 @@ default the models in `src.ats.board.spec`, where each key's meaning and
 default are declared); outside them, no module in `src/` names a platform
 (tests/test_board_specs.py).
 
-The literal is JSON-compatible on purpose (str, int, float, bool, None,
-list, dict; regexes as strings): tests/test_invariants.py pins
-`json.loads(json.dumps(BOARDS)) == BOARDS`, so moving it to a JSON file
-later is mechanical. Comments do not survive that move, so each spec
-module's docstring moves to a README.md beside the specs, one section per
-platform.
+The literal is JSON-compatible on purpose (str, int, float, bool, list,
+dict; regexes as strings; no None, which TOML cannot hold):
+tests/test_invariants.py pins it, so moving the specs to data files is
+mechanical (docs/board-spec-format.md). README.md beside the specs is the
+catalog, generated from them by tools/board_catalog.py: edit a spec, never
+the catalog.
+
+`BOARDS` order is detection order: an input two specs both read goes to the
+earlier one, and only the pairs tests/test_board_specs.py declares in
+`OVERLAPS` may overlap.
 
 Rules:
 
@@ -23,10 +27,14 @@ Rules:
   "Unknown" as unknown); no spec sets `"department": None` (a listing
   alternative's `fields` replace the first's wholesale, and an absent key
   already reads None).
-- A line-level comment explains one value. Reasoning about a whole
-  platform (canary choice, tenant quirks, why a rescue or transform
-  exists, dated incidents) goes in that spec module's docstring, under
-  `Notes:` for history.
+- A spec holds no logic of its own: a behaviour one platform needs is a
+  grammar change in the engine (`src.ats.board`), declared in its schema,
+  so every spec can use it.
+- Each kind of rationale has one home. A line-level comment explains one
+  value, on the line above it. A workaround key carries its `why`.
+  Reasoning about a whole platform (canary choice, tenant quirks, dated
+  incidents) goes in that spec module's docstring, under `Notes:` for
+  history.
 
 The host lists below it are derived from the specs' `detect` entries, so
 the layers under the engine (the store, the careers-page reader, the

@@ -37,7 +37,7 @@ SPEC: dict[str, JSON] = {
         },
         # Every row on one page; some tenants replace it with a landing
         # page listing nothing, which is why the search goes first.
-        {"url": "https://jobs.jobvite.com/{tenant|lower}/jobs", "params": None, "pager": None,
+        {"url": "https://jobs.jobvite.com/{tenant|lower}/jobs", "reset": ["params", "pager"],
          "why": "a tenant whose search lists nothing may list every row here, "
                 "2026-09 (inferred)"},
     ],

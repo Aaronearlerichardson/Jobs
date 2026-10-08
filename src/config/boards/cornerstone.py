@@ -14,7 +14,7 @@ from src.rows import JSON
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "csod.com",
                 "re": [r"(?i)([a-z0-9-]+\.csod\.com)/ux/ats/careersite/(\d+)"],
-                "transform": ["lower", None],
+                "transform": ["lower", "keep"],
                 "blocklist": ["www.csod.com", "help.csod.com", "community.csod.com"]}],
     "canary": {"name": "MACOM", "handle": "macomtech.csod.com|4", "min_jobs": 20},
     "handle": {"parts": ["host", "site"],

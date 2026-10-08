@@ -358,13 +358,13 @@ def _required(rx: str) -> str:
     return best
 
 
-def _detector(entry: Detect) -> tuple[list[re.Pattern[str]], tuple[str | None, ...], set[str],
+def _detector(entry: Detect) -> tuple[list[re.Pattern[str]], tuple[str, ...], set[str],
                                       tuple[str, ...]]:
     """A `detect` entry read once: (regexes, transform per group, blocklist,
     each regex's `_required` literal)."""
     regexes = [re.compile(_run_start(rx)) for rx in entry.re]
     groups = sum(rx.groups for rx in regexes)
-    return (regexes, entry.transform or (None,) * groups, {v.lower() for v in entry.blocklist},
+    return (regexes, entry.transform or ("keep",) * groups, {v.lower() for v in entry.blocklist},
             tuple(_required(rx) for rx in entry.re))
 
 
@@ -475,8 +475,8 @@ class Board:
         True
         """
         raw = (text or "").split(self._sep)
-        kinds = next((d.transform for d in self.spec.detect if d.transform), (None,) * len(raw))
-        done = [p if k is None else fields.TRANSFORMS[k](p) for p, k in zip(raw, kinds)]
+        kinds = next((d.transform for d in self.spec.detect if d.transform), ("keep",) * len(raw))
+        done = [fields.TRANSFORMS[k](p) for p, k in zip(raw, kinds)]
         parts = tuple(p for p in done if isinstance(p, (str, int)) and p != "")
         return parts if len(raw) == len(parts) == len(self._part_names) else None
 
@@ -553,7 +553,7 @@ class Board:
                 raw = [p or "" for p in (*m.groups(), *later)]
                 if blocked and blocked.intersection(p.lower() for p in raw) or not accept(raw[0]):
                     continue
-                done = [p if t is None else fields.TRANSFORMS[t](p) for p, t in zip(raw, transforms)]
+                done = [fields.TRANSFORMS[t](p) for p, t in zip(raw, transforms)]
                 parts = [p for p in done if isinstance(p, (str, int))]
                 if len(parts) != len(done):
                     continue

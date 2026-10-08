@@ -193,6 +193,8 @@ _UNARY: dict[str, Callable[[JSON], str | int | None]] = {
     "dash_space": lambda v: str(v).replace("-", " "),
     "underscore": lambda v: str(v).replace("-", "_"),
     "lower": lambda v: str(v).lower(),
+    # The value as captured: a detect group no other transform reads.
+    "keep": lambda v: str(v),
     "unquote": lambda v: unquote(str(v)),
     "rstrip_slash": lambda v: str(v).rstrip("/"),
 }

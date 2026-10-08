@@ -16,7 +16,7 @@ SPEC: dict[str, JSON] = {
                 # A locale leads the path; a client is never one.
                 "re": [r"(?i)jobs\.dayforcehcm\.com/(?:[a-z]{2,3}-[a-z0-9]{2,4}/)?"
                        r"(?![a-z]{2,3}-[a-z0-9]{2,4}/)([a-z0-9_-]+)/([a-z0-9_-]+)"],
-                "transform": ["lower", None],
+                "transform": ["lower", "keep"],
                 "blocklist": ["api", "_next", "static"]}],
     "canary": {"name": "Impact Fire Services", "handle": "aifire|IMPACT", "min_jobs": 10},
     "handle": {"parts": ["client", "board"],

@@ -74,8 +74,7 @@ SPEC: dict[str, JSON] = {
         # Titled by the URL slug; some tenants' WAF 403s it.
         {
             "url": "https://{slug}.icims.com/sitemap.xml",
-            "params": None,
-            "pager": None,
+            "reset": ["params", "pager"],
             "why": "a JS-shell tenant's search page lists nothing, its sitemap every "
                    "live posting, 2026-08",
             "decoder": {"kind": "html", "select": "loc"},
