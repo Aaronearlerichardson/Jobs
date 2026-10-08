@@ -7,6 +7,8 @@ from src.rows import JSON
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "ashbyhq.com", "re": [r"(?i)jobs\.ashbyhq\.com/([a-zA-Z0-9_-]+)"]}],
     "canary": {"name": "Vanta", "handle": "vanta"},
+    # The API answers a slug in any case alike (2026-10-08).
+    "handle": {"fold": True},
     "discovery": {"search": [[4, "jobs.ashbyhq.com"]], "hint": [[4, "ashbyhq"]]},
     "sweep": True,
     "prunable": True,

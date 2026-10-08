@@ -157,7 +157,7 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
                     desc = stub.get("description")
                 if not desc:
                     index = await board_index(company) if index is None else index
-                    match = await board_match(index, r["title"])
+                    match = await board_match(index, r["title"], tried=r.get("url"))
                     desc = match.get("description") if match else None
                 out.append((r["job_id"], desc))
             return out

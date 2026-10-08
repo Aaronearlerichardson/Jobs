@@ -39,6 +39,9 @@ def _statements(script: str) -> Iterator[str]:
 def migrate(conn: sqlite3.Connection) -> None:
     """Apply every migration the store has not seen; no-op when current."""
     files = sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql"))
+    if not files:
+        raise RuntimeError(f"no migrations in {MIGRATIONS_DIR} (a build "
+                           "that did not bundle them?)")
     if conn.execute("PRAGMA user_version").fetchone()[0] >= len(files):
         return
     conn.execute("BEGIN IMMEDIATE")

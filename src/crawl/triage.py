@@ -571,7 +571,7 @@ async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors
         if checked and not _detail_stale(r, cutoff):
             retry_at = datetime.fromisoformat(checked) + timedelta(days=RETRY_DAYS)
             waiting[jid] = (f"fetch failed {checked[:10]}, retries after "
-                            f"{retry_at:%Y-%m-%d}")
+                            f"{retry_at:%Y-%m-%d %H:%M}")
             continue
         todo.setdefault(c["id"], []).append(job)
     if not todo:

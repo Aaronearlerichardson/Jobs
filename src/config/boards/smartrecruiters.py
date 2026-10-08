@@ -10,6 +10,8 @@ SPEC: dict[str, JSON] = {
                {"host": "smartrecruiters.com",
                 "re": [r"(?i)api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/"]}],
     "canary": {"name": "Eurofins", "handle": "Eurofins"},
+    # The API answers a slug in any case alike (2026-10-08).
+    "handle": {"fold": True},
     "discovery": {"search": [[5, "jobs.smartrecruiters.com"]], "hint": [[6, "smartrecruiters"]]},
     # Not in the lightweight sweep: boards run to thousands of rows.
     "job_ref": {"re": r"smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)", "parts": ["slug", "id"]},

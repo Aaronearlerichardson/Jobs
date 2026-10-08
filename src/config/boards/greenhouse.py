@@ -8,6 +8,8 @@ SPEC: dict[str, JSON] = {
     "detect": [{"host": "greenhouse.io",
                 "re": [r"(?i)(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"]}],
     "canary": {"name": "Databricks", "handle": "databricks"},
+    # The API answers a slug in any case alike (2026-10-08).
+    "handle": {"fold": True},
     "discovery": {"search": [[1, "boards.greenhouse.io"], [2, "job-boards.greenhouse.io"]],
                   "hint": [[2, "greenhouse"]]},
     "sweep": True,

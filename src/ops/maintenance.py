@@ -125,9 +125,16 @@ async def board_index(company: CompanyRow) -> dict[str, FetchedJob]:
     return {(b.get("title") or "").strip().lower(): b for b in board}
 
 
-async def board_match(index: dict[str, FetchedJob], title: str | None) -> FetchedJob | None:
+async def board_match(index: dict[str, FetchedJob], title: str | None,
+                      tried: str | None = None) -> FetchedJob | None:
     """The board row for `title`, hydrated, or None when the board does not
-    cover it (or covers it with no body).
+    cover it (or covers it with no body). A bodiless row at `tried`, a URL
+    the caller just failed to hydrate, is not fetched again.
+
+    >>> import asyncio
+    >>> idx = {"t": {"title": "T", "url": "https://x/1", "description": ""}}
+    >>> asyncio.run(board_match(idx, "T", tried="https://x/1")) is None
+    True
 
     The pair above plus this is the whole of "get a stored row's text back
     from its company's own board", which the description backfill and the
@@ -136,7 +143,8 @@ async def board_match(index: dict[str, FetchedJob], title: str | None) -> Fetche
     as a title match.
     """
     match = index.get((title or "").strip().lower())
-    if match is None:
+    if match is None or (tried and match.get("url") == tried
+                         and not match.get("description")):
         return None
     await company_fetch.hydrate_description(match)
     return match if match.get("description") else None

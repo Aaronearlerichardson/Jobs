@@ -367,7 +367,12 @@ def build_command(name: str | None = None) -> list[str]:
         # default: an unwind waiting on another process's write lock (the
         # store's 30 s busy timeout) must not be killed mid-rollback.
         cmd += ["--onefile-child-grace-time=35000"]
+        # The harvester opens the store too, so it needs the migrations: built
+        # without them migrate() globbed nothing and skipped every one
+        # (JobHarvester.exe, 2026-10-08).
         cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES
+                if not src.startswith("src/web/")]
+        cmd += [f"--include-data-dir={src}={dst}" for src, dst in DATA_DIRS
                 if not src.startswith("src/web/")]
     else:
         cmd += [f"--include-package={p}" for p in PACKAGES]

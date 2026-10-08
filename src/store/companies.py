@@ -1289,9 +1289,10 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     `total_job_count` keeps its last known-good value instead of being
     zeroed by a fetch hiccup. It records 'fetch-error:harvest' as the
     row's miss_reason/miss_at on its FIRST occurrence only -- a miss
-    already on the row (any family, including a repeat
+    already on the row (any other family, or a repeat
     'fetch-error:harvest') is left untouched, so neither `miss_at` nor a
-    genuinely different failure is overwritten. A row already carrying
+    genuinely different failure is overwritten. Another 'fetch-error:*'
+    is replaced: it says nothing about the board. A row already carrying
     'fetch-error:harvest' for >= HARVEST_DEAD_AFTER_DAYS days is promoted
     to 'board-dead:<its ats>' instead (and deactivated, the same as a manually
     pruned dead board -- see src.ops.repair.prune_dead_boards's
@@ -1346,6 +1347,15 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     >>> row["total_job_count"], row["miss_reason"]
     (9, 'fetch-error:harvest')
 
+    A discovery-side fetch error on the row gives way to the harvester's
+    own, so the dead-board cycle starts:
+
+    >>> _ = record_miss(conn, "Stalled", "fetch-error:stalled", ats="lever", slug="s")
+    >>> cid3 = get_companies(conn, active_only=False)[-1]["id"]
+    >>> _ = mark_harvested(conn, cid3, 0, soft_fail=True)
+    >>> get_company(conn, cid3)["miss_reason"]
+    'fetch-error:harvest'
+
     A genuinely empty (no fetch error) pass, by contrast, DOES zero the
     count and never touches miss_reason:
 
@@ -1377,7 +1387,11 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     promoted = None
     miss: dict[str, object] = {}
     if soft_fail:
-        if cur_reason is None:
+        # Another fetch-error (a resolution that raised or stalled) is no
+        # verdict on the board: left in place, it kept a dead slug out of
+        # this cycle for good (25 boards re-pulled every pass, 2026-10-08).
+        if cur_reason is None or (cur_reason.startswith("fetch-error")
+                                  and cur_reason != fetch_error):
             miss = {"miss_reason": fetch_error, "miss_at": stamp}
         elif cur_reason == fetch_error:
             cutoff = (now_dt - timedelta(days=HARVEST_DEAD_AFTER_DAYS)

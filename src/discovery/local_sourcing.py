@@ -656,8 +656,7 @@ async def populate_companies(extra_names: list[str] | None = None,
         # Misses first: they are pure local writes, so the roster's failure
         # record survives even if the mission-scoring pass below is interrupted.
         n_miss = await db.run(lambda conn: sum(
-            store.record_miss(conn, m["name"], m["reason"], **_miss_row(m))
-            for m in misses))
+            _record_miss(conn, m["name"], m["reason"], m) for m in misses))
         if misses:
             counts = await db.run(store.miss_counts)
             print(f"\n  recorded {n_miss} miss(es) (of {len(misses)} not "
@@ -742,8 +741,7 @@ async def queue_names(db: store.Writer, names: Collection[str], source: str,
     stalled: list[str] = []
 
     async def miss(name: str, reason: str, hit: BoardHit | None = None) -> None:
-        row: CompanyIn = {**_miss_row(hit), "source": source} if hit else {"source": source}
-        await db.run(store.record_miss, name, reason, **row)
+        await db.run(_record_miss, name, reason, hit, source)
         missed.append((name, reason))
 
     async for name, (hit, reason) in fan_out(
@@ -953,6 +951,26 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
             print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
     print(f"\n  {n} compan(ies) scored.")
     return n
+
+
+def _record_miss(conn: sqlite3.Connection, name: str, reason: str,
+                 hit: BoardHit | None = None, source: str = "local_sourcing") -> bool:
+    """record_miss for `name` with whatever board `hit` established, unless
+    that board is already tracked under another name (a second row would
+    harvest it twice: "Paradromics" beside "Paradromics Inc.", 2026-10-08).
+
+    >>> conn = store.connect(":memory:")
+    >>> _ = store.upsert_company(conn, {"name": "P Inc.", "ats": "jazzhr", "slug": "p"})
+    >>> _record_miss(conn, "P", "no-local-jobs", {"name": "P", "ats": "jazzhr", "slug": "p"})
+        [dup]  P                              same jazzhr board as 'P Inc.' - already tracked, not added
+    False
+    """
+    row: CompanyIn = {**_miss_row(hit), "source": source} if hit else {"source": source}
+    dup = row.get("ats") and board_already_tracked(conn, {**row, "name": name})
+    if dup:
+        report_dup_board(name, dup)
+        return False
+    return store.record_miss(conn, name, reason, **row)
 
 
 def _miss_row(m: BoardHit) -> CompanyIn:
