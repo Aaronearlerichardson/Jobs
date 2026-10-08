@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -260,8 +261,6 @@ def parse_markup(markup: str | bytes | None, xml: bool = False, url: str = "") -
 def _html5lib() -> ModuleType:
     """html5lib, imported on first use (about 120 ms), its warnings about
     names it had to coerce silenced."""
-    import warnings
-
     import html5lib
     from html5lib.constants import DataLossWarning
     warnings.filterwarnings("ignore", category=DataLossWarning)

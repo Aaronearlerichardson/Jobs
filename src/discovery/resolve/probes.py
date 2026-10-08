@@ -13,6 +13,7 @@ from typing import Protocol, Self, cast
 from src import config, runstate
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
+from src.ats.board.custom import openings_page
 from src.ats.board.engine import Board
 from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE
@@ -29,10 +30,17 @@ class _Context(Protocol):
     async def close(self) -> None: ...
 
 
+class _Frame(Protocol):
+    @property
+    def url(self) -> str: ...
+
+
 class _Page(Protocol):
     """The slice of a Playwright page the pool uses."""
     @property
     def url(self) -> str: ...
+    @property
+    def frames(self) -> list[_Frame]: ...
     @property
     def context(self) -> _Context: ...
     async def goto(self, url: str, *, wait_until: str, timeout: int) -> object: ...
@@ -316,14 +324,15 @@ class JsScanProbePool:
         return await context.new_page()
 
     @staticmethod
-    async def _scan(page: _Page, url: str) -> tuple[str, Slug] | None:
+    async def _scan(page: _Page, url: str) -> tuple[tuple[str, Slug] | None, str]:
         """
-        Navigate + wait for JS, returning `page_hit`'s (ats, handle) or
-        None. Has three short-circuits so we don't pay the full
-        networkidle wait on obvious non-matches:
+        Navigate + wait for JS: (`page_hit`'s (ats, handle) or None, the
+        page's final HTML, "" when unread). Has three short-circuits so we
+        don't pay the full networkidle wait on obvious non-matches:
           1. Did the URL redirect straight to the vendor's host?
           2. Is the board link in the initial server-rendered HTML?
-          3. After JS settles (networkidle, capped at 6s), try again.
+          3. After JS settles (networkidle, capped at 6s), try again, the
+             page's iframes included (an embedded board, as hrmdirect's).
         """
         # `_launch` has already imported it (off the loop), so this is a lookup.
         from playwright.async_api import Error as PlaywrightError
@@ -334,16 +343,16 @@ class JsScanProbePool:
             if ("interrupted by another navigation" not in msg
                     and "Navigation timeout" not in msg):
                 _log.debug("js scan %s: goto failed: %s", url, e)
-                return None
+                return None, ""
         if (hit := page_hit("", page.url)):
-            return hit
+            return hit, ""
         try:
             html = await page.content()
         except PlaywrightError as e:
             _log.debug("js scan %s: content failed: %s", url, e)
             html = ""
         if (hit := await asyncio.to_thread(page_hit, html)):
-            return hit
+            return hit, html
         # Wait for JS-deferred content (iframes, ajax-injected links).
         try:
             await page.wait_for_load_state("networkidle", timeout=6000)
@@ -354,8 +363,9 @@ class JsScanProbePool:
             html = await page.content()
         except PlaywrightError as e:
             _log.debug("js scan %s: re-read failed: %s", url, e)
-            return None
-        return page_hit("", cur) or await asyncio.to_thread(page_hit, html)
+            return None, ""
+        frames = "\n".join(f.url for f in page.frames)
+        return (page_hit(frames, cur) or await asyncio.to_thread(page_hit, html)), html
 
     @classmethod
     async def _scrape(cls, page: _Page, name: str,
@@ -369,8 +379,19 @@ class JsScanProbePool:
         seeds = await seed_urls(name, careers_url)
         urls = dict.fromkeys([*seeds, *(s + "careers" for s in seeds[:1]),
                               *candidate_urls(name, careers_url)])
+        seen: set[str] = set()
         for url in await _drop_unresolvable(list(urls)):
-            hit = await cls._scan(page, url)
+            if url in seen:
+                continue
+            seen.add(url)
+            hit, html = await cls._scan(page, url)
+            # A careers page that only links its openings page: read that
+            # one too (custom.openings_page), once.
+            nxt = None if hit or not html else await asyncio.to_thread(
+                openings_page, html, page.url)
+            if nxt and nxt not in seen:
+                seen.add(nxt)
+                hit, _ = await cls._scan(page, nxt)
             if not hit or await foreign_board(name, *hit):
                 continue
             meta = await _scan_meta(*hit, page.url)

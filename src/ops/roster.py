@@ -17,7 +17,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src import store
+from src.ats.feeds.careeronestop import fetch_nlx_company
 from src.config import RuntimeTrack
+from src.discovery import (apply_to_store, discover, print_summary,
+                           write_discovery_report)
+from src.discovery.dork import run_ddgs_dorks
+from src.ops.ingest import ingest_external_jobs
+from src.ops.maintenance import track_store, track_writer
+from src.ops.repair import prune_dead_boards
 
 if TYPE_CHECKING:
     from src.discovery.pipeline import DiscoveryResult
@@ -27,8 +35,6 @@ def dedup(t: RuntimeTrack | None = None) -> tuple[int, int]:
     """Merge duplicate company rows pointing at one board, then duplicate
     job rows, then flag the cross-board duplicates of one employer
     (store.flag_duplicate_jobs). Returns (companies merged, jobs dropped)."""
-    from src import store
-    from src.ops.maintenance import track_store
     with track_store(t) as conn:
         n = store.dedup_companies(conn)
         n_jobs = store.dedup_jobs(conn)
@@ -42,8 +48,6 @@ def dedup(t: RuntimeTrack | None = None) -> tuple[int, int]:
 async def prune(offmission: bool = False, t: RuntimeTrack | None = None) -> tuple[int, int]:
     """Deactivate companies whose ATS board is dead, and optionally the
     off-mission ones. Returns (dead deactivated, off-mission deactivated)."""
-    from src.ops.maintenance import track_writer
-    from src.ops.repair import prune_dead_boards
     async with track_writer(t) as db:
         n_dead, n_off = await prune_dead_boards(
             db, deactivate_offmission=offmission)
@@ -54,8 +58,6 @@ async def prune(offmission: bool = False, t: RuntimeTrack | None = None) -> tupl
 
 def backfill_axes(t: RuntimeTrack | None = None) -> int:
     """Populate the per-axis fit columns from fit_reason (offline)."""
-    from src import store
-    from src.ops.maintenance import track_store
     with track_store(t) as conn:
         return store.backfill_axis_columns(conn)
 
@@ -64,8 +66,6 @@ async def ingest_nlx(companies: list[str] | None, t: RuntimeTrack | None = None)
     """Pull postings for bot-gated employers from the federal NLx feed and
     run them through the standard ingest. `companies` is a list of
     employer names. Returns the number of new jobs ingested."""
-    from src.ats.feeds.careeronestop import fetch_nlx_company
-    from src.ops.ingest import ingest_external_jobs
     if not companies:
         print("  [!] give a comma-separated list of employer names")
         return 0
@@ -82,7 +82,6 @@ async def ingest_nlx(companies: list[str] | None, t: RuntimeTrack | None = None)
 async def dork_sweep() -> tuple[int, int]:
     """ATS dorking via DuckDuckGo: mine search-indexed board URLs for
     companies in your locality into the store. Returns (added, checked)."""
-    from src.discovery.dork import run_ddgs_dorks
     added, checked = await run_ddgs_dorks()
     print(f"\n  {added} new local board(s) added to the store "
           f"({checked} extracted from dork results)")
@@ -95,7 +94,6 @@ async def discover_term(term: str | None, no_report: bool = False,
     `term`, probe each against the ATS registry, and (apply-by-default)
     queue the confirmed ones unless `dry_run`. Returns the discovery
     result, or None when no term was given."""
-    from src.discovery import apply_to_store, discover, print_summary, write_discovery_report
     term = (term or "").strip()
     if not term:
         print("  [!] give a sector/term to search for, e.g. 'medical device companies'")

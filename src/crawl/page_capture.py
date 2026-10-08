@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, cast
 from urllib.parse import urljoin
 
 from src import config
+from src.ats.board.custom import find_job_links
 from src.net.util import (JSON, first, host_of, jsonld_scripts, links, node_text, parse_markup,
                           stable_id, strip_html, xpath)
 from src.rows import FetchedJob
@@ -450,7 +451,6 @@ def _card_location(a: etree._Element, title: str = "") -> str:
 
 
 def parse_generic(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
-    from src.ats.board.custom import find_job_links
     jobs: list[FetchedJob] = []
     seen: set[str] = set()
 

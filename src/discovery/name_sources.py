@@ -20,11 +20,12 @@ from typing import cast
 from urllib.parse import unquote_plus
 
 from src import config, store
+from src.claude import api as claude_api
 from src.claude.reply import Reply
 from src.match.names import junk_name_reason, name_key
 from src.net import ddg, http
 from src.net.http import HEADERS
-from src.net.robots import FETCH_ERRORS
+from src.net.http import FETCH_ERRORS
 
 _log = logging.getLogger(__name__)
 
@@ -279,7 +280,6 @@ async def brainstorm_company_names(n: int | None = None) -> list[str]:
     cached = await asyncio.to_thread(ddg.cache_get, key)
     if cached is not None:
         return cast(list[str], cached)
-    from src.claude.api import call_claude_json
     system = "You help maintain a job-search company roster."
     user = (
         f"List up to {n} REAL employers likely to have offices, labs, or "
@@ -289,7 +289,7 @@ async def brainstorm_company_names(n: int | None = None) -> list[str]:
         "CROs, diagnostics and device makers, health-system technology arms, "
         "university spinouts. Use official company names only — no "
         "descriptions, no locations, no commentary.")
-    r = await call_claude_json(system, user, max_tokens=1600, reply=CompanyNames)
+    r = await claude_api.call_claude_json(system, user, max_tokens=1600, reply=CompanyNames)
     names = [x for x in (r.companies if r else []) if 2 < len(x) < 60][:n]
     if names:
         await asyncio.to_thread(ddg.cache_put, key, names)

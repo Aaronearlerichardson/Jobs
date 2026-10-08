@@ -45,7 +45,7 @@ from typing import Annotated
 
 from pydantic import BeforeValidator
 
-from src import config, runstate
+from src import config, runstate, store
 from src.store import NOT_A_FIT_SIGNAL
 from src.claude.api import api_disabled, call_claude_json, have_api_key
 from src.claude.reply import Reply, Unit
@@ -311,7 +311,6 @@ def _read_disposition_block() -> str:
     if n <= 0:
         return ""
     try:
-        from src import store
         with closing(store.connect()) as conn:
             return disposition_examples_block(conn, n)
     except (sqlite3.Error, OSError) as e:

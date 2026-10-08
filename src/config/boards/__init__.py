@@ -72,6 +72,7 @@ from .personio import SPEC as PERSONIO
 from .manatal import SPEC as MANATAL
 from .comeet import SPEC as COMEET
 from .zohorecruit import SPEC as ZOHORECRUIT
+from .paycor import SPEC as PAYCOR
 
 BOARDS: dict[str, dict[str, JSON]] = {
     "greenhouse": GREENHOUSE,
@@ -121,6 +122,7 @@ BOARDS: dict[str, dict[str, JSON]] = {
     "manatal": MANATAL,
     "comeet": COMEET,
     "zohorecruit": ZOHORECRUIT,
+    "paycor": PAYCOR,
 }
 
 #: The spec that reads a careers page itself, no ATS signature on it: the

@@ -31,7 +31,7 @@ from src import config
 from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
-from src.net.robots import FETCH_ERRORS
+from src.net.http import FETCH_ERRORS
 from src.net.util import clean_field, first, node_text, parse_markup
 from src.rows import BoardCoords, FetchedJob
 from . import jsonld
@@ -53,7 +53,7 @@ def needs_detail(job: FetchedJob) -> bool:
     """True when hydrate_description would fetch anything for `job`: no
     body yet, or a body already but a location the listing never resolved
     that the posting's engine can fill (`Board.needs_detail`). Shared by
-    harvest.hydrate_rows and triage._hydrate, which both select rows to
+    crawl.hydrate.hydrate_rows and triage._hydrate, which both select rows to
     fetch by this predicate rather than "no description" alone.
 
     >>> needs_detail({"description": "", "ats": "greenhouse"})

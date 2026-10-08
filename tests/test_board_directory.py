@@ -17,7 +17,7 @@ from src import config
 from src.runstate import per_run
 from src.discovery import board_directory as bd
 from src.discovery.resolve import directory as resolve_directory
-from src.discovery import dork, local_sourcing
+from src.discovery import dork, write
 
 _JOB = "https://boards.greenhouse.io/{slug}/jobs/{n}"
 
@@ -117,7 +117,7 @@ async def test_the_roster_s_mission_tiers_rank_the_boards(directory, db, monkeyp
 async def test_apply_queues_the_best_boards_up_to_the_limit(directory, db, monkeypatch):
     keep_store_open(monkeypatch, db)
     monkeypatch.setattr(dork, "validate_board", answer((9, 3)))
-    monkeypatch.setattr(local_sourcing, "_score_hit", answer(("adjacent", 0.5, "stub")))
+    monkeypatch.setattr(write, "_score_hit", answer(("adjacent", 0.5, "stub")))
     counts = await bd.import_boards(apply=True, limit=1)
     assert counts["added"] == 1
     (row,) = store.pending_companies(db)
@@ -135,7 +135,7 @@ async def test_an_alternate_board_is_always_written(directory, db, monkeypatch, 
     keep_store_open(monkeypatch, db)
     monkeypatch.setattr(dork, "validate_board", answer((9, 3)))
     asked = []
-    monkeypatch.setattr(local_sourcing, "_score_hit", answer(lambda hit: asked.append(hit["name"]) or ("adjacent", 0.5, "stub")))
+    monkeypatch.setattr(write, "_score_hit", answer(lambda hit: asked.append(hit["name"]) or ("adjacent", 0.5, "stub")))
     store.upsert_company(db, {"name": "Big Co Inc", "ats": "lever", "slug": "old", "active": 1,
                               "mission_tier": "core-mission", "mission_score": 0.9})
     if dead:
@@ -153,7 +153,7 @@ class TestIntake:
     @pytest.fixture(autouse=True)
     def _wire(self, db, monkeypatch):
         keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "_score_hit", answer(("adjacent", 0.5, "stub")))
+        monkeypatch.setattr(write, "_score_hit", answer(("adjacent", 0.5, "stub")))
 
     async def test_a_dorked_board_with_no_local_job_and_no_hq_is_skipped(self, monkeypatch, db):
         monkeypatch.setattr(dork.company_fetch, "fetch_company", answer([]))

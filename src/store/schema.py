@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Coroutine, Hashable, Mapping
@@ -19,6 +20,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Concatenate, Literal, cast
 
 from src import config
+from src.match.names import name_key
 from src.rows import JobRow
 from .migrate import migrate
 
@@ -47,6 +49,17 @@ def sql_function[F: SqlFn](name: str, narg: int) -> Callable[[F], F]:
         SQL_FUNCTIONS[name] = (narg, fn)
         return fn
     return register
+
+
+sql_function("name_key", 1)(name_key)
+
+
+@sql_function("norm_url", 1)
+def _norm_url(u: str | None) -> str:
+    """Scheme/query/fragment/trailing-slash-insensitive URL key."""
+    u = (u or "").strip().lower()
+    u = re.sub(r"^https?://", "", u)
+    return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:

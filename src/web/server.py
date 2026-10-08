@@ -8,15 +8,20 @@ import asyncio
 import atexit
 import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
+import time
+import urllib.request
+import webbrowser
 from collections.abc import Coroutine
 from http.client import HTTPException
 from typing import Never
 
 from src import config, runstate
 from src.claude.api import have_api_key
+from src.config import bootstrap
 from . import STATE, app
 
 _log = logging.getLogger(__name__)
@@ -80,7 +85,6 @@ def _unwind(loop: asyncio.AbstractEventLoop) -> None:
 
 def _ours_on(port: int) -> bool:
     """True if a RUNNING instance of this app already serves `port`."""
-    import urllib.request
     try:
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/api/stats", timeout=2) as r:
@@ -97,7 +101,6 @@ def _port_free(port: int) -> bool:
     delivers connections to an arbitrary one — the browser sees random
     connection failures instead of a clean 'address in use' error. A plain
     test bind (no reuse flags) reliably reports occupancy first."""
-    import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(("127.0.0.1", port))
@@ -111,9 +114,6 @@ def _port_free(port: int) -> bool:
 def _open_when_up(url: str, port: int, timeout: float = 25.0) -> None:
     """Open the browser only once the server actually accepts connections
     (a fixed delay races antivirus-slowed first launches of the exe)."""
-    import socket
-    import time
-    import webbrowser
 
     def waiter() -> None:
         deadline = time.time() + timeout
@@ -135,7 +135,6 @@ def schedule_restart() -> None:
     STATE["restarting"] = True
 
     def worker() -> None:
-        import time
         time.sleep(0.75)          # let the HTTP response flush to the browser
         if "__compiled__" in globals():
             cmd = [sys.argv[0]]
@@ -160,8 +159,6 @@ def main() -> None:
     new process just opens a browser tab to it and exits instead of piling
     a second server onto the same socket. If something ELSE holds the port,
     the next free one (up to +10) is used."""
-    import webbrowser
-
     port = config.SETTINGS.webui_port
     for a in sys.argv[1:]:
         if a.startswith("--port="):
@@ -174,7 +171,6 @@ def main() -> None:
         # Config-save restart successor: our dying predecessor still holds
         # the port for a moment. Wait for it instead of the idempotent
         # "already running" bail-out — we ARE the replacement.
-        import time
         deadline = time.time() + 20
         while time.time() < deadline:
             if _port_free(port):
@@ -205,7 +201,6 @@ def main() -> None:
         else:
             raise SystemExit(f"  [!] no free port in {port}..{port + 10}")
 
-    from src.config import bootstrap
     bootstrap.ensure_profile()
 
     STATE["bound_port"] = port

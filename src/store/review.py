@@ -4,21 +4,20 @@ it guessed, until a person confirms or rejects them. Split out of src.store
 on 2026-09-10; src.store re-exports every public name here, so callers keep
 saying ``store.confirm_company``.
 
-This module must not import a store sibling at module level: store's
-__init__ imports all of them to re-export, and companies.py reaches
-back here for the rejection blocklist. Both directions are function-
-local, so neither module depends on the other at load time and the
-package may import them in any order. Doctests import what they use.
+Never imports store/__init__ at load time (that module imports this one).
+The review queue sits above the roster: it imports companies.py, never
+the reverse.
 """
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from datetime import datetime
 
 from src import config
+from src.match.names import name_key as _name_key
 from src.rows import CompanyIn, CompanyRow
+from .companies import as_company, blocked_name_keys, get_company  # noqa: F401 (doctests)
 from .employers import clear_pending
 from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the doctests open stores)
 
@@ -42,24 +41,6 @@ from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the 
 # of a vetted employer that is itself awaiting review carries its own state
 # (companies.review), and the same calls then rule on that board only. Readers
 # ask the companies_effective view.
-
-
-@sql_function("name_key", 1)
-def _name_key(name: str | None) -> str:
-    """Normalized comparison key for a company name: [a-z0-9] only.
-
-    The key discovery already compares names by (local_sourcing's
-    `_NONALNUM_RE`, snowball's `_norm_key`, config's name blocklist), so one
-    rejected spelling blocks the others:
-
-    >>> _name_key("Iris Diagnostics, Inc.")
-    'irisdiagnosticsinc'
-    >>> _name_key(" Foo-Bar!! ") == _name_key("foobar")
-    True
-    >>> _name_key(None)
-    ''
-    """
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
 def mark_pending(row: CompanyIn) -> CompanyIn:
@@ -135,7 +116,6 @@ def pending_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     >>> [c["name"] for c in pending_companies(conn)]
     ['Second', 'First']
     """
-    from .companies import as_company  # not at module level: see module doc
     return [as_company(r) for r in conn.execute(
         "SELECT * FROM companies_effective WHERE review = 'pending' "
         "ORDER BY created_at DESC, id DESC").fetchall()]
@@ -211,7 +191,6 @@ def confirm_company(conn: sqlite3.Connection, cid: int,
             on = config.is_active_mission(b["mission_tier"], b["name"])
         conn.execute("UPDATE companies SET active=? WHERE id=?", (on, b["id"]))
     _commit(conn)
-    from .companies import get_company  # not at module level: see module doc
     return get_company(conn, cid)
 
 
@@ -324,17 +303,3 @@ def block_name(conn: sqlite3.Connection, name: str, reason: str | None = None) -
         (key, name, reason, datetime.now().isoformat()))
     _commit(conn)
     return key
-
-
-def blocked_name_keys(conn: sqlite3.Connection) -> set[str]:
-    """Every blocklisted name key -- the set a paste is filtered against.
-
-    >>> conn = connect(":memory:")
-    >>> blocked_name_keys(conn) == set()
-    True
-    >>> _ = block_name(conn, "Oncology")
-    >>> blocked_name_keys(conn) == {"oncology"}
-    True
-    """
-    return {r["key"] for r in
-            conn.execute("SELECT key FROM name_blocklist").fetchall()}

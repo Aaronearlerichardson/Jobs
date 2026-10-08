@@ -14,6 +14,14 @@ import pytest
 from conftest import answer, run_web_op
 from src import web
 from src.web.server import call
+from src import config
+from src import store
+from src.claude import api
+from src.dispatch import background as ops
+from src.dispatch import registry
+from src.dispatch.registry import OpParams
+from src.web import routes
+import src.discovery.paste_ingest as ls
 
 
 class TestGeoBucket:
@@ -76,7 +84,6 @@ class TestApi:
         src.claude.api.have_api_key() -- one of three call sites that used
         to spell out `config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE"`
         by hand -- so it must move exactly the way have_api_key does."""
-        from src.web import routes
         monkeypatch.setattr(routes, "have_api_key", lambda: True)
         assert json.loads(client.get("/api/stats").data)["api_key"] is True
         monkeypatch.setattr(routes, "have_api_key", lambda: False)
@@ -139,7 +146,6 @@ class TestApi:
         schedule), and they are accepted. A column the companies table does
         not have is a 400 naming it, and nothing is written."""
         import io
-        from src import store
         conn = store.connect(wired_db_path)
         store.upsert_company(conn, {"name": "Acme", "ats": "lever",
                                     "slug": "acme"})
@@ -171,7 +177,6 @@ class TestCompanyCrawlState:
     def _sleepy_store(self, db_path):
         """One dormant company in conftest's `wired_db_path` throwaway store:
         these tests write, and the suite may never touch the real one."""
-        from src import store
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Sleepy", "ats": "greenhouse",
                                           "slug": "sleepy"})
@@ -193,7 +198,6 @@ class TestCompanyCrawlState:
     def test_capture_only_rows_show_the_marker(self, client, wired_db_path):
         # The roster shows WHY a company is never fetched: its ats reads
         # "capture", and it stays an active, never-dormant row.
-        from src import store
         self._sleepy_store(wired_db_path)
         conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Saved", "ats": store.CAPTURE_ATS,
@@ -229,7 +233,6 @@ class TestPipelineApi:
         """One live application in conftest's `wired_db_path` throwaway
         store: these tests write, and the suite may never touch the real
         one."""
-        from src import store
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
                                           "slug": "acme"})
@@ -278,7 +281,6 @@ class TestPipelineApi:
         not this week's volume, and one since moved on to interviewing
         still counts for the week it went out in."""
         from conftest import iso_days_ago
-        from src import store
         self._pipeline_store(wired_db_path)
         conn = store.connect(wired_db_path)
         store.upsert_job(conn, {
@@ -342,8 +344,6 @@ class TestApplyBandFields:
 
     def test_jobs_expose_what_the_band_filter_reads(self, client,
                                                     wired_db_path, local_addr):
-        from src import config
-        from src import store
         t = config.UI_TRACKS[config.DEFAULT_TRACK]
         conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
@@ -369,8 +369,6 @@ class TestCollapsedJobFields:
 
     def test_a_duplicate_pair_collapses_with_dup_fields_exposed(
             self, client, wired_db_path, local_addr):
-        from src import config
-        from src import store
         t = config.UI_TRACKS[config.DEFAULT_TRACK]
         conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
@@ -402,8 +400,6 @@ class TestRemoteAdmissionFields:
     FIT = 0.94
 
     def _store(self, db_path, monkeypatch, mission, floor=0.85):
-        from src import config
-        from src import store
         t = config.UI_TRACKS[config.DEFAULT_TRACK]
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
@@ -463,7 +459,6 @@ class TestRemoteAdmissionFields:
     def test_best_fit_is_none_without_jobs(self, client, wired_db_path,
                                            monkeypatch):
         self._store(wired_db_path, monkeypatch, mission=0.9)
-        from src import store
         conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Quiet", "ats": "lever",
                                           "slug": "quiet"})
@@ -481,7 +476,6 @@ class TestReviewQueue:
         """One review candidate in conftest's `wired_db_path` throwaway
         store -- which the routes and discovery's own store.connect() both
         read, so the suite never touches the real one."""
-        from src import store
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, store.mark_pending(
             {"name": name, "ats": "greenhouse", "slug": "guess",
@@ -511,7 +505,6 @@ class TestReviewQueue:
 
     def test_reject_removes_it_and_blocks_the_name(self, client,
                                                    wired_db_path):
-        from src import store
         cid = self._queued_store(wired_db_path)
         resp = client.post(f"/api/company/{cid}/reject",
                            json={"reason": "not a company"})
@@ -530,7 +523,6 @@ class TestReviewQueue:
 
     def test_block_records_the_names_the_reviewer_rejected(
             self, client, wired_db_path):
-        from src import store
         self._queued_store(wired_db_path)
         resp = client.post("/api/names/block",
                            json={"names": ["Who You Are", "Job Location"]})
@@ -544,7 +536,6 @@ class TestReviewQueue:
     def test_preview_parses_without_resolving_anything(self, client,
                                                        wired_db_path,
                                                        monkeypatch):
-        import src.discovery.paste_ingest as ls
         self._queued_store(wired_db_path)
         monkeypatch.setattr(ls, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
@@ -573,7 +564,6 @@ class TestAssets:
         assert resp.headers.get("Cache-Control") == "no-store"
 
     def test_asset_version_tracks_content(self, monkeypatch):
-        from src.web import routes
         v1 = routes._asset_version()
         assert v1 == routes._asset_version()        # stable
         assert len(v1) == 10
@@ -604,8 +594,6 @@ class TestOpConcurrency:
         """Twelve request threads submit through the web UI's loop at (as
         near as the OS allows) the same instant, behind a Barrier: one
         starts, the rest queue as the one waiting entry they all name."""
-        from src.dispatch import background as ops
-        from src.dispatch.registry import OpParams
         results, lock = [], threading.Lock()
         barrier, done = threading.Barrier(12), threading.Event()
 
@@ -638,7 +626,6 @@ class TestOpConcurrency:
 
     def test_stdout_is_restored_when_the_op_ends(self):
         import sys
-        from src.dispatch import background as ops
         before = sys.stdout
         run_web_op("solo", self._noisy("z", lines=1))
         assert sys.stdout is before, "the tee outlived its operation"
@@ -657,7 +644,6 @@ class TestOpConcurrency:
         run_web_op("after", self._noisy("ok", lines=1))
 
     def test_prints_outside_an_operation_do_not_reach_the_log(self):
-        from src.dispatch import background as ops
         n = len(run_web_op("solo", self._noisy("q", lines=1))["lines"])
         print("this line belongs to no operation")
         assert len(call(ops.status())["lines"]) == n
@@ -670,7 +656,6 @@ class TestOpRearmsTheClaudeBreaker:
     call without saying why."""
 
     def test_the_next_op_has_an_armed_breaker(self):
-        from src.claude import api
         seen = []
 
         async def trip():
@@ -729,8 +714,6 @@ class TestRunQueue:
         """
         from types import SimpleNamespace
 
-        from src.dispatch import background as ops
-        from src.dispatch import registry
 
         gates, ran = {}, []
 
@@ -907,7 +890,6 @@ class TestRunQueue:
             self, client, stub_ops, tmp_path):
         """A stopped op's open store batch rolls back, and the op queued
         behind it still gets the slot."""
-        from src import store
         db = tmp_path / "s.db"
         store.connect(db).close()
         writing, release = threading.Event(), threading.Event()
@@ -954,8 +936,6 @@ class TestRunQueue:
         """A stop can land between an op's start and its first step (racing
         the hand-off from the op before it): the op's body never runs, and
         the slot is handed on all the same."""
-        from src.dispatch import background as ops
-        from src.dispatch.registry import OpParams
         ran = []
 
         async def body():
@@ -974,7 +954,6 @@ class TestRunQueue:
     def _gated_dedup(monkeypatch, boom=False):
         """Point the `dedup` op at a sync target that blocks until released;
         returns (started, release, ended) events."""
-        from src.dispatch import registry
         started, release, ended = (threading.Event() for _ in range(3))
 
         def target(**kw):
@@ -1056,7 +1035,6 @@ class TestRunQueue:
         """An idle runner is not enough. The queue lives in memory and a save
         restarts the process (server.py schedule_restart), so every waiting
         entry would vanish with it."""
-        from src.dispatch import background as ops
         assert self._status(client)["running"] is False
         ops.QUEUE.append({"id": "test-entry", "name": "q-first", "params": {},
                           "key": "{}", "enqueued_at": "2026-09-11T00:00:00",
@@ -1080,7 +1058,6 @@ class TestRunQueue:
         conftest's `wired_db_path` covers both the track config (what the
         routes open) and config.STORE_DB_PATH (what preview_names opens for
         itself)."""
-        import src.discovery.paste_ingest as ls
         monkeypatch.setattr(ls, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
         stub_ops.add("q-first")
@@ -1099,7 +1076,6 @@ class TestRunQueue:
         so a 409 here lost the blocklist for a run that went ahead anyway.
         The write itself is one INSERT on its own connection, which is what
         the review-queue confirm/reject routes have always done mid-run."""
-        from src import store
         stub_ops.add("q-first")
         client.post("/api/run/q-first")
         assert self._status(client)["running"] is True
@@ -1121,7 +1097,6 @@ class TestRunQueue:
 def test_the_dismiss_dialog_offers_exactly_the_stores_reasons():
     # app.js keeps a hand copy of store.DISMISS_REASONS; this is its verifier.
     from pathlib import Path
-    from src import store
     js = (Path(web.__file__).parent / "static" / "js" / "app.js").read_text(encoding="utf-8")
     block = re.search(r"const DISMISS_REASONS = \[(.*?)\];", js, re.S).group(1)
     assert tuple(re.findall(r'\["(\w+)",', block)) == store.DISMISS_REASONS

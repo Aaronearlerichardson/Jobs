@@ -108,7 +108,6 @@ class TestApplyBand:
         assert picked[0]["job_id"] == "j13"
 
     def test_leaves_out_rows_that_repeat_an_application(self, hometown):
-        from src import store
         ranked = [row("repost", fit=0.55, location=hometown),
                   row("level", fit=0.50, location=hometown),
                   row("fresh", fit=0.45, location=hometown)]

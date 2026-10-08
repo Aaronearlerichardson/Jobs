@@ -14,7 +14,6 @@ ignore-missing-imports = [
     "lxml.*",
     "html5lib.*",
     "winotify.*",
-    "duckduckgo_search.*",
 ]
 # mypy `strict` with unannotated defs checked and no return-type inference.
 check-unannotated-defs = true

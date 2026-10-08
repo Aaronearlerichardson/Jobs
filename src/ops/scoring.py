@@ -15,7 +15,11 @@ from src import config
 from src import store
 from src.ats.board import board_for_url
 from src.ats.board import company as company_fetch
-from src.claude.fit import UNSCORED_CAUSES, FitResult, score_resume_fit
+from src.claude import api as claude_api
+from src.claude import fit as claude_fit
+from src.claude.fit import (DEEP_MARKER, MIN_DESC_CHARS, UNSCORED_CAUSES,
+                            FitResult, is_deep_verified, score_resume_fit,
+                            unscored_cause, verify_model)
 from src.claude.resume import resume_text
 from src.config import RuntimeTrack
 from src.match.locality import NC_RE
@@ -95,7 +99,6 @@ def _unscored_due(fit_reason: str | None, desc_len: int, now: datetime | None = 
     >>> _unscored_due("unscored:short:150:2020-01-01", 250)
     True
     """
-    from src.claude.fit import MIN_DESC_CHARS
     # fit_reason for a row self_heal_unscored (or rescore_all) could not
     # score: "unscored:<cause>:<body length when marked>:<date marked>".
     # Distinct from every OTHER fit_reason shape in the store -- a real
@@ -160,7 +163,6 @@ async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: 
         untouched fit_reason -- so this query could never tell a row that
         had just failed apart from one that had never been tried.
     """
-    from src.claude.fit import MIN_DESC_CHARS, unscored_cause
     conds, args = store.open_in_track_clause(track)
     conds += ["resume_fit_score IS NULL",
               "length(COALESCE(description,'')) >= ?"]
@@ -224,7 +226,6 @@ async def rescore_all(max_workers: int = 6, track: str | None = None,
     "nothing to score here" everywhere it appears -- this call always runs
     the clearing itself (a rescore is an explicit, one-off ask), so unlike
     self_heal_unscored it does not consult _unscored_due first."""
-    from src.claude.fit import MIN_DESC_CHARS
     t = _t(t)
     resume = resume_text()
     if not resume:
@@ -393,9 +394,6 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
         cost 121 rows x 2 rounds x 2 runs on 2026-09-09, every live JD
         fetched for nothing.
     """
-    from src.claude.api import api_disabled
-    from src.claude.fit import (DEEP_MARKER, verify_fit, is_deep_verified,
-                                verify_model)
     t = _t(t)
     current = verify_model()
     done_ids: set[str] = set()   # settled THIS run (verified, or no body to read): never stale again, even under force
@@ -410,7 +408,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
     async with track_writer(t, db) as db:
         n_done = 0
         for rnd in range(rounds):
-            down = api_disabled()
+            down = claude_api.api_disabled()
             if down:
                 # Tripped before this round (the crawl's screen pass, or an
                 # earlier round here): nothing below can score, so say so once
@@ -454,14 +452,14 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                 # The breaker can trip mid-round (2026-09-09: the crawl's FIRST
                 # verify call hit an exhausted credit balance). A row the API
                 # can no longer score doesn't need its live JD fetched.
-                if api_disabled():
+                if claude_api.api_disabled():
                     # FitResult.score is declared float, but an unscored
                     # result carries None (src/claude/fit.py does the same).
                     return r, None, FitResult(score=None,
                                               reason="api disabled")
                 started.add(r["job_id"])
                 text = await _live_jd(r)
-                return r, text, await verify_fit(r["title"] or "", text,
+                return r, text, await claude_fit.verify_fit(r["title"] or "", text,
                                                  location=r.get("location") or "")
 
             n_scored = n_crushed = 0
@@ -475,7 +473,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                 async for r, text, res in verified:
                     score = res.score
                     if score is None:
-                        halted = api_disabled()
+                        halted = claude_api.api_disabled()
                         if halted:
                             # One line for the round, not one '[?] kept' per
                             # finalist. Leaving cancels the rows still

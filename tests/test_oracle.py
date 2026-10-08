@@ -15,6 +15,11 @@ import pytest
 from conftest import fake_response, fixture, no_pacing
 from src.ats.board import board_for
 from src.ats.signatures import detect
+from src import tags
+from src.ats.board import board_for_url
+from src.ats.board import company
+from src.ats.registry import seed_tag_for
+from src.match.locality import is_nc
 
 HOST = "fa-eups-saasfaprod1.fa.ocs.oraclecloud.com"
 SITE = "ULSolutionsCareers"
@@ -59,7 +64,6 @@ class TestListing:
                                                                local_addr, elsewhere):
         """The flat `PrimaryLocation` shows one office; `secondaryLocations`
         holds the rest, which `locality.is_nc` reads one at a time."""
-        from src.match.locality import is_nc
         oracle_board(_board([_req(PrimaryLocation=elsewhere, secondaryLocations=[
             {"Name": f"{local_addr}, United States"}, {"Name": elsewhere}])]))
         loc = (await ORACLE.listing(HANDLE))[0]["location"]
@@ -87,7 +91,6 @@ class TestListing:
 
 class TestDetail:
     async def test_the_description_joins_the_prose_and_drops_the_boilerplate(self, oracle_board):
-        from src.ats.board import company
         oracle_board(fixture("oracle_board.json"), fixture("oracle_job_detail.json"))
         job = {"ats": "oracle", "url": JOB_URL, "description": "", "location": "Raleigh, NC"}
         out = await company.hydrate_description(job)
@@ -123,19 +126,15 @@ class TestDetection:
         assert detect("", f"https://{HOST}/") is None
 
     def test_a_posting_url_is_attributable_to_the_platform(self):
-        from src.ats.board import board_for_url
         assert board_for_url(JOB_URL) is ORACLE
         assert ORACLE.job_ref(JOB_URL) == {"host": HOST, "site": SITE, "jid": "10139"}
 
 
 class TestCompanyDispatch:
     async def test_fetch_company_adapts_this_modules_rows(self, oracle_board):
-        from src.ats.board import company
         oracle_board(fixture("oracle_board.json"), fixture("oracle_job_detail.json"))
         out = await company.fetch_company({"ats": "oracle", "slug": HANDLE})
         assert len(out) == 4 and out[0]["ats"] == "oracle" and "company" not in out[0]
 
     def test_the_registry_seeds_it_local(self):
-        from src import tags
-        from src.ats.registry import seed_tag_for
         assert seed_tag_for("oracle") == tags.LOCAL

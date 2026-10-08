@@ -20,6 +20,9 @@ import src.store as store
 from src.rows import (BoardCoords, CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn, JobRow,
                       RankedJob)
 from src.store.migrate import MIGRATIONS_DIR, _statements, migrate
+from src.claude import fit as claude_fit
+from src.claude.fit import disposition_examples_block
+import src.ops.maintenance as ops
 
 
 def _held_types(hint):
@@ -265,10 +268,9 @@ class TestSchema:
                 f"{table}.{col} is {declared[col]}, the model says {hint}"
 
     def test_the_fit_columns_are_what_the_scorer_produces(self):
-        from src.claude import fit
         keys = FitColumns.__optional_keys__
-        assert set(keys) == set(fit.FitResult(score=0.5).as_columns())
-        assert {"fit_" + a for a in fit.AXES} <= keys
+        assert set(keys) == set(claude_fit.FitResult(score=0.5).as_columns())
+        assert {"fit_" + a for a in claude_fit.AXES} <= keys
         assert set(store._SCORE_COLS) == keys
 
     def test_migrating_a_current_store_changes_nothing(self, db):
@@ -350,7 +352,6 @@ class TestCompanies:
         cid = store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})
         store.set_watch(db, cid, True)
         row = store.get_company(db, cid)
-        import src.ops.maintenance as ops
         assert row["watch"] == 1 and row["tags"] is None and ops.whole_board(row)
         store.set_watch(db, cid, False)
         assert not store.get_company(db, cid)["watch"]
@@ -1095,7 +1096,6 @@ class TestDispositions:
         self._seed(add_job)
         store.set_disposition(db, "gh_acme_200", "dismissed", note="wrong archetype")
         store.set_disposition(db, "gh_acme_300", "applied")
-        from src.claude.fit import disposition_examples_block
         block = disposition_examples_block(db, 3)
         assert 'PURSUED: "Data Engineer"' in block
         assert "wrong archetype" in block
@@ -1108,7 +1108,6 @@ class TestDispositions:
         store.set_disposition(db, "gh_acme_200", "dismissed", note="applied to the other",
                               reason="sibling")
         store.set_disposition(db, "gh_acme_300", "dismissed", reason="location")
-        from src.claude.fit import disposition_examples_block
         block = disposition_examples_block(db, 3)
         assert "DISMISSED" in block and "location" in block
         assert "dead link" not in block and "applied to the other" not in block
@@ -1274,7 +1273,6 @@ class TestPipelineTracking:
         store.set_disposition(db, "p1", "rejected", note="no headcount")
         store.update_pipeline_fields(db, "p1",
                                      outcome_reason="rejected-interview")
-        from src.claude.fit import disposition_examples_block
         block = disposition_examples_block(db, 3)
         assert "Imaging Scientist" in block
         assert "rejected-interview" in block
@@ -1665,7 +1663,6 @@ class TestReviewQueue:
         # the config PACKAGE, which is where the rule lives now -- it used
         # to sit in src/claude/api.py, which is what made the store import
         # the LLM layer to default one column.
-        from src import config
         monkeypatch.setattr(config, "is_active_mission",
                             lambda *a, **k: 1 / 0)
         cid = self._queue(db, "Decided", mission_tier="not-a-configured-tier")

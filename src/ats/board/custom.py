@@ -29,7 +29,7 @@ from src import config
 from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS
-from src.net.robots import FETCH_ERRORS
+from src.net.http import FETCH_ERRORS
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
                           JSON, hashed_cache_path, host_of, json_cache_get,
                           json_cache_put, links, node_text, parse_markup)
@@ -140,6 +140,18 @@ def _hop_target(tree: etree._Element, page_url: str) -> str | None:
     """The openings page to read in place of `page_url`, or None."""
     op = _openings_link(tree, page_url)
     return op if op and op.rstrip("/") != page_url.rstrip("/") else None
+
+
+def openings_page(html: str, page_url: str) -> str | None:
+    """`_hop_target` of a page's `html`: the same-host openings page it
+    links, or None.
+
+    >>> openings_page('<a href="/careers/career-opportunities/">Open roles</a>',
+    ...               "https://acme.com/careers/")
+    'https://acme.com/careers/career-opportunities/'
+    """
+    tree = parse_markup(html, url=page_url)
+    return _hop_target(tree, page_url) if tree is not None else None
 
 
 def _location_near(a: etree._Element, area: LocationRE | None = None) -> str:

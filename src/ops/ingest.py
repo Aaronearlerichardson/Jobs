@@ -4,6 +4,7 @@ crawl that pulls the added company's other postings."""
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from typing import NamedTuple, cast
 
@@ -11,7 +12,10 @@ from src import store
 from src import tags
 from src.ats import coords
 from src.ats.board import company as company_fetch
+from src.claude import api as claude_api
 from src.config import RuntimeTrack
+from src.discovery.write import mission_context
+from src.discovery.resolve import board as resolve_board
 from src.match import gates
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import fetch_failed
@@ -62,7 +66,6 @@ def _admitted(conn: sqlite3.Connection, jobs: list[FetchedJob], source: str, cur
               t: RuntimeTrack) -> tuple[list[_Admitted], int]:
     """(the jobs to score, how many the geo gate dropped): ingest_external_jobs'
     gates; a job already stored is touched instead."""
-    import hashlib
     kept: list[_Admitted] = []
     n_nonlocal = 0
     for j in jobs:
@@ -193,10 +196,6 @@ async def add_manual_job(url: str, title: str, company: str, location: str,
         is exactly the collision this path is most exposed to: a hand-typed
         employer name lands on a same-named stranger's board.
     """
-    from src.claude.api import is_active_mission, score_company_mission
-    from src.discovery.local_sourcing import mission_context
-    from src.discovery.resolve.board import resolve_or_miss
-
     t = _t(t)
     name = (company or "").strip()
     title = (title or "").strip()
@@ -235,11 +234,11 @@ async def add_manual_job(url: str, title: str, company: str, location: str,
             # A hit carrying a reason ("no-local-jobs") is a live, readable
             # board with nothing open here today — worth registering, exactly
             # as the probe-first resolver's nc=0 hit was.
-            board, miss = await resolve_or_miss(name)
+            board, miss = await resolve_board.resolve_or_miss(name)
         if board:
-            tier, score, reason = await score_company_mission(
+            tier, score, reason = await claude_api.score_company_mission(
                 name, await mission_context(board))
-            active = is_active_mission(tier, name)
+            active = claude_api.is_active_mission(tier, name)
             await db.run(store.upsert_company, coords.from_hit(
                 board, name=name,
                 local_job_count=board["nc"], total_job_count=board["count"],

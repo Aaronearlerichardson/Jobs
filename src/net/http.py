@@ -14,12 +14,13 @@ requests sent and read. Its own I/O is never used
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import logging
 import ssl
 import sys
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Generator, Iterable, Mapping
 from datetime import timedelta
 from typing import Unpack, cast, override
 
@@ -34,9 +35,10 @@ from typing_extensions import TypedDict
 from urllib3.util.ssl_ import create_urllib3_context
 from yarl import URL
 
-from src import runstate
+from src import config, runstate
 from src.config import (FETCH_TIMEOUT, PLAIN_USER_AGENT, REFUSAL_TRIPS, REFUSAL_TTL_S,
                         USER_AGENT)
+from src.net.robots import RobotsCache, RobotsDisallowed
 from src.net.util import JSON, host_of, origin_key
 
 # File-only request trace (src/session_log.py installs the handler; there
@@ -78,6 +80,10 @@ Unreachable = requests.ConnectionError
 #: Any failed request (HTTPError and Unreachable are kinds of it); `send` also
 #: raises robots.RobotsDisallowed, which is not one.
 RequestError = requests.RequestException
+
+
+#: Everything `send` raises: a failed request, or a robots refusal.
+FETCH_ERRORS = (RequestError, RobotsDisallowed)
 
 
 class HostRefusing(RequestError):
@@ -341,8 +347,7 @@ async def _exchange(method: str, url: str, polite: bool = True,
         url = cast(str, req.url)
         if polite and (origin := origin_key(url)) not in origins:
             origins.add(origin)
-            from .robots import CACHE       # robots.py imports this module
-            await CACHE().wait_turn(url)
+            await wait_turn(url)
         r = await _hop(req, limit)
     r.history = hops
     return r
@@ -397,18 +402,15 @@ async def send(method: str, url: str, *, polite: bool = True,
     if refusing.dead(url):
         _log.debug("%s %s -> skipped, host refusing", method, url)
         raise HostRefusing(f"{host_of(url)} refused {REFUSAL_TRIPS} requests in a row")
-    # Imported here: robots.py imports this module.
-    from .robots import CACHE, RobotsDisallowed
-    robots = CACHE()
-    if not await robots.allowed(url):
+    if not await ROBOTS().allowed(url):
         _log.debug("%s %s -> robots.txt disallow", method, url)
         raise RobotsDisallowed(f"robots.txt disallows {url}")
-    await robots.wait_turn(url)
+    await wait_turn(url)
     try:
         r = await _exchange(method, url, **kw)
         if r.status_code == 429:        # told to slow down: the host waits as asked, then retry once
             LIMITER.defer(url, retry_after(r))
-            await robots.wait_turn(url)
+            await wait_turn(url)
             r = await _exchange(method, url, **kw)
     except Exception as e:
         _log.debug("%s %s -> %s", method, url, type(e).__name__)
@@ -774,3 +776,54 @@ class HostBreaker:
 
 #: This run's blocking hosts (`send`): REFUSAL_TRIPS 403/429s in a row.
 _REFUSING = runstate.per_run(lambda: HostBreaker(ttl=REFUSAL_TTL_S, trips=REFUSAL_TRIPS))
+
+
+async def _robots_txt(url: str) -> requests.Response:
+    """GET one robots.txt: never polite (it IS the politeness check), with
+    the (connect, read) split timeout robots.py explains."""
+    return await send("GET", url, polite=False,
+                      timeout=(config.ROBOTS_CONNECT_TIMEOUT, config.ROBOTS_READ_TIMEOUT),
+                      headers=HEADERS, allow_redirects=True)
+
+
+def robots_cache(ttl: float = 3600) -> RobotsCache:
+    """A RobotsCache that fetches through this module."""
+    return RobotsCache(_robots_txt, ttl=ttl)
+
+
+#: This run's robots.txt cache: one fetch per host per hour, however many
+#: fetchers are running.
+ROBOTS = runstate.per_run(robots_cache)
+
+
+async def wait_turn(url: str) -> None:
+    """Wait for this host's turn on LIMITER, `Crawl-delay` apart from the
+    last (none when robots.txt is off or names none; a 429's Retry-After
+    still holds the turn): requests to the SAME host queue up, while other
+    hosts keep going."""
+    delay = await ROBOTS().crawl_delay(url) if config.RESPECT_ROBOTS else None
+    await LIMITER.wait(url, delay or 0)
+
+
+@contextlib.contextmanager
+def quiet_robots() -> Generator[None]:
+    """Suppress the per-host "unreachable" notice for SPECULATIVE probes.
+
+    Discovery guesses hostnames from a company name — `red.io`, `410.co`,
+    `united.ai` — and fetches them to find out whether they exist. Most do
+    not. Announcing "proceeding without restrictions" there describes a
+    politeness decision that is never acted on: nothing is crawled, because
+    the page fetch fails for the same reason robots.txt did. Reported
+    anyway, it buries the case the notice exists for — a host we believe is
+    a real board, whose robots.txt we could not read before crawling it.
+
+    Deliberately run-wide rather than per task: the speculative fetches
+    run as tasks of their own (resolve.fetchpool._fetch_all), and the point
+    is to cover every one of them. Another run's notices are its own.
+    """
+    rules = ROBOTS()
+    rules.quiet += 1
+    try:
+        yield
+    finally:
+        rules.quiet -= 1

@@ -376,6 +376,7 @@ MISS_REASONS = (
     "ats-unsupported",  # a real ATS we recognize but cannot fetch (:platform)
     "no-local-jobs",    # board live and readable, zero openings in [locality]
     "fetch-error",      # the resolution attempt itself raised (:ExceptionName)
+    "duplicate",        # the name's board is tracked under another name (record_alias)
 )
 
 
@@ -457,6 +458,33 @@ def record_miss(conn: sqlite3.Connection, name: str, reason: str, /,
     # record itself ("board-dead" knows which board died), so put them back.
     conn.execute("UPDATE companies SET miss_reason=?, miss_at=? WHERE name=?",
                  (reason, now, name))
+    _commit(conn)
+    return True
+
+
+def record_alias(conn: sqlite3.Connection, name: str, owner: CompanyRow) -> bool:
+    """Record `name` as another name of `owner`'s employer: its board is
+    `owner`'s, tracked under that name. An inactive `duplicate` miss joined
+    to the owner's employer, so discovery's tracked set (any name of a
+    productive employer) skips it instead of resolving it every run.
+    Declined, like record_miss, for an active row.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "CSL", "ats": "workday", "handle": "csl|1|Ext"})
+    >>> owner = get_companies(conn)[0]
+    >>> record_alias(conn, "CSL Seqirus", owner)
+    True
+    >>> [(r[0], r[1]) for r in conn.execute(
+    ...     "SELECT c.name, e.name FROM companies c JOIN employers e ON e.id = c.employer_id"
+    ...     " ORDER BY c.id")]
+    [('CSL', 'CSL'), ('CSL Seqirus', 'CSL')]
+    """
+    if name == owner.get("name") or not record_miss(conn, name, "duplicate"):
+        return False
+    conn.execute("UPDATE companies SET employer_id=? WHERE name=?",
+                 (owner["employer_id"], name))
+    conn.execute("DELETE FROM employers WHERE NOT EXISTS "
+                 "(SELECT 1 FROM companies WHERE employer_id = employers.id)")
     _commit(conn)
     return True
 
@@ -1216,11 +1244,26 @@ def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> lis
                          due_at=datetime.now().isoformat())
 
 
+def blocked_name_keys(conn: sqlite3.Connection) -> set[str]:
+    """Every blocklisted name key -- the set a paste is filtered against.
+
+    >>> from src.store import block_name
+    >>> conn = connect(":memory:")
+    >>> blocked_name_keys(conn) == set()
+    True
+    >>> _ = block_name(conn, "Oncology")
+    >>> blocked_name_keys(conn) == {"oncology"}
+    True
+    """
+    return {r["key"] for r in
+            conn.execute("SELECT key FROM name_blocklist").fetchall()}
+
+
 def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     """Every company with a fetchable board, for the background harvester:
     active or not, dormant or not, any tag, any mission score. Skipped only
-    when there is no board to fetch (capture rows, no ATS, a dead-board or
-    no-board miss) or the name is blocklisted.
+    when there is no board to fetch (capture rows, no ATS, a dead-board,
+    no-board or duplicate miss) or the name is blocklisted.
 
     >>> from src.store import block_name, mark_pending
     >>> conn = connect(":memory:")
@@ -1239,11 +1282,6 @@ def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     >>> sorted(c["name"] for c in harvestable_companies(conn))
     ['Dormant']
     """
-    # Deferred, and so is review.py's one reach back here, so NEITHER
-    # module depends on the other at load time and store/__init__ may
-    # import them in any order. The roster and the review queue both
-    # know what a company name is; that much they genuinely share.
-    from .review import _name_key, blocked_name_keys
     blocked = blocked_name_keys(conn)
     out: list[CompanyRow] = []
     for c in get_companies(conn, active_only=False):
@@ -1254,7 +1292,7 @@ def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
         # address. Everything else (inactive, dormant, pending review,
         # off-mission, even 'no-local-jobs') still HAS a board, and the
         # harvester pulls it.
-        if (c.get("miss_reason") or "").startswith(("board-dead", "no-board-found")):
+        if (c.get("miss_reason") or "").startswith(("board-dead", "no-board-found", "duplicate")):
             continue
         if _name_key(c.get("name") or "") in blocked:
             continue

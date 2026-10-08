@@ -28,11 +28,11 @@ already knows), resolve_leads (leads banked by capture.py), score_missions
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
-from datetime import datetime, timedelta
 from typing import cast
 
 from src import config
@@ -40,16 +40,23 @@ from src import store
 from src import tags as company_tags
 from src.ats import coords
 from src.ats.board import company as company_fetch
+from src.ats.signatures import detect, pack
+from src.claude import api as claude_api
+from src.claude.api import ACTIVE_MISSION_TIERS
 from src.match.locality import NC_RE
 from src.match.names import name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
-from src.rows import BoardCoords, BoardHit, CompanyIn, CompanyRow, is_watched
-from src.store.companies import BoardPlan
+from src.rows import BoardHit, CompanyIn, CompanyRow, is_watched
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
-from .resolve.probes import probe_company
+from .resolve.probes import JsScanProbePool, probe_company
+from .resolve import sniffer
 from src.ats.signatures import Detection
 from .resolve.websearch_board import websearch_board
+from .dork import run_ddgs_dorks
+from .write import (_print_scored, _productive_keys, _score_hit, _settled_board,
+                    board_already_tracked, mission_context, report_dup_board,
+                    score_and_upsert)
 
 _log = logging.getLogger(__name__)
 
@@ -149,7 +156,6 @@ async def _js_scan_pass(hits: list[BoardHit], max_workers: int,
     appears after JS runs, so the static probe misses them entirely.
     """
     missed = _boardless(MAJORS, hits, skip)
-    import importlib.util
     if importlib.util.find_spec("playwright.async_api") is None:
         if missed:
             print(f"    [js] playwright not installed; skipping JS probe "
@@ -157,7 +163,6 @@ async def _js_scan_pass(hits: list[BoardHit], max_workers: int,
         return
     if not missed:
         return
-    from .resolve.probes import JsScanProbePool
     # Parallel across DIFFERENT sites is safe: each target still sees
     # exactly one page load. K is memory-bound (a page in the one headless
     # browser each), so JS_PAGES caps it, as `max_workers` does.
@@ -202,13 +207,11 @@ async def _sniff_pass(names: list[str], hits: list[BoardHit],
     """Fetch each still-boardless name's careers page and read the ATS +
     exact slug off it. The main recall lever over the directory: it covers
     every hosted platform and finds slugs the name-guesser cannot."""
-    from .resolve.sniffer import sniff_ats
-
     todo = _boardless(names, hits)
     print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
 
     async def _sniff_one(n: str) -> BoardHit:
-        s = await sniff_ats(n)
+        s = await sniffer.sniff_ats(n)
         return await _hit_from_detection(n, s) if s else {
             "name": n, "reason": "no-board-found"}
 
@@ -260,7 +263,14 @@ def _reduce_hits(names: list[str], hits: list[BoardHit], pass_misses: list[Board
     Returns (hits, confirmed, dropped, misses). Every candidate that is
     not confirmed is a MISS with a reason: a live board with no local
     openings, a board whose coordinates read empty, or a name nothing
-    could be found for.
+    could be found for. Two names on one board keep the shorter; the other
+    is a `duplicate`:
+
+    >>> hit = {"ats": "phenom", "slug": "jobs.x.com", "nc": 5, "count": 9}
+    >>> h, ok, _, miss = _reduce_hits(["Patheon", "Thermo X"], [
+    ...     {**hit, "name": "Thermo X"}, {**hit, "name": "Patheon"}], [])
+    >>> [c["name"] for c in ok], [(m["name"], m["reason"]) for m in miss]
+    (['Patheon'], [('Thermo X', 'duplicate')])
     """
     # Names that reached a live board under SOME spelling, before the
     # blocklist and the by-board dedup collapse them: they are accounted
@@ -273,11 +283,19 @@ def _reduce_hits(names: list[str], hits: list[BoardHit], pass_misses: list[Board
 
     # De-dup by resolved board (same slug/triple reached via different
     # names, e.g. "BioAgilytix" vs "BioAgilytix Labs"); keep the shorter.
+    # The others are `duplicate` misses, aliases of whichever row ends up
+    # tracking the board (populate_companies).
     by_board: dict[tuple[str, str], BoardHit] = {}
+    losers: list[BoardHit] = []
     for h in hits:
         key = (h["ats"], str(h["slug"]))
-        if key not in by_board or len(h["name"]) < len(by_board[key]["name"]):
+        kept = by_board.get(key)
+        if kept is None or len(h["name"]) < len(kept["name"]):
+            if kept is not None:
+                losers.append(kept)
             by_board[key] = h
+        else:
+            losers.append(h)
     hits = list(by_board.values())
 
     # Split on the locality check: nc>0 is confirmed-local; nc==0 is either
@@ -290,6 +308,8 @@ def _reduce_hits(names: list[str], hits: list[BoardHit], pass_misses: list[Board
     misses: dict[str, BoardHit] = {}
     for h in dropped:
         misses[h["name"]] = {**h, "reason": "no-local-jobs"}
+    for h in losers:
+        misses.setdefault(h["name"], {**h, "reason": "duplicate"})
     for h in pass_misses:
         misses.setdefault(h["name"], h)
     for n in names:
@@ -373,255 +393,6 @@ async def discover_local(extra_names: list[str] | None = None, max_workers: int 
     _report_discovery(hits, confirmed, dropped, misses)
     return confirmed, names, misses
 
-# --------------------------------------------------------------------------- #
-#  Sampling and store writes (populate / add_board / resolve_leads)           #
-
-
-async def _sample_titles(hit: BoardCoords, n: int = 6) -> list[str]:
-    """A few job titles from a confirmed board, for mission context. `hit`
-    is a resolver hit or a store row.
-
-    Every family samples through board.company.sample_titles. [] when
-    nothing could be read.
-
-    Notes:
-        Workday had its own hand-built CXS request here until 2026-09-22.
-        It lacked the underscore tenant fix, so the roster's two
-        hyphenated tenants (Bioventus, United Therapeutics) were
-        mission-scored with no titles at all.
-    """
-    # A hit carries a multi-part handle in `slug` as a tuple; a row in `handle`.
-    board = hit if "handle" in hit else coords.from_hit(hit)
-    return await company_fetch.sample_titles(board, n)
-
-
-async def mission_context(board: BoardCoords) -> str:
-    """The free-text context `src.claude.score_company_mission` is given for
-    a resolved board or roster row (a hit or a store row): a few live posting
-    titles, else the board's own address (coords.board_context) -- '' only
-    for a board with neither. Every mission-scoring call site builds its
-    context here, so no path scores an employer on its name alone while its
-    board could have said more.
-
-    Notes:
-        A name alone is a poor signal (a medical-imaging vendor scored
-        `other` / 0.05 on its name), and boards that list no postings are
-        common.
-    """
-    titles = " | ".join(t for t in await _sample_titles(board) if t)
-    return titles or coords.board_context(board)
-
-
-def _tracked_elsewhere(plan: BoardPlan, name: str | None) -> CompanyRow | None:
-    """The roster row `plan` (store.plan_board) updates when it is not named
-    `name`: the same board under another name, a duplicate. A same-name match
-    is the ordinary re-probe; another board of a tracked employer is a
-    sibling.
-
-    Notes:
-        Compares the exact NAME, not name_key, because the upsert keys on it:
-        "Alpaca Health" on the board spelled "Alpacahealth" once landed as a
-        second row.
-    """
-    row = plan.row
-    return row if plan.action == "update" and row and row["name"] != name else None
-
-
-def board_already_tracked(conn: sqlite3.Connection,
-                           row: CompanyIn) -> CompanyRow | None:
-    """`_tracked_elsewhere` of the plan for `row`."""
-    return _tracked_elsewhere(store.plan_board(conn, row), row.get("name"))
-
-
-def report_dup_board(name: str, existing: CompanyRow) -> None:
-    print(f"    [dup]  {name[:30]:30} same {existing.get('ats') or '?'} board "
-          f"as '{existing.get('name')}' - already tracked, not added")
-
-
-#: An active roster row that has produced jobs: a nonzero total, or a
-#: non-empty crawl in the last 14 days (the one parameter).
-_PRODUCTIVE = ("COALESCE(active, 0) AND (COALESCE(total_job_count, 0) > 0 "
-               "OR COALESCE(last_nonempty_at, '') >= ?)")
-
-
-def _since_productive() -> str:
-    return (datetime.now() - timedelta(days=14)).isoformat()
-
-
-def _productive_row(conn: sqlite3.Connection, name: str) -> CompanyRow | None:
-    """The roster row named `name` if it is productive (_PRODUCTIVE), else
-    None."""
-    row = conn.execute(f"SELECT * FROM companies_effective WHERE name=? AND {_PRODUCTIVE}",
-                       (name, _since_productive())).fetchone()
-    return store.as_company(row) if row else None
-
-
-def _productive_keys(conn: sqlite3.Connection) -> frozenset[str]:
-    """The name keys of every productive roster row: discover_local's
-    `tracked`."""
-    return frozenset(name_key(r[0]) for r in conn.execute(
-        f"SELECT name FROM companies_effective WHERE {_PRODUCTIVE}", (_since_productive(),)))
-
-
-async def _score_hit(hit: BoardHit) -> tuple[str | None, float | None, str]:
-    """(tier, score, reason) for a resolved board: its mission_context as
-    the domain context for src.claude.score_company_mission."""
-    from src.claude.api import score_company_mission
-    return await score_company_mission(hit["name"], await mission_context(hit))
-
-
-async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
-                           include_missions: list[str] | None = None,
-                           tags: str | None = None,
-                           scored: tuple[str | None, float | None, str] | None = None,
-                           extra: CompanyIn | None = None
-                           ) -> tuple[CompanyRow | CompanyIn, int, bool] | None:
-    """Mission-score a resolved board and write it to the store (`db`, a
-    store.Writer) as a review candidate: the one write path behind every
-    automated add surface.
-
-    `hit` is a resolver result: {name, ats, slug, nc, count} plus an optional
-    careers_url (`slug` is the (tenant, pod, site) triple for Workday, None
-    for a custom board). Returns (row, active, pending): the row as written,
-    whether a reviewer's confirmation would activate it
-    (src.claude.is_active_mission), and whether it went to the review queue;
-    or None when the board is already on the roster under ANOTHER name
-    (_tracked_elsewhere). The dedup runs before the mission call, so a
-    duplicate costs no LLM request; a caller that scored concurrently
-    (populate_companies) passes the result as `scored`.
-
-    A name whose roster row is active and has produced jobs (_productive_row)
-    keeps its board, `active` and verdict; the same board only refreshes the
-    counts. The rest follows store.plan_board: a different board of an
-    employer with a verdict is added beside it as a sibling (store.add_board)
-    and a board of an employer whose own is gone replaces it, each with the
-    employer's verdict and no score; only a board whose plan `needs_score`
-    pays for one.
-
-    >>> import asyncio
-    >>> from src.store import Writer, connect, upsert_company
-    >>> conn = connect(":memory:")
-    >>> _ = upsert_company(conn, {"name": "Fortrea", "ats": "workday",
-    ...     "handle": "fortrea|1|Fortrea",
-    ...     "active": 1, "total_job_count": 350, "mission_tier": "core",
-    ...     "mission_score": 0.9})
-    >>> async def add():
-    ...     async with Writer(conn) as db:
-    ...         return await score_and_upsert(db, {"name": "Fortrea",
-    ...             "ats": "phenom", "slug": "careers.fortrea.com", "nc": 24,
-    ...             "count": 24}, "local_sourcing")
-    >>> asyncio.run(add())[1:]  # doctest: +ELLIPSIS
-        [sibling] Fortrea: phenom board added beside 'Fortrea'
-    (1, False)
-    >>> [r[:] for r in conn.execute("SELECT name, ats, active, total_job_count "
-    ...                             "FROM companies ORDER BY id")]
-    [('Fortrea', 'workday', 1, 350), ('Fortrea (phenom)', 'phenom', 1, 24)]
-
-    The row is inactive and review-pending unless the store has
-    already confirmed the name (src.store.is_confirmed_company). `tags`
-    defaults to the local scope tag when the board has local jobs; a caller
-    with another reason to call the company local (ats_dork's HQ signal)
-    passes it. `extra` is further columns the caller owns (apply_to_store's
-    [VERIFY] notes).
-
-    Notes:
-        Replaced four drifted copies (populate_companies, resolve_leads,
-        paste_ingest.add_names, ats_dork.harvest_urls); add_board is not a
-        fifth (a URL-registered board is written active, with no total
-        count), and ingest.add_manual_job and repair.reresolve_misses still
-        differ.
-    """
-    settled, result, held = await db.run(_settled_board, hit, source, tags, extra)
-    if settled:
-        return result
-    return await db.run(_write_candidate, hit,
-                        held or (scored if scored is not None else await _score_hit(hit)),
-                        source, include_missions, tags, extra)
-
-
-def _hit_stamp(hit: BoardHit, source: str, tags: str | None,
-               extra: CompanyIn | None) -> CompanyIn:
-    """The columns of every board written from a resolver `hit`: counts, scope
-    tag (`tags`, else local when it has local jobs), `source`, probe time,
-    then `extra`."""
-    nc = hit.get("nc") or 0
-    return cast(CompanyIn, {
-        "local_job_count": nc, "total_job_count": hit.get("count"),
-        "tags": (company_tags.LOCAL if nc else None) if tags is None else tags,
-        "source": source, "last_probed": datetime.now().isoformat(), **(extra or {})})
-
-
-def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str,
-                   tags: str | None, extra: CompanyIn | None
-                   ) -> tuple[bool, tuple[CompanyRow | CompanyIn, int, bool] | None,
-                              tuple[str | None, float | None, str] | None]:
-    """(True, score_and_upsert's answer, None) when the roster settles `hit`
-    without a score (a duplicate board, a productive row kept, a sibling of a
-    scored employer), else (False, None, the verdict the plan inherits)."""
-    from src.store import upsert_company
-
-    name = hit["name"]
-    row = coords.from_hit(hit, name=name)
-    plan = store.plan_board(conn, row)
-    dup = _tracked_elsewhere(plan, name)
-    if dup:
-        report_dup_board(name, dup)
-        return True, None, None
-    primary = plan.row
-    kept = _productive_row(conn, name) if plan.action == "update" else None
-    if kept:
-        upsert_company(conn, {"name": name,
-                              "local_job_count": hit.get("nc") or 0,
-                              "total_job_count": hit.get("count")})
-        return True, (kept, kept["active"] or 0, False), None
-    # A working board is never re-pointed: another board of a scored employer
-    # joins it as a sibling, inheriting the verdict, so it pays for no score.
-    if plan.action != "sibling" or plan.needs_score or primary is None:
-        return False, None, plan.verdict
-    row.update(_hit_stamp(hit, source, tags, extra))
-    sid, _ = store.add_board(conn, row)
-    sibling = cast(CompanyRow, store.get_company(conn, sid))
-    print(f"    [sibling] {name}: {row['ats']} board added beside '{primary['name']}'")
-    return True, (sibling, sibling["active"] or 0,
-                  sibling["review"] == "pending"), None
-
-
-def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
-                     scored: tuple[str | None, float | None, str], source: str,
-                     include_missions: list[str] | None, tags: str | None,
-                     extra: CompanyIn | None) -> tuple[CompanyIn, int, bool]:
-    """score_and_upsert's write of a scored board (`scored`, its tier,
-    score and reason); returns (row, active, pending)."""
-    from src.claude.api import is_active_mission
-    from src.store import add_board, is_confirmed_company, mark_pending
-
-    name = hit["name"]
-    row = coords.from_hit(hit, name=name)
-    tier, score, reason = scored
-    # Shared activation rule (src.claude.is_active_mission): active tiers,
-    # an UNAVAILABLE (None) score, or a multi-division conglomerate whose
-    # subdivisions are filtered at crawl time.
-    active = is_active_mission(tier, name, include_missions)
-    row.update({"mission_tier": tier, "mission_score": score,
-                "mission_reason": reason, "active": active})
-    row.update(_hit_stamp(hit, source, tags, extra))
-    # Nothing an automated pass finds joins the roster by itself: a name
-    # the store has never confirmed lands in the review queue
-    # (src.store.mark_pending) for a person to accept or reject.
-    pending = not is_confirmed_company(conn, name)
-    if pending:
-        row = mark_pending(row)
-    add_board(conn, row)
-    return row, active, pending
-
-
-def _print_scored(name: str, row: CompanyRow | CompanyIn, flag: str) -> None:
-    """One populate_companies line: `row`'s mission verdict and `flag`."""
-    score = row.get("mission_score")
-    ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-    print(f"    {name:30} {str(row.get('mission_tier')):20} {ss}  [{flag}]  "
-          f"({row.get('mission_reason')})")
-
 
 async def populate_companies(extra_names: list[str] | None = None,
                              include_missions: list[str] | None = None,
@@ -655,6 +426,9 @@ async def populate_companies(extra_names: list[str] | None = None,
 
         # Misses first: they are pure local writes, so the roster's failure
         # record survives even if the mission-scoring pass below is interrupted.
+        # A `duplicate` waits for the board it lost to (below).
+        aliases = [m for m in misses if m["reason"] == "duplicate"]
+        misses = [m for m in misses if m["reason"] != "duplicate"]
         n_miss = await db.run(lambda conn: sum(
             _record_miss(conn, m["name"], m["reason"], m) for m in misses))
         if misses:
@@ -676,6 +450,10 @@ async def populate_companies(extra_names: list[str] | None = None,
             elif result:
                 written.append(dict(result[0]))
                 _print_scored(h["name"], result[0], "tracked")
+            else:
+                # A duplicate: remembered as the tracked employer's alias,
+                # so the next pass does not resolve the name again.
+                await db.run(_record_alias, h)
         print(f"\n  scoring mission for {len(todo)} NC-local compan(ies) "
               f"not already on the roster...")
 
@@ -699,17 +477,12 @@ async def populate_companies(extra_names: list[str] | None = None,
             written.append(dict(row))
             _print_scored(h["name"], row, "PENDING REVIEW" if pending
                           else "active" if active else "INACTIVE(other)")
+        for m in aliases:
+            await db.run(_record_alias, m)
 
     if dork:
         print("\n  ATS-dork sweep (search-indexed board URLs)...")
         try:
-            # Still deferred, but for a different reason than before: dork
-            # imports this module's write path (score_and_upsert), so the
-            # two are peers in the sourcing layer with an orchestration
-            # edge back. That is a file-level cycle inside one package, not
-            # a package-level one -- what the deferred import used to hide
-            # was src/ats depending on src/discovery.
-            from .dork import run_ddgs_dorks
             added, checked = await run_ddgs_dorks()
             print(f"  dork: {added} new board(s) added "
                   f"({checked} extracted from search results)")
@@ -798,10 +571,6 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
         way, nothing is fetched until the host is listed in the profile's
         [policy] robots_exempt_hosts.
     """
-    from src.claude.api import score_company_mission
-    from src.ats.signatures import detect, pack
-    from .resolve.sniffer import sniff_ats
-
     if capture:
         async with store.Writer() as db:
             row: CompanyIn = {
@@ -823,7 +592,7 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
     if hit:
         found = pack(hit[1], hit[2], url)
     else:
-        found = await sniff_ats(name, careers_url=url)
+        found = await sniffer.sniff_ats(name, careers_url=url)
     if not found:
         print(f"  [!] No ATS coordinates found at/near {url}")
         return None
@@ -840,7 +609,7 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
         _log.warning("add board %s: fetch failed", url, exc_info=True)
         nc = 0
 
-    tier, score, reason = await score_company_mission(name, await mission_context(board))
+    tier, score, reason = await claude_api.score_company_mission(name, await mission_context(board))
 
     async with store.Writer() as db:
         dup = await db.run(board_already_tracked, board)
@@ -881,8 +650,6 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
     The verdict is the EMPLOYER's, so an employer's boards are scored once,
     through its largest board; only a board holding a verdict of its own
     (set_board_mission) is scored on its own and keeps it."""
-    from src.claude.api import ACTIVE_MISSION_TIERS, score_company_mission
-
     async with store.Writer() as db:
         cos = [c for c in await db.run(store.get_companies, active_only=rescore_all)
                if c.get("ats") and (rescore_all or not c.get("mission_tier"))]
@@ -904,7 +671,7 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
         print(f"  mission-scoring {len(cos)} compan(ies)...")
 
         async def _one(c: CompanyRow) -> tuple[str | None, float | None, str]:
-            return await score_company_mission(c["name"], await mission_context(c))
+            return await claude_api.score_company_mission(c["name"], await mission_context(c))
 
         n = 0
         async for c, (tier, score, reason) in fan_out(
@@ -953,23 +720,33 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
     return n
 
 
+def _record_alias(conn: sqlite3.Connection, hit: BoardHit) -> bool:
+    """store.record_alias for `hit`'s name, of the row tracking its board."""
+    dup = board_already_tracked(conn, coords.from_hit(hit, name=hit["name"]))
+    return bool(dup) and store.record_alias(conn, hit["name"], dup)
+
+
 def _record_miss(conn: sqlite3.Connection, name: str, reason: str,
                  hit: BoardHit | None = None, source: str = "local_sourcing") -> bool:
     """record_miss for `name` with whatever board `hit` established, unless
-    that board is already tracked under another name (a second row would
-    harvest it twice: "Paradromics" beside "Paradromics Inc.", 2026-10-08).
+    that board is already tracked under another name: then `name` becomes
+    an alias of that row's employer (store.record_alias), not a second row
+    that would harvest the board twice ("Paradromics" beside "Paradromics
+    Inc.", 2026-10-08).
 
     >>> conn = store.connect(":memory:")
     >>> _ = store.upsert_company(conn, {"name": "P Inc.", "ats": "jazzhr", "slug": "p"})
     >>> _record_miss(conn, "P", "no-local-jobs", {"name": "P", "ats": "jazzhr", "slug": "p"})
         [dup]  P                              same jazzhr board as 'P Inc.' - already tracked, not added
-    False
+    True
+    >>> conn.execute("SELECT ats, miss_reason FROM companies WHERE name='P'").fetchone()[:]
+    (None, 'duplicate')
     """
     row: CompanyIn = {**_miss_row(hit), "source": source} if hit else {"source": source}
     dup = row.get("ats") and board_already_tracked(conn, {**row, "name": name})
     if dup:
         report_dup_board(name, dup)
-        return False
+        return store.record_alias(conn, name, dup)
     return store.record_miss(conn, name, reason, **row)
 
 

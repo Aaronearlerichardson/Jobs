@@ -39,10 +39,10 @@ from .companies import (  # noqa: F401
     add_board, as_company, board_key, company_by_board, plan_board, realign_job_names,
     company_by_host, company_id_by_name, crawlable_companies,
     deactivate_company, dedup_companies, export_companies, get_companies,
-    HARVEST_DEAD_AFTER_DAYS, get_company, harvestable_companies,
+    HARVEST_DEAD_AFTER_DAYS, blocked_name_keys, get_company, harvestable_companies,
     import_companies, mark_harvest_attempted, mark_harvested,
     miss_counts, miss_family, reactivate_company, recent_miss_names,
-    record_crawl_outcome, record_miss, roster_growth, set_company_tag,
+    record_alias, record_crawl_outcome, record_miss, roster_growth, set_company_tag,
     upsert_company,
 )
 from .employers import (  # noqa: F401
@@ -69,7 +69,6 @@ from .pipeline import (  # noqa: F401
 from .review import (  # noqa: F401
     mark_pending, is_confirmed_company,
     pending_companies, confirm_company, reject_company, block_name,
-    blocked_name_keys,
 )
 from .schema import (  # noqa: F401  (re-exported: store.connect etc.)
     BUSY_TIMEOUT_S, Writer, as_job, connect, batch,

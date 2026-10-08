@@ -1209,3 +1209,53 @@ def test_src_has_no_any_and_no_type_ignores():
                 and re.search(r"#\s*(?:pyrefly|type):\s*ignore", src)]
     assert not named, f"Any in {sorted(set(named))}"
     assert not silenced, f"ignore comments in {silenced}"
+
+
+# --------------------------------------------------------------------------- #
+#  Imports live at the top of the module                                      #
+# --------------------------------------------------------------------------- #
+#
+# An import inside a function hides a dependency: a cycle it breaks never
+# shows in the module graph, and the name it binds dodges review. src/ keeps
+# one only for an optional or heavy package, or a cycle not yet untangled.
+
+#: Function-body imports src/ keeps, (file, imported module) -> why.
+DEFERRED_IMPORT_ALLOW = {
+    ("src/config/profile.py", "src.config"):
+        "the package re-exports this module's names; callers mutate the package",
+    ("src/digest/render.py", "winotify"): "optional, Windows-only",
+    ("src/discovery/board_directory.py", "duckdb"): "heavy; only the directory queries need it",
+    ("src/discovery/resolve/directory.py", "duckdb"): "heavy; only the directory queries need it",
+    ("src/discovery/resolve/probes.py", "playwright.async_api"):
+        "optional; _launch has already imported it off the loop",
+    **{("src/net/ddg.py", mod): "optional: either ddgs or nothing is installed"
+       for mod in ("ddgs", "ddgs.base", "ddgs.engines", "ddgs.http_client")},
+    **{("src/net/util.py", mod): "fallback parser, ~120 ms to import, first use only"
+       for mod in ("html5lib", "html5lib.constants")},
+}
+
+
+def _deferred_imports(rel, tree):
+    """{(rel, module)} for each import inside a function body."""
+    return {(rel, mod) for fn in ast.walk(tree)
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for n in ast.walk(fn)
+            for mod in ([a.name for a in n.names] if isinstance(n, ast.Import)
+                        else [_import_source(rel, n)] if isinstance(n, ast.ImportFrom)
+                        else [])}
+
+
+def test_the_deferred_import_guard_sees_one():
+    tree = ast.parse("import os\ndef f():\n    import json\n    from . import b\n")
+    assert _deferred_imports("src/p/a.py", tree) == {("src/p/a.py", "json"),
+                                                     ("src/p/a.py", "src.p")}
+
+
+def test_src_imports_only_at_module_level():
+    found = {hit for rel, tree in _parsed() if rel.startswith("src/")
+             for hit in _deferred_imports(rel, tree)}
+    unlisted = sorted(found - DEFERRED_IMPORT_ALLOW.keys())
+    stale = sorted(DEFERRED_IMPORT_ALLOW.keys() - found)
+    assert not unlisted, (f"{unlisted}: import at module level, or add the pair "
+                          "to DEFERRED_IMPORT_ALLOW with the reason it cannot be")
+    assert not stale, f"stale DEFERRED_IMPORT_ALLOW entries: {stale}"

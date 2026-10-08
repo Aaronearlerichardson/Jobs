@@ -16,6 +16,11 @@ from src.claude import api as claude_api
 from src.match import gates
 from src.crawl import harvest
 from src.net import http, parallel
+from src.crawl import runner
+from src.match.names import SLUG_NAME_SOURCE
+from src.ops import maintenance as ops
+from src.ops import scoring
+from src.store.companies import HARVEST_DEAD_AFTER_DAYS
 
 
 def _job(i, desc=""):
@@ -459,7 +464,6 @@ async def test_harvest_board_soft_failure_keeps_the_count_and_records_a_miss(
 
 async def test_harvest_board_promotes_to_board_dead_after_three_days(
         tmp_path, monkeypatch, capsys):
-    from src.store.companies import HARVEST_DEAD_AFTER_DAYS
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", ats="lever")
@@ -497,7 +501,6 @@ async def test_harvest_board_buries_a_second_definitive_404(tmp_path, monkeypatc
 @pytest.mark.parametrize("ats, dead", [("greenhouse", True),
                                        ("workday", False)])
 async def test_crawl_buries_a_second_definitive_404(db, local_track, ats, dead):
-    from src.crawl import runner
     c = _company(db, "Acme", ats=ats)
     snap = {"fetch_errors": 1, "incomplete": True, "capped": False,
             "capped_total": None, "last_error": "Acme: HTTP 404"}
@@ -810,7 +813,6 @@ async def test_harvest_summary_names_boards_whose_name_is_just_their_own_slug(
     """Slug-named rows (names.SLUG_NAME_SOURCE) still called by their own
     slug/tenant are listed largest board first; a renamed one, or one a
     person or page named, is not."""
-    from src.match.names import SLUG_NAME_SOURCE
     db = tmp_path / "s.db"
     conn = store.connect(db)
     store.upsert_company(conn, {"name": "Xyz", "ats": "workday",
@@ -858,7 +860,6 @@ async def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
                                                               snapshot, closed):
     """The crawl reads fetch_all's per-source snapshot and gives
     store.sync_job_statuses the same guard the harvester does."""
-    from src.crawl import runner
     c = _company(db, "Acme")
     store.upsert_job(db, {"job_id": "gh_acme_old", "company_id": c["id"],
                           "title": "Still open", "track": local_track.track})
@@ -874,7 +875,6 @@ def test_the_watch_section_lists_us_postings_only(db, local_track):
     """A watched company's new postings are listed wherever in the US they
     sit; a seat abroad is neither listed nor stored (2026-09-29: 20 of 29
     hits were NVIDIA seats in Israel, India and Europe)."""
-    from src.crawl import runner
     c = _company(db, "Acme", watch=1)
     jobs = [{**_job(1), "title": "Data Engineer", "location": "US, CA, Santa Clara"},
             {**_job(2), "title": "Data Engineer", "location": "Israel, Yokneam"}]
@@ -889,10 +889,6 @@ async def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     """The end-to-end contract: a harvested row (no track) is scored by the
     next crawl, and the crawl reuses the stored description instead of
     re-hydrating."""
-    from src import config
-    from src.crawl import runner
-    from src.ops import maintenance as ops
-    from src.ops import scoring
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", mission_score=0.9, tags="local")
@@ -945,7 +941,6 @@ async def test_sample_matches_label_a_job_new_only_if_the_store_lacked_it(
     """The label is the store's answer when the job was gated: the crawl has
     written every match by the time the samples print, so asking then would
     call each one "(seen)"."""
-    from src.crawl import runner
     db = tmp_path / "s.db"
     store.upsert_job(store.connect(db), {"job_id": "feed_old", "title": "Old Role"})
     t = sweep_track.model_copy(update={

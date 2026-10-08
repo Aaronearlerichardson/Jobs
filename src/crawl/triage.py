@@ -95,15 +95,14 @@ from src.ats.board.company import board_origin, needs_detail
 from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, FitResult, score_resume_fit
 from src.config import RuntimeTrack
-from src.crawl import harvest
-from src.crawl.harvest import MISS_BACKOFF_S, hydrate_rows
+from src.crawl.hydrate import MISS_BACKOFF_S, BoardStats, hydrate_rows
 from src.crawl.runner import apply_keyword_focus, core_anchor
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
                                 remote_signal, remote_signal_for, us_eligible)
 from src.net.parallel import fan_out
-from src.net.util import clean_field
+from src.net.util import clean_field, worker_count
 from src.ops import maintenance as ops
 from src.rows import CompanyRow, FetchedJob, JobRow, is_watched
 
@@ -145,7 +144,9 @@ RETRY_DAYS = 3
 _WAITING_CAP = 20
 # The harvester's pool size, shared: triage runs as the harvest pass's
 # second half and must not disagree with it about HARVEST_WORKERS.
-DEFAULT_WORKERS = harvest.DEFAULT_WORKERS
+# Workers of the pass's second half: triage's scoring and verify
+# (triage's hydration and the closed-URL probe walk hosts, as the pull does).
+DEFAULT_WORKERS = worker_count("harvest_workers")
 
 
 # --------------------------------------------------------------------------- #
@@ -413,7 +414,7 @@ def summarize(verdicts: dict[str, str]) -> tuple[str, str, list[str]]:
 
 def _fetcher_shape(row: JobRow, company: CompanyRow) -> FetchedJob:
     """A stored row as the job dict board.company.hydrate_description
-    expects (`harvest.hydrate_rows` passes it the roster row, which names the
+    expects (`hydrate.hydrate_rows` passes it the roster row, which names the
     board)."""
     return {"id": row["job_id"],
             "title": row.get("title") or "", "url": row.get("url") or "",
@@ -423,13 +424,13 @@ def _fetcher_shape(row: JobRow, company: CompanyRow) -> FetchedJob:
 
 
 async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: float | None = None,
-                          backoff_s: float = MISS_BACKOFF_S) -> harvest.BoardStats:
+                          backoff_s: float = MISS_BACKOFF_S) -> BoardStats:
     """Fetch bodies for one company's survivors, serially, within the
     harvester's per-host tolerances. Returns the harvest-style stats, plus
     `tried`: the ids of the rows a detail fetch was attempted on. Exercised
     by tests/test_triage.py::
     test_waiting_reason_tells_a_failed_fetch_from_a_row_over_the_cap."""
-    stats: harvest.BoardStats = {"hydrated": 0, "unhydrated": 0}
+    stats: BoardStats = {"hydrated": 0, "unhydrated": 0}
     stats["tried"] = await hydrate_rows(jobs, company, stats, delay, backoff_s)
     return stats
 
@@ -515,7 +516,7 @@ def _hydrate_order(survivors: dict[str, tuple[CompanyRow, JobRow, str]]) -> Call
     test_hydration_spends_the_board_budget_on_relevant_titles_first.
 
     Notes:
-        The per-host detail budget (harvest.hydrate_rows' cap and
+        The per-host detail budget (hydrate.hydrate_rows' cap and
         miss-streak breaker) used to be spent in arrival order within the
         decided/undecided split. At a multi-division employer only the
         division gate can refuse a chip-design seat, and that gate needs a
@@ -531,7 +532,7 @@ def _hydrate_order(survivors: dict[str, tuple[CompanyRow, JobRow, str]]) -> Call
 
 
 async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]], summary: dict[str, float],
-                   stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[harvest.BoardStats]],
+                   stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[BoardStats]],
                    cutoff: str) -> dict[str, str]:
     """Phase 2: resolve every survivor company_fetch.needs_detail still
     flags -- a missing body, or a body already but a
@@ -619,7 +620,7 @@ async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors
                 waiting[j["id"]] = "fetch failed this pass"
             else:
                 # Never reached hydrate_description at all: the board's
-                # per-host cap or miss-streak breaker (harvest.hydrate_rows)
+                # per-host cap or miss-streak breaker (hydrate.hydrate_rows)
                 # cut it from this pass's batch.
                 waiting[j["id"]] = "not reached this pass (board hydrate cap/pause)"
     print(f"  hydrated {summary['hydrated']} of {n_todo}")
@@ -796,7 +797,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
               limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
               score_cap: int = SCORE_CAP, fit: bool = True, hydrate: bool = True,
               mission_scorer: MissionScorer = score_company_mission,
-              hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[harvest.BoardStats]] = hydrate_company,
+              hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[BoardStats]] = hydrate_company,
               now: datetime | None = None, requeue: bool = False,
               requeue_apply: bool = False) -> Mapping[str, object]:
     """Triage every pending row in the store. Returns the summary dict

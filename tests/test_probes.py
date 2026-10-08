@@ -32,6 +32,8 @@ from src.discovery.resolve import probes
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.ops import repair, roster, scoring, status
 import src.store as store
+from src.net.parallel import fan_out
+import src.claude.fit as fit_module
 
 
 @pytest.fixture(autouse=True)
@@ -273,7 +275,6 @@ class TestSelfHealRetryMarker:
     def _stub_refusal(monkeypatch):
         """Every call_claude_json call behaves like a refusal: no answer,
         which is what score_resume_fit turns into reason="unscored"."""
-        import src.claude.fit as fit_module
         calls = []
 
         async def refuse(*a, **k):
@@ -289,7 +290,6 @@ class TestSelfHealRetryMarker:
         # The breaker tripping mid-pass (expired key, exhausted balance)
         # would otherwise park every unscored row for UNSCORED_RETRY_DAYS.
         self._stub_refusal(monkeypatch)
-        import src.claude.fit as fit_module
         monkeypatch.setattr(fit_module, "api_disabled", lambda: "HTTP 401")
         jid = add_job("j1", description="x" * 300, fit=None)
 
@@ -374,7 +374,6 @@ class TestSelfHealRetryMarker:
 
     async def test_scoring_succeeds_once_due_and_replaces_the_marker(
             self, db, add_job, monkeypatch):
-        import src.claude.fit as fit_module
         jid = add_job("j1", description="x" * 300, fit=None)
         db.execute("UPDATE jobs SET fit_reason=? WHERE job_id=?",
                   (f"unscored:refused:300:{iso_days_ago(31)[:10]}", jid))
@@ -701,7 +700,6 @@ class TestProbeIsDecisivePerFamily:
         """A company with many stale rows must not re-fetch its board once
         per row, even when the probe pool asks for all of them at once:
         the memo used to fill only after the first read landed."""
-        from src.net.parallel import fan_out
         rows = [ASHBY_JOB[:-2] + f"{i:02d}" for i in range(8)]
         listing = {"jobs": [{"id": rows[0].rsplit("/", 1)[1]}]}
         seen = probe_http({FAMILY_API[ASHBY_JOB]: lambda url, **kw:

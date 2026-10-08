@@ -26,7 +26,7 @@ from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
 from src.net import http
 from src.net.http import HEADERS, HostBreaker, Unreachable
-from src.net.robots import FETCH_ERRORS
+from src.net.http import FETCH_ERRORS
 from src.net.util import host_of, origin_of
 
 class Page(Protocol):
@@ -310,9 +310,8 @@ async def _fetch_all(urls: list[str]) -> dict[str, Page | None]:
 
     These are GUESSES — `<token>.io`, `<token>.co`, `careers.<token>.com` —
     so their robots.txt failures are expected and say nothing worth logging;
-    `robots.quiet()` keeps the notice for hosts we actually mean to crawl.
+    `http.quiet_robots()` keeps the notice for hosts we actually mean to crawl.
     """
-    from src.net import robots
     out = dict.fromkeys(urls)
     live = await _drop_unresolvable(urls)
     if not live:
@@ -323,6 +322,6 @@ async def _fetch_all(urls: list[str]) -> dict[str, Page | None]:
         async with slots:
             return await _fetch_page(url)
 
-    with robots.quiet():
+    with http.quiet_robots():
         out.update(zip(live, await asyncio.gather(*map(fetch, live))))
     return out

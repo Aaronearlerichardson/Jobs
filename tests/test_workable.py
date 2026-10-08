@@ -18,6 +18,12 @@ import pytest
 from conftest import fake_response, fixture
 from src.ats.board import board_for
 from src.ats.signatures import detect
+from src import tags
+from src.ats.board import company
+from src.ats.registry import seed_tag_for
+from src.ats.registry import sweep
+from src.match.locality import is_nc
+import src.store as store
 
 
 SLUG = "eupry-aps"
@@ -90,7 +96,6 @@ class TestLocation:
         """`locations[]` is the full list while the flat fields show only
         the primary site, joined with ";", the separator `locality.is_nc`
         reads one office at a time."""
-        from src.match.locality import is_nc
         far_city, far_rest = elsewhere.split(", ", 1)
         loc_city, loc_state = local_addr.split(", ", 1)
         loc = await _location(serve, city=far_city, state="", country=far_rest,
@@ -143,14 +148,11 @@ class TestRegistry:
     """src/ats/registry.py: the sweep's thunk and the seed tag."""
 
     def test_the_registry_knows_workable(self):
-        from src import tags
-        from src.ats.registry import seed_tag_for
         # The seed-tag rule is "SWEEP iff the spec sets sweep"
         # (tests/test_boards_spec.py pins it); Workable seeds LOCAL.
         assert seed_tag_for("workable") == tags.LOCAL
 
     async def test_the_registry_thunk_gates_and_names_the_company(self, workable_board):
-        from src.ats.registry import sweep
         workable_board(fixture("workable_board.json"),
                        detail=fixture("workable_job_detail.json"))
         jobs = await sweep("workable", "Eupry", SLUG)()
@@ -163,7 +165,6 @@ class TestCompanyDispatch:
     coordinate survives `adapt`)."""
 
     async def test_fetch_company_adapts_this_modules_rows(self, workable_board):
-        from src.ats.board import company
         workable_board(fixture("workable_board.json"),
                        detail=fixture("workable_job_detail.json"))
         out = await company.fetch_company({"ats": "workable", "slug": SLUG})
@@ -172,7 +173,6 @@ class TestCompanyDispatch:
         assert "company" not in out[0]
 
     async def test_the_location_regex_filters_the_listing(self, workable_board):
-        from src.ats.board import company
         workable_board(_board([_job("AAAA111111", city="Raleigh",
                                     state="North Carolina"),
                                _job("BBBB222222", city="Austin",
@@ -183,7 +183,6 @@ class TestCompanyDispatch:
 
     async def test_hydrate_description_reads_the_posting_from_its_url(
             self, workable_board):
-        from src.ats.board import company
         workable_board(detail=fixture("workable_job_detail.json"))
         job = {"ats": "workable", "url": JOB_URL,
                "description": "", "location": "Raleigh, North Carolina"}
@@ -192,7 +191,6 @@ class TestCompanyDispatch:
         assert out["location"] == "Raleigh, North Carolina"
 
     async def test_the_title_sampler_reads_the_listing_only(self, workable_board):
-        from src.ats.board import company
         calls = workable_board(fixture("workable_board.json"),
                                detail=fixture("workable_job_detail.json"))
         titles = await company.sample_titles({"ats": "workable", "slug": SLUG}, n=2)
@@ -204,7 +202,6 @@ def test_a_stored_url_is_attributable_to_its_employer(db):
     """apply.workable.com is a shared host, so `store.company_by_host`
     insists on the board's own path prefix. The tenant-path URL the spec
     builds is what lets a captured page land on the right roster row."""
-    import src.store as store
     store.upsert_company(db, {"name": "Eupry", "ats": "workable", "slug": SLUG,
                               "careers_url": f"https://apply.workable.com/{SLUG}/"})
     hit = store.company_by_host(db, JOB_URL)

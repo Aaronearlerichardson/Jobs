@@ -58,7 +58,7 @@ console_utf8()
 from src import config, runstate                             # noqa: E402
 from src.net import http                                     # noqa: E402
 from src.net.http import HEADERS                             # noqa: E402
-from src.net.robots import CACHE as ROBOTS         # noqa: E402
+from src.net.http import ROBOTS                    # noqa: E402
 from src.net.util import origin_of                # noqa: E402
 from src.rows import BoardCoords, FetchedJob      # noqa: E402
 

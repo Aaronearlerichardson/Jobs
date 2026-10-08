@@ -26,7 +26,9 @@ from src.match.locality import LocationRE
 from src.net.util import clean_url
 from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob, str_or_none
 from .schema import (SqlScalar, _commit, apply_update, as_job, batch,  # noqa: F401 (doctests)
-                     connect, dedup_groups, sql, sql_function)
+                     connect, dedup_groups, _norm_url, sql, sql_function)
+from .companies import harvestable_companies
+from .pipeline import RANKING_EXCLUDED_DISPOSITIONS
 
 
 @sql_function("combined_score", 2)
@@ -142,10 +144,7 @@ def open_in_track_clause(track: str | None = None, *, alias: str = "",
     if not include_closed:
         conds.append(f"COALESCE({p}status,'open') != 'closed'")
     if not include_dispositioned:
-        # Deferred, like pipeline.py's one reach back here, so neither
-        # module depends on the other at load time (same rule as
-        # companies/review). Ranking hides what a person ruled on.
-        from .pipeline import RANKING_EXCLUDED_DISPOSITIONS
+        # Ranking hides what a person ruled on.
         ph = ",".join("?" for _ in RANKING_EXCLUDED_DISPOSITIONS)
         conds.append(f"({p}disposition IS NULL OR "
                      f"{p}disposition NOT IN ({ph}))")
@@ -512,14 +511,6 @@ def _norm_title(t: str | None) -> str:
     return re.sub(r"\s+", " ", (t or "")).strip().lower()
 
 
-@sql_function("norm_url", 1)
-def _norm_url(u: str | None) -> str:
-    """Scheme/query/fragment/trailing-slash-insensitive URL key."""
-    u = (u or "").strip().lower()
-    u = re.sub(r"^https?://", "", u)
-    return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
-
-
 @sql_function("city_key", 1)
 def _city_key(location: str | None) -> str:
     """A location's city as a comparison key: its first comma/semicolon/slash
@@ -717,8 +708,6 @@ def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> lis
     >>> retire_stopped(conn), retire_stopped(conn)
     ([('seen', 1)], [])
     """
-    # Deferred, like companies.py's own reach into review.py (see the module doc).
-    from .companies import harvestable_companies
     ids = [c["id"] for c in harvestable_companies(conn)
            if config.offmission_inactive(c) == "stopped"]
     acted = " OR ".join(f"COALESCE({col}, '') != ''" for col in (

@@ -5,7 +5,7 @@ Python source (insert entries into GREENHOUSE_COMPANIES etc.), and a separate
 --import-seeds step copied them into the store. The store IS the roster now —
 candidates upsert straight into the companies table through the same
 mission-scoring write path every other automated add uses
-(src.discovery.local_sourcing.score_and_upsert).
+(src.discovery.write.score_and_upsert).
 
 New rows land in the REVIEW QUEUE (src.store.mark_pending): a candidate the
 model suggested and a resolver confirmed is exactly the kind of name that
@@ -24,6 +24,7 @@ from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
 from src.match.names import name_key
 from src.rows import BoardHit, CompanyIn, FetchedJob, Slug
+from .write import score_and_upsert
 
 if TYPE_CHECKING:
     import sqlite3
@@ -66,7 +67,7 @@ async def apply_to_store(result: DiscoveryResult, dry_run: bool = False) -> list
     table; return summary lines. `dry_run=True` reports without writing —
     and without paying for a mission call.
 
-    The write is local_sourcing.score_and_upsert, the one path behind every
+    The write is write.score_and_upsert, the one path behind every
     automated add: it mission-scores the board, activates it only if the tier
     says so (src.claude.is_active_mission), refuses a board the roster
     already holds under another name, and queues anything the store has not
@@ -81,11 +82,6 @@ async def apply_to_store(result: DiscoveryResult, dry_run: bool = False) -> list
         roster, ACTIVE, and it stayed crawled until somebody remembered to
         run the backfill.
     """
-    # Deferred: the write path pulls in the mission scorer, and
-    # src.discovery.__init__ imports this module on every `import
-    # src.discovery` -- including the ones that only want the report.
-    from .local_sourcing import score_and_upsert
-
     term = result["term"]
     confirmed = [c for c in result["companies"] if c.confirmed]
     if not confirmed:

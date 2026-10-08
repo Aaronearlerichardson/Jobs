@@ -35,6 +35,7 @@ from pydantic import BaseModel
 from src import config, store
 from src.ats import coords
 from src.ats.board import BOARDS
+from src.discovery.dork import intake_boards
 from src.discovery.name_sources import blocked_keys
 from src.discovery.resolve import directory
 from src.discovery.resolve.probes import Slug
@@ -466,7 +467,6 @@ async def import_boards(apply: bool = False, limit: int | None = None) -> dict[s
     if not apply:
         print("  dry run: nothing written (--apply to validate, score and queue)")
         return counts
-    from src.discovery.dork import intake_boards      # dork imports the resolver, which may import this
     cap = min(cfg.max_scored_per_run, limit) if limit else cfg.max_scored_per_run
     counts["added"], _ = await intake_boards(_hits(eligible), "board_directory", require_live=True, limit=cap)
     print(f"  {counts['added']} board(s) queued for review")

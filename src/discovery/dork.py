@@ -25,7 +25,7 @@ from src.ats import coords
 from src.ats.board import BOARDS
 from src.ats.board import company as company_fetch
 from src.ats.signatures import detect
-from src.discovery.local_sourcing import score_and_upsert
+from src.discovery.write import score_and_upsert
 from src.discovery.resolve.board import validate_board
 from src.discovery.resolve.identity import nc_hq_signal
 from src.discovery.resolve.probes import slug_keyed

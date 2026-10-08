@@ -17,11 +17,12 @@ import logging
 import re
 from src import config
 from src.ats.board import BOARDS
+from src.ats.board.custom import custom_board_listing_url
 from src.ats.signatures import Detection, detect, pack
 from src.match.names import name_key
 from src.net import ddg, http
 from src.net.http import HEADERS
-from src.net.robots import FETCH_ERRORS
+from src.net.http import FETCH_ERRORS
 from .identity import foreign_board
 from .probes import Slug
 
@@ -105,8 +106,6 @@ async def websearch_board(name: str, max_results: int = 8) -> Detection | None:
       2. aggregators are skipped and self-hosted *custom* boards accepted,
          not just JSON-API ATSes.
     """
-    from src.ats.board.custom import custom_board_listing_url
-
     async def _resolve(urls: list[str]) -> Detection | None:
         # Pass 1: ATS coordinates already visible in a result URL
         # (myworkdayjobs.com / boards.greenhouse.io / *.icims.com links).

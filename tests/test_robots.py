@@ -19,6 +19,7 @@ import requests
 
 from conftest import answer, fake_response
 from src.net import http, robots
+from src import config
 
 
 class TestExemptHosts:
@@ -29,12 +30,11 @@ class TestExemptHosts:
 
     @pytest.fixture
     def cache(self, monkeypatch):
-        from src import config
         monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
         monkeypatch.setattr(config, "ROBOTS_EXEMPT_HOSTS",
                             ("api.smartrecruiters.com", ".peopleadmin.com"),
                             raising=False)
-        c = robots.RobotsCache()
+        c = http.robots_cache()
         fetched = []
 
         async def _blanket(origin):
@@ -86,7 +86,6 @@ class TestRespectRobots:
 
     @staticmethod
     def respect(monkeypatch, on):
-        from src import config
         monkeypatch.setattr(config, "RESPECT_ROBOTS", on, raising=False)
 
     async def test_on_a_disallowed_page_is_refused_after_one_robots_fetch(self, wire, monkeypatch):
@@ -141,7 +140,6 @@ class TestWhatAFetchedFileMeans:
 
     @pytest.fixture(autouse=True)
     def _robots_on(self, monkeypatch):
-        from src import config
         monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
 
     @pytest.mark.parametrize("status, allowed", [
@@ -150,12 +148,12 @@ class TestWhatAFetchedFileMeans:
     async def test_each_status_means_what_the_rfc_says(self, serve, status, allowed):
         """A parsed answer obeys; a 4xx is no restriction; a 5xx is every path refused."""
         serve(fake_response(text=self.BLANKET, status=status))
-        assert await robots.RobotsCache().allowed("https://a.test/jobs") is allowed
+        assert await http.robots_cache().allowed("https://a.test/jobs") is allowed
 
     async def test_robots_txt_is_fetched_following_redirects(self, serve):
         seen = {}
         serve(lambda url, **kw: seen.update(kw) or fake_response(text=""))
-        await robots.RobotsCache()._fetch("https://example.com")
+        await http.robots_cache()._fetch("https://example.com")
         assert seen["allow_redirects"] is True
 
     @pytest.mark.parametrize("elapsed, refetched", [
@@ -170,7 +168,7 @@ class TestWhatAFetchedFileMeans:
             calls.append(origin)
             return robots._HostRules()
 
-        cache = robots.RobotsCache(ttl=5)
+        cache = http.robots_cache(ttl=5)
         cache._fetch = fetch
         await cache.allowed("https://a.test/x")
         now[0] += elapsed
@@ -182,18 +180,18 @@ class TestWhatAFetchedFileMeans:
             raise ValueError("unparseable")
         monkeypatch.setattr(robots.Protego, "parse", staticmethod(refuse))
         serve(fake_response(text=self.BLANKET))
-        rules = await robots.RobotsCache()._fetch("https://a.test")
+        rules = await http.robots_cache()._fetch("https://a.test")
         assert rules.protego is None and not rules.disallow_all
 
     async def test_an_error_while_matching_fails_closed(self, monkeypatch):
-        cache = robots.RobotsCache()
+        cache = http.robots_cache()
         monkeypatch.setattr(cache, "_fetch", answer(SimpleNamespace(allows=lambda url: 1 / 0)))
         assert await cache.allowed("https://a.test/x") is False
 
     async def test_sitemaps_are_the_ones_the_file_lists(self, serve):
         serve(fake_response(text="User-agent: *\nDisallow: /x\nSitemap: https://a.test/s1.xml\n"
                                  "Sitemap: https://a.test/s2.xml\n"))
-        cache = robots.RobotsCache()
+        cache = http.robots_cache()
         assert await cache.sitemaps("https://a.test/jobs") == ["https://a.test/s1.xml", "https://a.test/s2.xml"]
         serve(fake_response(text="", status=404))
         assert await cache.sitemaps("https://b.test/jobs") == []
@@ -210,13 +208,12 @@ class TestFetchDeduplication:
 
     @pytest.fixture(autouse=True)
     def _robots_on(self, monkeypatch):
-        from src import config
         monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
 
     @staticmethod
     def _spy_cache(delay=0.05):
         """A RobotsCache whose network fetch is replaced by a call recorder."""
-        calls, cache = [], robots.RobotsCache()
+        calls, cache = [], http.robots_cache()
 
         async def _fetch(origin):
             calls.append(origin)
@@ -251,7 +248,7 @@ class TestFetchDeduplication:
 
 
 async def test_crawl_delay_spaces_one_origin_only():
-    """The limiter robots.txt's Crawl-delay feeds (RobotsCache.wait_turn):
+    """The limiter robots.txt's Crawl-delay feeds (http.wait_turn):
     the next turn on an origin waits out the gap since the last one began,
     and another origin's turn goes at once."""
     limiter, at = http.HostLimiter(), {}
@@ -272,11 +269,10 @@ async def test_a_redirect_into_a_shared_host_waits_its_turn(monkeypatch):
     first request to it would: two origins redirecting into one host with
     a Crawl-delay reach it that far apart, and so do an http->https hop on
     one host and a direct request to its https origin."""
-    from src import config
     monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
-    monkeypatch.setattr(robots.CACHE(), "allowed", answer(True))
+    monkeypatch.setattr(http.ROBOTS(), "allowed", answer(True))
     paced = ("https://shared.test", "https://up.test")
-    monkeypatch.setattr(robots.CACHE(), "crawl_delay",
+    monkeypatch.setattr(http.ROBOTS(), "crawl_delay",
                         answer(lambda url: 0.2 if url.startswith(paced) else None))
     at = {}
 
@@ -318,7 +314,7 @@ class TestUnreachableHostReporting:
     @staticmethod
     async def _fetch_raising(exc, serve, capsys):
         serve(exc)
-        rules = await robots.RobotsCache()._fetch("https://example.com")
+        rules = await http.robots_cache()._fetch("https://example.com")
         return rules, capsys.readouterr().out
 
     async def test_nonexistent_host_is_silent(self, wire, capsys):
@@ -329,7 +325,7 @@ class TestUnreachableHostReporting:
             SimpleNamespace(host="example.com", port=443, ssl=True), gai)
         dns.__cause__ = gai
         wire(dns)
-        rules = await robots.RobotsCache()._fetch("https://example.com")
+        rules = await http.robots_cache()._fetch("https://example.com")
         assert capsys.readouterr().out == ""
         assert rules.protego is None and not rules.disallow_all   # still fails open
 
@@ -361,7 +357,7 @@ class TestFetchTimeout:
         seen = {}
         serve(lambda url, **kw: seen.update(timeout=kw.get("timeout"))
               or requests.exceptions.ConnectTimeout("nope"))
-        await robots.RobotsCache()._fetch("https://example.com")
+        await http.robots_cache()._fetch("https://example.com")
         return seen["timeout"]
 
     async def test_timeout_is_a_connect_read_pair(self, serve):
@@ -372,7 +368,6 @@ class TestFetchTimeout:
         assert connect < read, "a short read timeout would abandon slow real servers"
 
     async def test_values_come_from_config(self, monkeypatch, serve):
-        from src import config
         monkeypatch.setattr(config, "ROBOTS_CONNECT_TIMEOUT", 1.5, raising=False)
         monkeypatch.setattr(config, "ROBOTS_READ_TIMEOUT", 9.0, raising=False)
         assert await self._capture_timeout(serve) == (1.5, 9.0)
@@ -380,9 +375,9 @@ class TestFetchTimeout:
     async def test_a_timeout_still_fails_open(self, serve):
         """Giving up faster must not turn into giving up differently."""
         serve(requests.exceptions.ConnectTimeout("nope"))
-        rules = await robots.RobotsCache()._fetch("https://example.com")
+        rules = await http.robots_cache()._fetch("https://example.com")
         assert rules.protego is None and not rules.disallow_all
-        assert await robots.RobotsCache().allowed("https://example.com/careers") is True
+        assert await http.robots_cache().allowed("https://example.com/careers") is True
 
 
 class TestTransport:
@@ -408,7 +403,6 @@ class TestTransport:
             self, wire, caplog, monkeypatch):
         """HEADERS over requests' defaults, and the session log's one http
         DEBUG line."""
-        from src import config
         monkeypatch.setattr(config, "RESPECT_ROBOTS", False, raising=False)
         sent = wire((404, [], b""))
         with caplog.at_level(logging.DEBUG, logger="http"):
@@ -540,7 +534,6 @@ class TestChromiumChannelFallback:
         assert capsys.readouterr().out.count("system chrome") == 1
 
     async def test_channel_order_is_configurable(self, monkeypatch):
-        from src import config
         from src.discovery.resolve.probes import launch_chromium
         monkeypatch.setattr(config, "BROWSER_CHANNELS", ["msedge", "chrome"])
         pw = self.FakePlaywright({"chrome", "msedge"})
@@ -562,38 +555,38 @@ class TestQuietSpeculativeProbes:
 
     async def test_speculative_failures_are_silent(self, serve, capsys):
         serve(requests.exceptions.SSLError("handshake"))
-        with robots.quiet():
-            await robots.CACHE()._fetch("https://red.io")
+        with http.quiet_robots():
+            await http.ROBOTS()._fetch("https://red.io")
         assert capsys.readouterr().out == ""
 
     async def test_real_targets_still_report(self, serve, capsys):
         serve(requests.exceptions.SSLError("handshake"))
-        await robots.RobotsCache()._fetch("https://jobs.example.com")
+        await http.robots_cache()._fetch("https://jobs.example.com")
         assert "proceeding without restrictions" in capsys.readouterr().out
 
     def test_quiet_does_not_leak_past_its_block(self):
-        with robots.quiet():
+        with http.quiet_robots():
             pass
-        assert robots.CACHE().quiet == 0
+        assert http.ROBOTS().quiet == 0
 
     def test_quiet_restores_on_exception(self):
         with pytest.raises(ValueError):
-            with robots.quiet():
+            with http.quiet_robots():
                 raise ValueError("boom")
-        assert robots.CACHE().quiet == 0, "a raising probe must not mute the crawl"
+        assert http.ROBOTS().quiet == 0, "a raising probe must not mute the crawl"
 
     def test_quiet_nests(self):
-        with robots.quiet():
-            with robots.quiet():
-                assert robots.CACHE().quiet == 2
-            assert robots.CACHE().quiet == 1, "the inner exit silenced the outer block"
-        assert robots.CACHE().quiet == 0
+        with http.quiet_robots():
+            with http.quiet_robots():
+                assert http.ROBOTS().quiet == 2
+            assert http.ROBOTS().quiet == 1, "the inner exit silenced the outer block"
+        assert http.ROBOTS().quiet == 0
 
     async def test_quiet_never_changes_what_is_allowed(self, serve):
         """Silence is a logging decision, not a politeness one."""
         serve(requests.exceptions.SSLError("handshake"))
-        with robots.quiet():
-            rules = await robots.CACHE()._fetch("https://red.io")
+        with http.quiet_robots():
+            rules = await http.ROBOTS()._fetch("https://red.io")
         assert rules.protego is None and not rules.disallow_all   # still fails open
 
 
@@ -602,9 +595,8 @@ class TestUncheckableRules:
 
     @pytest.fixture
     def cache(self, monkeypatch):
-        from src import config
         monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
-        return robots.RobotsCache()
+        return http.robots_cache()
 
     async def test_a_url_that_cannot_be_checked_is_not_fetched(self, cache, monkeypatch, caplog):
         class Broken(robots._HostRules):

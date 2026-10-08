@@ -23,13 +23,14 @@ from typing_extensions import TypedDict
 
 from src import config, runstate
 from src.ats.board import BOARDS
+from src.claude import api as claude_api
 from src.match.locality import NC_HQ_RE as _NC_HQ_RE
 from src.match.names import domain_tokens, name_key, risky_domain_tokens
 from src.net import http
-from src.net.http import HEADERS
-from src.net.robots import FETCH_ERRORS
+from src.net.http import FETCH_ERRORS, HEADERS
 from src.net.util import host_of
 from src.rows import FetchedJob
+from . import fetchpool
 from .fetchpool import Page
 
 _log = logging.getLogger(__name__)
@@ -188,8 +189,7 @@ async def foreign_board(name: str, ats: str, handle: str | Sequence[object] | No
                    else str(handle).split(board.spec.handle.sep))
     if not words or _affinity(name, words):
         return False
-    from src.claude.api import board_is_own
-    own = await board_is_own(name, words[0], " ".join(words[1:]))
+    own = await claude_api.board_is_own(name, words[0], " ".join(words[1:]))
     # Announce each (name, board) verdict ONCE — the sniff scans many
     # candidate URLs that embed the same board link, and the 2026-08-28
     # discover log repeated the same skip line 3x per company. Single write,
@@ -265,15 +265,14 @@ async def candidate_responses(name: str, careers_url: str = "", **kw: Unpack[Can
     the fetch itself before, which made the sniffer import its own package
     and put a cycle between resolve/__init__ and resolve/sniffer.
 
-    Imported here rather than at module level so there is ONE place to
-    stub the fetch in tests (tests/test_parsers.py patches
-    fetchpool._fetch_all and every caller follows).
+    Called through the module so there is ONE place to stub the fetch in
+    tests (tests/test_parsers.py patches fetchpool._fetch_all and every
+    caller follows).
     """
-    from .fetchpool import _fetch_all, candidate_urls
-    urls = candidate_urls(name, careers_url, **kw)
+    urls = fetchpool.candidate_urls(name, careers_url, **kw)
     if not urls:
         return []
-    responses = await _fetch_all(urls)
+    responses = await fetchpool._fetch_all(urls)
     return [(u, responses.get(u)) for u in urls]
 
 

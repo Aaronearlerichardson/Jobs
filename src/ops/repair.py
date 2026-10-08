@@ -13,10 +13,16 @@ from src import store
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
 from src.ats.board.engine import Board
+from src.claude import api as claude_api
 from src.config import RuntimeTrack
+from src.discovery.write import (board_already_tracked, mission_context,
+                                 report_dup_board)
+from src.discovery.resolve.board import resolved
+from src.match.names import junk_name_reason, name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
 from src.rows import CompanyIn, CompanyRow, is_watched
+from src.store.companies import CAPTURE_ATS
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -116,6 +122,26 @@ SILENT_FAMILY = "silent-board"
 OPT_IN_FAMILIES = (SILENT_FAMILY, "fetch-error", "ats-unsupported")
 
 
+def bury_404_board(conn: sqlite3.Connection, company: CompanyRow,
+                   error: str | None) -> str | None:
+    """Mark `company` 'board-dead:<ats>' and deactivate it when `error`
+    proves its board gone (`Board.gone`); the caller has already seen the
+    board fail once before. Returns the reason written, else None.
+
+    Deactivated exactly as mark_harvested's promotion is, which is what
+    lets reresolve_misses re-check it."""
+    ats = company.get("ats")
+    board = board_for(ats)
+    if not (board and board.gone(error)):
+        return None
+    reason = f"board-dead:{ats}"
+    store.deactivate_company(conn, company["id"])
+    store.record_miss(conn, company["name"], reason)
+    print(f"    [!] {company['name']} ({ats}): listing endpoint 404 twice - "
+          f"board-dead, deactivated (reresolve re-checks it)")
+    return reason
+
+
 def _silent_board_candidates(conn: sqlite3.Connection,
                              now: datetime | None = None) -> list[CompanyRow]:
     """Harvested boards that have listed nothing in >= SILENT_DAYS days --
@@ -192,8 +218,6 @@ def _silent_board_candidates(conn: sqlite3.Connection,
     >>> [c["name"] for c in _silent_board_candidates(conn)]
     ['Stale']
     """
-    from src.store.companies import CAPTURE_ATS
-
     # How long a board must have listed nothing before it counts as silent
     # (last_nonempty_at, or created_at when it never had one, at least this
     # old), and how recently it must still have been harvested to count as
@@ -352,13 +376,6 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
         one wedged careers-page fetch must not hold the web UI's
         one-op-at-a-time slot.
     """
-    from src.claude.api import score_company_mission
-    from src.discovery.local_sourcing import (board_already_tracked,
-                                              report_dup_board,
-                                              mission_context)
-    from src.discovery.resolve.board import resolved
-    from src.match.names import junk_name_reason
-
     families = tuple(families or RERESOLVE_FAMILIES)
     unknown = set(families) - {*RERESOLVE_FAMILIES, *OPT_IN_FAMILIES}
     if unknown:
@@ -428,7 +445,7 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
                       f"nc={hit['nc']:<3} "
                       f"tot={hit['count']:<4} (was {was[name]})")
                 continue
-            tier, score, reason = await score_company_mission(
+            tier, score, reason = await claude_api.score_company_mission(
                 name, await mission_context(hit))
             await db.run(_retarget, name, store.mark_pending({
                 **board,
@@ -583,8 +600,6 @@ async def rename_slug_boards(db: store.Writer | None = None, t: RuntimeTrack | N
         Garner Health, Beam Therapeutics, ...) because each one's name_key
         equals its own slug's.
     """
-    from src.match.names import junk_name_reason, name_key
-
     t = _t(t)
     async with track_writer(t, db) as db:
         rows = await db.run(_slug_named_boards)

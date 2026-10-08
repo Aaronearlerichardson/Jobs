@@ -133,6 +133,8 @@ BOARD_URLS = [
     ("https://acme.icims.com/jobs/search", "icims", "acme"),
     ("https://careers-acme.icims.com/jobs/42423/data-engineer/job", "icims", "careers-acme"),
     ("https://unc.peopleadmin.com/postings/123", "peopleadmin", "unc"),
+    ("https://recruitingbypaycor.com/career/CareerHome.action?clientId="
+     "8a788267543c64a8015453881fd50633", "paycor", "8a788267543c64a8015453881fd50633"),
     ("https://fa-eups-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/"
      "ULSolutionsCareers/jobs", "oracle", "fa-eups-saasfaprod1.fa.ocs.oraclecloud.com|ULSolutionsCareers"),
     (POSTINGS["oracle"][1], "oracle", "fa-eups-saasfaprod1.fa.ocs.oraclecloud.com|ULSolutionsCareers"),

@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 
 from src import store
+from src.claude import api as claude_api
 from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
 from src.rows import BoardHit, CompanyIn, CompanyRow
@@ -280,7 +281,6 @@ async def extract_names_llm(blob: str | bytes | list[str] | tuple[str, ...],
     words it has never seen. One call fixes that for a messy paste. Returns []
     without an API key, so the caller falls back to the regex.
     """
-    from src.claude.api import call_claude_json
     system = ("You extract EMPLOYER NAMES from text copied off a job-search or "
               "company-directory page. Return only organisations that could "
               "employ someone. Never return job titles, locations, dates, "
@@ -289,7 +289,7 @@ async def extract_names_llm(blob: str | bytes | list[str] | tuple[str, ...],
     user = ('Return JSON {"companies": ["name", ...]} with at most '
             f'{limit} entries, in the order they appear.\n\n'
             f"---\n{str(blob or '')[:20000]}\n---")
-    data = await call_claude_json(system, user, max_tokens=2000, reply=CompanyNames)
+    data = await claude_api.call_claude_json(system, user, max_tokens=2000, reply=CompanyNames)
     return [n for n in (data.companies if data else [])
             if 2 < len(n) <= 60][:limit]
 

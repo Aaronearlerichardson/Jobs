@@ -4,10 +4,7 @@ The application pipeline: the user's recorded decision on a job
 conversion report. Split out of src.store on 2026-09-10; src.store
 re-exports every name here, so callers keep saying ``store.set_disposition``.
 
-This module must not import src.store at module level: store imports it
-at load time to re-export it, and a module-level import back would make
-whichever side loads first fail. The one helper a body needs is imported
-inside the function.
+Never imports store/__init__ at load time (that module imports this one).
 """
 
 from __future__ import annotations
@@ -25,7 +22,7 @@ from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
 from src.match.names import name_key
 from src.rows import JobRow, str_or_none
 from src.validation import OneOf, Text, blank_is_none, error_lines
-from .schema import apply_update, as_job, sql
+from .schema import _norm_url, apply_update, as_job, sql
 
 # The user's recorded decision on a job. `saved` = shortlisted, still shown
 # in ranking; the rest leave the ranking: applied/interviewing move to the
@@ -92,7 +89,6 @@ def _resolve_job(conn: sqlite3.Connection, ref: str) -> list[JobRow]:
     matching rows (ideally one; several = ambiguous; empty = no match) so
     set_disposition, its only caller, can report ambiguity instead of
     guessing."""
-    from .jobs import _norm_url  # not at module level: see module doc
     row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (ref,)).fetchone()
     if row:
         return [as_job(row)]

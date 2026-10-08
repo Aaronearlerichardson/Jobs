@@ -36,6 +36,7 @@ from typing import cast
 from src import config
 from src.ats import coords
 from src.ats.board import board_for
+from src.ats.board import company as company_fetch
 from src.ats.board.engine import Board
 from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE, LocationRE
@@ -45,6 +46,7 @@ from .directory import find_boards
 from .domain import seed_urls
 from .identity import foreign_board
 from .probes import Slug, probe_company
+from . import sniffer
 from .websearch_board import websearch_board
 
 _log = logging.getLogger(__name__)
@@ -61,7 +63,6 @@ async def read_board(comp: BoardCoords,
     rule (src.ats.board.closure). A listing 404 that proves the board
     gone (`Board.gone`) reads as empty.
     """
-    from src.ats.board import company as company_fetch
     before = http.fetch_failures()
     try:
         rows = await company_fetch.fetch_company(comp, loc_re, validate=True)
@@ -175,7 +176,6 @@ async def _resolve(name: str, careers_url: str = "", websearch: bool = True
                    ) -> tuple[BoardHit | None, str | None]:
     """resolve_board_sniff_first's hit, and the ats of the first board it
     detected but could not read (`read_board`), else None."""
-    from .sniffer import sniff_ats
     unread = []
 
     async def _mk(ats: str, slug: Slug, curl: str | None, via: str) -> BoardHit | None:
@@ -219,7 +219,7 @@ async def _resolve(name: str, careers_url: str = "", websearch: bool = True
 
     async def _sniff(curl: str) -> BoardHit | None:
         nonlocal fallback
-        s = await sniff_ats(name, curl)
+        s = await sniffer.sniff_ats(name, curl)
         if not s:
             return None
         hit = await _mk(s["ats"], s.get("triple", s.get("slug")),
@@ -327,14 +327,13 @@ def _closest_miss(misses: list[str]) -> str:
 
 async def _classify(name: str, careers_url: str) -> str:
     """classify_miss for one careers page: sniff it, else diagnose it."""
-    from .sniffer import diagnose_no_board, sniff_careers_ats
     try:
-        lead = await sniff_careers_ats(name, careers_url or "")
+        lead = await sniffer.sniff_careers_ats(name, careers_url or "")
     except Exception as e:
         return f"fetch-error:{type(e).__name__}"
     if not lead:
         try:
-            sub = await diagnose_no_board(name, careers_url or "")
+            sub = await sniffer.diagnose_no_board(name, careers_url or "")
         except Exception:
             _log.warning("diagnose_no_board %s failed", name, exc_info=True)
             sub = ""

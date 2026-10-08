@@ -7,7 +7,7 @@ it is what separates a well-behaved crawler from an abusive one, and "we
 parse and honor robots.txt" answers most of the responsible-crawling
 question in one line.
 
-Fetched once per host and cached for the run (src/runstate.py): the
+Fetched once per host and cached for the run (net.http.ROBOTS): the
 requests that want one host's rules at once share one fetch, and the
 per-host crawl delay (net.http.LIMITER) spaces requests to the SAME host
 without holding up the others.
@@ -32,7 +32,7 @@ longest match winning with Allow breaking a tie, a user agent's repeated
 groups merging, and a product token matching at a word boundary.
 
 `[policy] respect_robots = false` turns all of it off: `allowed` is then True
-for every URL, and neither it nor `wait_turn` fetches a robots.txt.
+for every URL, and neither it nor net.http.wait_turn fetches a robots.txt.
 `robots_exempt_hosts` does the same for the hosts it names.
 
 Notes:
@@ -54,43 +54,18 @@ Notes:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import socket
 import time
-from collections.abc import Generator
+from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 from protego import Protego
 
-from src import config, runstate
-from . import http
+from src import config
 from .util import host_of, origin_key
 
 _log = logging.getLogger(__name__)
-
-
-@contextlib.contextmanager
-def quiet() -> Generator[None]:
-    """Suppress the per-host "unreachable" notice for SPECULATIVE probes.
-
-    Discovery guesses hostnames from a company name — `red.io`, `410.co`,
-    `united.ai` — and fetches them to find out whether they exist. Most do
-    not. Announcing "proceeding without restrictions" there describes a
-    politeness decision that is never acted on: nothing is crawled, because
-    the page fetch fails for the same reason robots.txt did. Reported
-    anyway, it buries the case the notice exists for — a host we believe is
-    a real board, whose robots.txt we could not read before crawling it.
-
-    Deliberately run-wide rather than per task: the speculative fetches
-    run as tasks of their own (resolve.fetchpool._fetch_all), and the point
-    is to cover every one of them. Another run's notices are its own.
-    """
-    rules = CACHE()
-    rules.quiet += 1
-    try:
-        yield
-    finally:
-        rules.quiet -= 1
 
 
 def _is_dns_failure(exc: BaseException | None, _depth: int = 6) -> bool:
@@ -213,10 +188,20 @@ class _HostRules:
         return list(self.protego.sitemaps) if self.protego else []
 
 
+class _Reply(Protocol):
+    """What RobotsCache reads off a robots.txt response."""
+    @property
+    def status_code(self) -> int: ...
+    @property
+    def text(self) -> str: ...
+
+
 class RobotsCache:
     """Per-host robots.txt rules, fetched lazily and cached."""
 
-    def __init__(self, user_agent: str | None = None, ttl: float = 3600) -> None:  # pragma: no mutate
+    def __init__(self, fetch: Callable[[str], Awaitable[_Reply]],
+                 user_agent: str | None = None, ttl: float = 3600) -> None:  # pragma: no mutate
+        self.fetch = fetch      # GETs one robots.txt URL (net.http supplies it)
         self.user_agent = user_agent or config.USER_AGENT
         self.ttl = ttl          # seconds a parsed robots.txt stays good
         # origin -> (started, the fetch's Task)
@@ -229,10 +214,7 @@ class RobotsCache:
         """Fetch + parse one host's robots.txt. Never raises; a file that
         cannot be parsed is logged and asks nothing."""
         try:
-            r = await http.send("GET", f"{origin}/robots.txt", polite=False,
-                                timeout=(config.ROBOTS_CONNECT_TIMEOUT,
-                                         config.ROBOTS_READ_TIMEOUT),
-                                headers=http.HEADERS, allow_redirects=True)
+            r = await self.fetch(f"{origin}/robots.txt")
         except Exception as e:
             # "Proceeding without restrictions" is a claim about how we treat
             # a SERVER we could not ask. A hostname that does not resolve has
@@ -336,14 +318,6 @@ class RobotsCache:
         rules = await self._rules(url)
         return rules.sitemaps if rules else []
 
-    async def wait_turn(self, url: str) -> None:
-        """Wait for this host's turn on net.http.LIMITER, `Crawl-delay` apart
-        from the last (none when robots.txt is off or names none; a 429's
-        Retry-After still holds the turn): requests to the SAME host queue
-        up, while other hosts keep going."""
-        delay = await self.crawl_delay(url) if config.RESPECT_ROBOTS else None
-        await http.LIMITER.wait(url, delay or 0)
-
 
 class RobotsDisallowed(Exception):
     """Raised instead of fetching a path robots.txt asks us to leave alone.
@@ -351,11 +325,3 @@ class RobotsDisallowed(Exception):
     Fetchers already try/except around their requests and report the reason,
     so this surfaces in the crawl log the same way a 404 would."""
 
-
-#: Everything `http.send` raises: a failed request, or a robots refusal.
-FETCH_ERRORS = (http.RequestError, RobotsDisallowed)
-
-
-#: This run's cache: one robots.txt per host per hour, however many
-#: fetchers are running.
-CACHE = runstate.per_run(RobotsCache)

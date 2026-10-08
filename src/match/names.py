@@ -51,8 +51,9 @@ def name_key(name: str | None) -> str:
     ''
 
     Notes:
-        src.store.review._name_key and config.DISCOVERY_NAME_BLOCKLIST compute
-        the same key (core and config cannot import discovery), so a name
+        src.store registers this as SQL function name_key, and
+        config.DISCOVERY_NAME_BLOCKLIST computes the same key (core and
+        config cannot import discovery), so a name
         blocked or rejected under any spelling stays recognised here.
     """
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())

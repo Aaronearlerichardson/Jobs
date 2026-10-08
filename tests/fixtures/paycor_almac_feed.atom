@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:newton="http://www.newtonsoftware.com" version="1.0">
+  <title>Paycor Recruiting Feed</title>
+  <generator>Almac Group</generator>
+  <entry>
+    <title>Production Technician</title>
+    <link rel="alternate" href="https://www.almacgroup.com/careers/us-careers/apply/?gnk=job&amp;gni=8a78859e9fd3bb25019ff70b32f23026" />
+    <category term="Clinical Services, Manufacturing / Operations" />
+    <author>
+      <name>United States Souderton PA 18964</name>
+    </author>
+    <id>8a78859e9fd3bb25019ff70b32f23026</id>
+    <updated>2026-10-08T18:16:41Z</updated>
+    <published>2026-08-17T15:08:43Z</published>
+    <summary type="html">&lt;p&gt;Almac Group is seeking a Production Technician.&lt;/p&gt;</summary>
+    <newton:jobId>5864</newton:jobId>
+    <newton:openings>1</newton:openings>
+    <newton:department>Clinical Services, Manufacturing / Operations</newton:department>
+    <newton:location>Souderton</newton:location>
+    <newton:priority>Normal</newton:priority>
+    <newton:country>United States</newton:country>
+    <newton:state>PA</newton:state>
+    <newton:postal_code>18964</newton:postal_code>
+    <newton:budget_title>Production Technician</newton:budget_title>
+    <newton:budget_group>Almac Group - DO NOT DELETE</newton:budget_group>
+    <newton:salary>$25 - $30 per hour</newton:salary>
+    <newton:job_target_questionnaire_url>https://api.recruitingbypaycor.com/v1/jobs/8a78859e9fd3bb25019ff70b32f23026/applications/1635563087/indeed</newton:job_target_questionnaire_url>
+    <newton:job_target_apply_url>https://api.recruitingbypaycor.com/v1/jobs/8a78859e9fd3bb25019ff70b32f23026/candidates/jobtarget</newton:job_target_apply_url>
+    <newton:easy_apply>1</newton:easy_apply>
+    <newton:easy_apply_type>full</newton:easy_apply_type>
+  </entry>
+  <entry>
+    <title>Distribution Coordinator</title>
+    <link rel="alternate" href="https://www.almacgroup.com/careers/us-careers/apply/?gnk=job&amp;gni=8a7885a89f8b940c019fa4cdaa441145" />
+    <category term="Clinical Services, Logistics" />
+    <author>
+      <name>United States Durham NC 27704</name>
+    </author>
+    <id>8a7885a89f8b940c019fa4cdaa441145</id>
+    <updated>2026-10-06T20:07:29Z</updated>
+    <published>2026-07-29T19:17:36Z</published>
+    <summary type="html">&lt;p&gt;Almac Group is seeking a Distribution Coordinator.&lt;/p&gt;</summary>
+    <newton:jobId>5838</newton:jobId>
+    <newton:openings>1</newton:openings>
+    <newton:department>Clinical Services, Logistics</newton:department>
+    <newton:location>Durham</newton:location>
+    <newton:priority>Normal</newton:priority>
+    <newton:country>United States</newton:country>
+    <newton:state>NC</newton:state>
+    <newton:postal_code>27704</newton:postal_code>
+    <newton:budget_title>Distribution Coordinator</newton:budget_title>
+    <newton:budget_group>Almac Group - DO NOT DELETE</newton:budget_group>
+    <newton:salary />
+    <newton:job_target_questionnaire_url>https://api.recruitingbypaycor.com/v1/jobs/8a7885a89f8b940c019fa4cdaa441145/applications/24011686/indeed</newton:job_target_questionnaire_url>
+    <newton:job_target_apply_url>https://api.recruitingbypaycor.com/v1/jobs/8a7885a89f8b940c019fa4cdaa441145/candidates/jobtarget</newton:job_target_apply_url>
+    <newton:easy_apply>1</newton:easy_apply>
+    <newton:easy_apply_type>full</newton:easy_apply_type>
+  </entry>
+  <entry>
+    <title>Production Mechanic 2</title>
+    <link rel="alternate" href="https://www.almacgroup.com/careers/us-careers/apply/?gnk=job&amp;gni=8a78859ea064211b01a069240b1059c4" />
+    <category term="Pharma Services, Manufacturing / Operations" />
+    <author>
+      <name>United States Audubon PA 19403</name>
+    </author>
+    <id>8a78859ea064211b01a069240b1059c4</id>
+    <updated>2026-10-08T18:00:33Z</updated>
+    <published>2026-09-18T17:44:20Z</published>
+    <summary type="html">&lt;p&gt;Almac Group is seeking a Production Mechanic 2.&lt;/p&gt;</summary>
+    <newton:jobId>5890</newton:jobId>
+    <newton:openings>1</newton:openings>
+    <newton:department>Pharma Services, Manufacturing / Operations</newton:department>
+    <newton:location>Audubon</newton:location>
+    <newton:priority>Normal</newton:priority>
+    <newton:country>United States</newton:country>
+    <newton:state>PA</newton:state>
+    <newton:postal_code>19403</newton:postal_code>
+    <newton:budget_title>Production Mechanic 2</newton:budget_title>
+    <newton:budget_group>Almac Group - DO NOT DELETE</newton:budget_group>
+    <newton:salary>$28.60 - $29.85 per hour</newton:salary>
+    <newton:job_target_questionnaire_url>https://api.recruitingbypaycor.com/v1/jobs/8a78859ea064211b01a069240b1059c4/applications/1777103403/indeed</newton:job_target_questionnaire_url>
+    <newton:job_target_apply_url>https://api.recruitingbypaycor.com/v1/jobs/8a78859ea064211b01a069240b1059c4/candidates/jobtarget</newton:job_target_apply_url>
+    <newton:easy_apply>1</newton:easy_apply>
+    <newton:easy_apply_type>full</newton:easy_apply_type>
+  </entry>
+</feed>

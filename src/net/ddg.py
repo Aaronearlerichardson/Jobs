@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import importlib
+import inspect
 import logging
 import threading
 import time
@@ -114,16 +116,10 @@ def cache_put(key: str, value: object) -> None:
 # ─── The ddgs package ────────────────────────────────────────────────────
 
 def _ddgs_class() -> type | None:
-    """The DDGS class from whichever package name is installed, or None
-    (announced once per run)."""
+    """The ddgs package's DDGS class, or None (announced once per run)."""
     try:
-        from ddgs import DDGS                 # current name (2024+)
+        from ddgs import DDGS
         return DDGS
-    except ImportError:
-        pass
-    try:
-        from duckduckgo_search import DDGS as LegacyDDGS
-        return cast(type, LegacyDDGS)
     except ImportError:
         searches = _SEARCHES()
         if not searches.missing_announced:
@@ -146,8 +142,6 @@ def _ensure_ddgs_engines() -> None:
         only -- a new ddgs release can add an engine it misses, which costs
         that one backend rather than the whole search.
     """
-    import importlib
-    import inspect
     try:
         from ddgs.base import BaseSearchEngine
         from ddgs.engines import ENGINES

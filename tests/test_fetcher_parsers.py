@@ -22,11 +22,15 @@ import pytest
 
 from conftest import answer, fake_response, fixture, no_pacing
 from src.match.filters import is_relevant
+from src.ats import signatures
 from src.ats.board import BOARDS, board_for, board_for_url, company, fields
 from src.ats.board import engine as board
 from src.ats.feeds import discourse, getro, remoteok, remotive, usajobs
 from src.discovery import apply
 from src.net import http, util
+from src import store
+from src import tags
+from src.discovery import write
 
 
 @pytest.fixture
@@ -333,6 +337,34 @@ class TestPeopleAdmin:
         assert len(await company.fetch_company(row, re.compile("Chapel Hill"))) == 7
 
 
+class TestPaycor:
+    """Paycor Recruiting (Newton): the whole board in one Atom feed, keyed
+    on the tenant's clientId. Almac's 13 Durham postings were missed because
+    no spec read it (2026-10-08)."""
+
+    CLIENT = "8a788267543c64a8015453881fd50633"
+
+    async def test_reads_the_feed(self, serve):
+        calls = serve({"CareerAtomFeed.action": fixture("paycor_almac_feed.atom")})
+        jobs = await board_for("paycor").jobs(self.CLIENT, "Almac Group")
+        assert [(j["title"], j["location"]) for j in jobs] == [
+            ("Production Technician", "Souderton, PA"),
+            ("Distribution Coordinator", "Durham, NC"),
+            ("Production Mechanic 2", "Audubon, PA")]
+        j = jobs[0]
+        assert (j["id"], j["posted_at"]) == (
+            f"paycor_{self.CLIENT}_8a78859e9fd3bb25019ff70b32f23026", "2026-08-17")
+        assert j["url"].endswith("gni=8a78859e9fd3bb25019ff70b32f23026")
+        assert j["description"] == "Almac Group is seeking a Production Technician."
+        assert calls == ["https://recruitingbypaycor.com/career/CareerAtomFeed.action"
+                         f"?clientId={self.CLIENT}"]
+
+    def test_a_page_embedding_the_career_site_names_its_board(self):
+        page = (f'<iframe src="https://recruitingbypaycor.com/career/iframe.action'
+                f'?clientId={self.CLIENT}"></iframe>')
+        assert signatures.detect(page) == ("fetchable", "paycor", self.CLIENT)
+
+
 class TestUsajobs:
     """The federal board. Credentialed, paginated, and — unlike every other
     fetcher here — allowed to be switched off by a missing env var, so the
@@ -568,7 +600,7 @@ class TestAshbyKeyAcrossCallSites:
         assert await nc_count("ashby", "susteon") == 2
 
     async def test_mission_scorer_gets_titles(self, ashby_board):
-        from src.discovery.local_sourcing import _sample_titles
+        from src.discovery.write import _sample_titles
         titles = await _sample_titles({"ats": "ashby", "slug": "susteon"})
         assert titles == ["Catalysis Scientist", "Lab Technician"]
 
@@ -692,7 +724,6 @@ class TestGetroAttribution:
                               "board": self.BOARD, "page_url": ""}}
 
     def test_links_to_the_roster_row_owning_the_board(self, db):
-        from src import store
         cid = store.upsert_company(db, {"name": "Acme Analytics Inc",
                                         "ats": "greenhouse",
                                         "slug": "acmeanalytics", "active": 1})
@@ -702,7 +733,6 @@ class TestGetroAttribution:
         assert len(store.get_companies(db, active_only=False)) == 1
 
     def test_a_copy_the_roster_crawl_already_stored_is_dropped(self, db):
-        from src import store
         cid = store.upsert_company(db, {"name": "Acme Analytics",
                                         "ats": "greenhouse",
                                         "slug": "acmeanalytics", "active": 1})
@@ -713,7 +743,6 @@ class TestGetroAttribution:
             db, [self._job("Acme Analytics", self.GH_URL)]) == []
 
     def test_a_pending_row_does_not_own_a_crawl_yet(self, db):
-        from src import store
         cid = store.upsert_company(db, store.mark_pending(
             {"name": "Acme Analytics", "ats": "greenhouse",
              "slug": "acmeanalytics"}))
@@ -725,7 +754,6 @@ class TestGetroAttribution:
         assert job["company_id"] == cid
 
     def test_links_by_name_when_the_apply_link_names_no_ats(self, db):
-        from src import store
         cid = store.upsert_company(db, {"name": "Orbit Health", "ats": "custom",
                                         "careers_url": "https://orbit.health/jobs",
                                         "active": 1})
@@ -735,7 +763,6 @@ class TestGetroAttribution:
         assert len(store.get_companies(db, active_only=False)) == 1
 
     def test_an_unknown_employer_is_queued_for_review(self, db):
-        from src import store
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst",
                         slug="orbit-health", domain="orbit.health")
         assert apply.attribute_employers(db, [job]) == [job]
@@ -750,8 +777,6 @@ class TestGetroAttribution:
         assert not store.is_confirmed_company(db, "Orbit Health")
 
     def test_the_apply_link_supplies_the_candidates_board(self, db):
-        from src import tags
-        from src import store
         apply.attribute_employers(
             db, [self._job("Acme Analytics", self.GH_URL, slug="acme-analytics")])
         (row,) = store.pending_companies(db)
@@ -760,7 +785,6 @@ class TestGetroAttribution:
         assert row["review"] == "pending"
 
     def test_a_rejected_name_stays_rejected(self, db):
-        from src import store
         store.block_name(db, "Bolt Logistics", "not a company")
         kept = apply.attribute_employers(
             db, [self._job("Bolt Logistics", "https://bolt.example/careers/3")])
@@ -768,7 +792,6 @@ class TestGetroAttribution:
         assert store.get_companies(db, active_only=False) == []
 
     def test_a_preview_run_writes_nothing(self, db):
-        from src import store
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst")
         assert apply.attribute_employers(db, [job], commit=False) == [job]
         assert "company_id" not in job
@@ -813,7 +836,6 @@ class TestOneFetcherPerAts:
 
     async def test_the_dispatch_table_adapts_the_module_fetcher(self, serve,
                                                                 match_everything):
-        from src.ats.board import company
         serve(fake_response(fixture("greenhouse_board.json")))
         module = await board_for("greenhouse").jobs("databricks", "Databricks")
         vetted = await company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
@@ -822,7 +844,6 @@ class TestOneFetcherPerAts:
 
     async def test_the_location_regex_filters_the_listing(self, serve,
                                                           match_everything):
-        from src.ats.board import company
         serve(fake_response(fixture("greenhouse_board.json")))
         everything = await company.fetch_company({"ats": "greenhouse", "slug": "x"})
         nowhere = await company.fetch_company({"ats": "greenhouse", "slug": "x"},
@@ -893,44 +914,40 @@ class TestTitleSampling:
 class TestMissionContext:
     """What the mission scorer is TOLD about a board: its live titles, else
     the board's own address. Every scoring call site asks
-    local_sourcing.mission_context, so none sends a bare name."""
+    write.mission_context, so none sends a bare name."""
 
     BOARD = {"name": "Studycast", "ats": "rippling", "slug": "core-sound-imaging",
              "careers_url": "https://ats.rippling.com/core-sound-imaging/jobs"}
 
     async def test_live_titles_are_the_context(self, monkeypatch):
-        from src.discovery import local_sourcing
-        monkeypatch.setattr(local_sourcing, "_sample_titles",
+        monkeypatch.setattr(write, "_sample_titles",
                             answer(["PACS Engineer", "", "Sales Lead"]))
-        assert await local_sourcing.mission_context(self.BOARD) == \
+        assert await write.mission_context(self.BOARD) == \
             "PACS Engineer | Sales Lead"
 
     async def test_no_titles_means_the_board_address(self, monkeypatch):
-        from src.discovery import local_sourcing
-        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
-        ctx = await local_sourcing.mission_context(self.BOARD)
+        monkeypatch.setattr(write, "_sample_titles", answer([]))
+        ctx = await write.mission_context(self.BOARD)
         assert "core-sound-imaging" in ctx and "no open postings" in ctx
 
     async def test_a_board_with_no_address_stays_empty(self, monkeypatch):
-        from src.discovery import local_sourcing
-        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
-        assert await local_sourcing.mission_context({"ats": "custom"}) == ""
+        monkeypatch.setattr(write, "_sample_titles", answer([]))
+        assert await write.mission_context({"ats": "custom"}) == ""
 
     async def test_the_scorer_is_sent_the_context_for_an_unsampled_family(
             self, serve, monkeypatch):
         """Through the real sampler: a Rippling board (no branch of its own
         before 2026-09-18) reaches the scorer with its titles, and once its
         board is empty, with its address."""
-        from src.discovery import local_sourcing
         sent = []
         monkeypatch.setattr(
             "src.claude.api.score_company_mission",
             answer(lambda name, context="": sent.append(context) or ("adjacent", .5, "")))
         serve(fake_response(TestTitleSampling.RIPPLING))
-        await local_sourcing._score_hit(self.BOARD)
+        await write._score_hit(self.BOARD)
         assert sent[-1] == "PACS Support Engineer | Imaging Software Developer"
         serve(fake_response([]))
-        await local_sourcing._score_hit(self.BOARD)
+        await write._score_hit(self.BOARD)
         assert "core-sound-imaging" in sent[-1]
 
 

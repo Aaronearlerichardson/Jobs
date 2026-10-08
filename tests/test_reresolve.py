@@ -21,6 +21,7 @@ import src.store as store
 from src import tags
 from src.ats import signatures as ats_signatures
 from src.discovery import local_sourcing
+from src.discovery import write
 from src.discovery.resolve import board as resolve_board
 from src.ops import ingest, rekey, repair
 
@@ -114,7 +115,7 @@ class TestReresolveWrites:
 
     def _wire(self, monkeypatch, result):
         monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(result))
-        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        monkeypatch.setattr(write, "_sample_titles", answer([]))
         monkeypatch.setattr("src.claude.api.score_company_mission",
                             answer(("adjacent", 0.5, "stub")))
 
@@ -269,7 +270,7 @@ class TestManualAddUsesTheSharedResolver:
             return result
 
         monkeypatch.setattr(resolve_board, "resolve_or_miss", _resolve)
-        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        monkeypatch.setattr(write, "_sample_titles", answer([]))
         monkeypatch.setattr("src.claude.api.score_company_mission",
                             answer(("adjacent", 0.5, "stub")))
         monkeypatch.setattr("src.claude.api.is_active_mission",

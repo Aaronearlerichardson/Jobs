@@ -43,17 +43,34 @@ from types import ModuleType
 from typing import NamedTuple, TypedDict
 
 from src import config
+from src import digest
 from src import store
+from src.ats.board import company as company_fetch
+from src.ats.feeds.discourse import fetch_discourse
+from src.ats.feeds.getro import board_host, fetch_getro_all
+from src.ats.feeds.hnhiring import fetch_hnhiring
+from src.ats.feeds.remoteok import fetch_remoteok
+from src.ats.feeds.remotive import fetch_remotive
+from src.ats.feeds.rssfeed import fetch_rss
+from src.ats.feeds.usajobs import fetch_usajobs
+from src.ats.feeds.websearch import fetch_websearch
 from src.ats.registry import iter_store_sources, sweep
+from src.claude.fit import score_resume_fit
 from src.claude.resume import resume_text
 from src.config import RuntimeTrack
 from src.config.profile_schema import TrackKeywords
 from src.crawl import health
+from src.discovery.apply import attribute_employers
+from src.match import gates
 from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
-from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
+from src.match.locality import (NC_RE, geo_label, geo_mode, remote_signal_for,
+                                us_eligible)
 from src.net.http import Snapshot
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
+from src.ops import maintenance as ops
+from src.ops.repair import bury_404_board
+from src.ops import scoring
 from src.rows import CompanyRow, FetchedJob, RankedJob, is_watched
 
 #: Re-exported, not defined here: it moved to src/config/tracks.py, beside
@@ -124,9 +141,6 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
     lightweight ATS sweep, aggregators, USAJOBS, Getro boards, web search — persisted by a plain
     upsert_job). Priority companies come first so cross-source duplicates
     resolve deterministically."""
-    from src.ops import maintenance as ops
-    from src.ats.board import company as company_fetch
-
     src = t.sources
     use_ws = src.websearch if include_websearch is None else include_websearch
     specs: list[SourceSpec] = []
@@ -184,11 +198,6 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
     # registry, the crawl injects the keyword gate here; the fetchers are
     # ungated on their own.
     if src.aggregators:
-        from src.ats.feeds.discourse import fetch_discourse
-        from src.ats.feeds.hnhiring import fetch_hnhiring
-        from src.ats.feeds.remoteok import fetch_remoteok
-        from src.ats.feeds.remotive import fetch_remotive
-        from src.ats.feeds.rssfeed import fetch_rss
         for name, base, cat in cfg.DISCOURSE_BOARDS:
             add(name, "discourse",
                 lambda n=name, b=base, c=cat: fetch_discourse(n, b, c, gate=is_relevant))
@@ -216,7 +225,6 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
     # track wants — a federal campus has no ATS to put in the roster. Safe
     # to leave outside the gate because it ships OFF and needs credentials.
     if getattr(cfg, "USAJOBS_ENABLED", False):
-        from src.ats.feeds.usajobs import fetch_usajobs
         add("USAJOBS", "usajobs",
             lambda: fetch_usajobs(
                 keyword=cfg.USAJOBS_KEYWORD, location=cfg.USAJOBS_LOCATION,
@@ -229,7 +237,6 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
     # and the local track's geo gate decides which of its postings apply.
     # Ships OFF. Their employers are attributed after gating (run_track).
     if getattr(cfg, "GETRO_ENABLED", False):
-        from src.ats.feeds.getro import board_host, fetch_getro_all
         for board in getattr(cfg, "GETRO_BOARDS", []):
             host = board_host(board)
             if not host:
@@ -241,7 +248,6 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
 
     # 5) Web searches (DDG -> JSON-LD).
     if use_ws:
-        from src.ats.feeds.websearch import fetch_websearch
         for label, query, n in getattr(cfg, "WEBSEARCH_QUERIES", []):
             add(label, "websearch",
                 lambda l=label, q=query, m=n: fetch_websearch(
@@ -331,8 +337,6 @@ async def _gate_company_board(
     any miss, because a page-capped pull is an unstable window of the
     board rather than the board itself. The rows are gated either way.
     """
-    from src.ops import maintenance as ops
-
     n_reopened = n_closed = 0
     snapshot = snapshot or {}
     if jobs and c.get("id") and commit and not snapshot.get("incomplete"):
@@ -365,9 +369,6 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow,
                        ) -> tuple[list[FetchedJob], list[tuple[CompanyRow, FetchedJob, bool]]]:
     """(fresh, watch_hits) for _gate_company_board: the `kept` rows no crawl
     has handled, and the watch section's hits among `jobs`."""
-    from src.match import gates
-    from src.match.locality import geo_mode
-
     fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
     watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
     if is_watched(c):
@@ -412,9 +413,6 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[Fet
     Returns (surfaced_jobs, anchor_n, tech_n, surfaced_n). The jobs are
     stamped in place with the display/persist fields the digest reads.
     """
-    from src.match import gates
-    from src.match.locality import geo_mode
-
     out: list[FetchedJob] = []
     anchor_here = tech_here = surfaced = 0
     for job in jobs:
@@ -462,8 +460,6 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[SourceSpe
     be deterministic: the first source to surface a posting keeps it, and
     build_sources puts priority companies first on purpose.
     """
-    from src.crawl.harvest import bury_404_board
-
     to_score: list[tuple[CompanyRow, FetchedJob]] = []
     matches: list[FetchedJob] = []
     watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
@@ -520,7 +516,6 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[SourceSpe
     # roster row, queue employers the roster lacks for review, and drop the
     # copies an active roster company's own crawl already stored.
     if any(j.get("_employer") for j in matches):
-        from src.discovery.apply import attribute_employers
         matches = await db.run(attribute_employers, matches, commit=commit)
 
     return Collected(to_score, matches, watch_hits, funnel,
@@ -536,9 +531,6 @@ async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, 
     ops.score_job (which builds the full store row), sweep rows are
     scored IN PLACE so the fit columns ride along to the upsert below.
     """
-    from src.match.locality import geo_mode
-    from src.ops import maintenance as ops
-
     scored = 0
     if got.to_score and fit and not guard_tripped:
         print(f"\n  scoring {len(got.to_score)} new job(s) against resume "
@@ -575,7 +567,6 @@ async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, 
                                [:config.MAX_DESC_CHARS]})
 
     if fit and got.matches and resume and not guard_tripped:
-        from src.claude.fit import score_resume_fit
         print(f"  scoring {len(got.matches)} match(es) against resume...")
 
         async def _one(j: FetchedJob) -> None:
@@ -640,9 +631,6 @@ async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scor
         and triage funnel cannot drift from theirs; only the email, the
         printed watch section and the richer top-N live here.
     """
-    from src import digest
-    from src.ops import maintenance as ops
-
     ranked, pipeline, followups, digest_path = await db.run(
         ops.write_digest, t, watch_hits=got.watch_hits)
     if send:
@@ -685,8 +673,6 @@ async def _report_matches(matches: list[FetchedJob], t: RuntimeTrack, *, new_ids
     marked "(NEW)" when its id is in `new_ids`, else "(seen)"; see
     tests/test_harvest.py::test_sample_matches_label_a_job_new_only_if_the_store_lacked_it),
     then the matches digest."""
-    from src import digest
-
     n = max(0, samples)
     print(f"\n{bar}\n  {min(n, len(matches))} SAMPLE MATCHES "
           f"(precision sanity-check)\n{bar}")
@@ -733,8 +719,6 @@ async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
     longest in the repo -- and what kept them from being functions was a
     dozen shared locals, now named once in `Collected`.
     """
-    from src.ops import scoring
-
     engine = t.engine
     send = t.email if send is None else send
     verify_n = (t.verify_top if verify is None

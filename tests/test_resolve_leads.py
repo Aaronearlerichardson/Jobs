@@ -14,6 +14,7 @@ import src.claude.api as claude
 import src.store as store
 from conftest import answer, keep_store_open
 from src.discovery import local_sourcing
+from src.discovery import write
 from src.discovery.resolve import board as resolve_board
 
 _HIT = {"name": "Alpaca Health", "ats": "lever", "slug": "alpaca",
@@ -28,7 +29,7 @@ def _lead(db, name, source="page_capture"):
 def _wire(monkeypatch, db, resolver):
     keep_store_open(monkeypatch, db)
     monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(resolver))
-    monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+    monkeypatch.setattr(write, "_sample_titles", answer([]))
     monkeypatch.setattr(claude, "score_company_mission",
                         answer(("adjacent", 0.5, "stub")))
 

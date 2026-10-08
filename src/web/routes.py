@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import re
+import tempfile
 import tomllib
 from collections.abc import Mapping
 from datetime import datetime, timedelta
@@ -22,10 +23,12 @@ from src import config
 from src import digest
 from src import store
 from src import tags as company_tags
+from src.claude import api as claude_api
 from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
 from src.config import RuntimeTrack, profile_edit
 from src.crawl import health
+from src.discovery.paste_ingest import preview_names
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
 from src.match import locality
@@ -393,14 +396,13 @@ def api_pending() -> ResponseReturnValue:
 def api_confirm(cid: int) -> ResponseReturnValue:
     """Accept a review candidate: it leaves the queue and the shared
     mission rule decides whether it is crawled."""
-    from src.claude.api import is_active_mission
     with track_store(_track(_body(_Body).track)) as conn:
         pending = store.get_company(conn, cid)
         if not pending:
             return jsonify(error="not found"), 404
         # The activation verdict is decided here and handed to the store, so
         # the persistence layer never has to reach into the Claude module.
-        active = is_active_mission(pending.get("mission_tier"), pending["name"])
+        active = claude_api.is_active_mission(pending.get("mission_tier"), pending["name"])
         row = cast(CompanyRow, store.confirm_company(conn, cid, active=active))
     return jsonify(ok=True, name=row["name"], active=bool(row["active"]))
 
@@ -436,7 +438,6 @@ def api_names_preview() -> ResponseReturnValue:
     # No busy guard: this only parses text and reads the store, and a run no
     # longer means the next request is lost (/api/run/<name> queues it), so
     # refusing a parse would only stop the person preparing the list.
-    from src.discovery.paste_ingest import preview_names
     p = _body(_Paste)
     try:
         names = call(preview_names(p.text, use_llm=p.use_llm))
@@ -478,7 +479,6 @@ def api_import() -> ResponseReturnValue:
     f = request.files.get("file")
     if not f:
         return jsonify(error="no file uploaded"), 400
-    import tempfile
     with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as t:
         f.save(t)
         tmp = t.name

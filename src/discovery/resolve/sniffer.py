@@ -21,6 +21,7 @@ import logging
 from src import config
 from src.ats import coords
 from src.ats.board import board_for
+from src.ats.board.custom import custom_board_listing_url, is_board_page
 from src.ats.signatures import Detection, detect, pack
 from src.rows import BoardHit, Slug
 from .fetchpool import ROOT_PATTERNS
@@ -78,7 +79,6 @@ async def sniff_ats(name: str, careers_url: str = "") -> Detection | None:
         if custom is None:
             # Custom board: resolve to the page that actually holds the
             # listings (this page, or the openings page one hop away).
-            from src.ats.board.custom import custom_board_listing_url
             listing = await custom_board_listing_url(r.url, text)
             if listing:
                 custom = {"ats": config.CAREERS_PAGE_ATS, "careers_url": listing}
@@ -213,7 +213,6 @@ async def diagnose_no_board(name: str, careers_url: str = "") -> str:
         lambda: [r for url, r in hits if corroborated(url, name, r.text)])
     if not safe_hits:           # every page that answered failed to corroborate
         return "wrong-domain"
-    from src.ats.board.custom import is_board_page
     if await asyncio.to_thread(lambda: any(is_board_page(r.text) for r in safe_hits)):
         return "careers-page-no-ats"
     return "site-only-no-careers"

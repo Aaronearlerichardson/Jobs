@@ -2,8 +2,7 @@
 DuckDuckGo-powered web search for jobs (free, no API key).
 
 Why DDG: Google blocks automated search without an API key; DDG allows
-modest programmatic access via the `ddgs` package (formerly
-`duckduckgo-search`). Coverage is smaller than Google for Jobs but
+modest programmatic access via the `ddgs` package. Coverage is smaller than Google for Jobs but
 meaningfully broadens the crawler's reach over just hitting hard-coded
 ATS tenants.
 

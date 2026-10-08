@@ -17,6 +17,9 @@ from conftest import answer
 from src import runstate, store
 from src.claude import fit
 from src.ops import scoring as ops
+from src import config
+from src.claude import api
+from src.dispatch import background as web_ops
 
 
 def _use_model(monkeypatch, name):
@@ -124,7 +127,6 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
         unless forced (the next pass is a run of its own), and its row keeps
         its first-pass score. The rows queued behind it were never asked, so
         the next pass asks them."""
-        from src import config
         t = _track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
@@ -200,7 +202,6 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
 
 class TestWebOpPassesTheTickBox:
     async def test_verify_op_forwards_force(self, patch_op):
-        from src.dispatch import background as web_ops
         seen = {}
         patch_op("verify", lambda **kw: seen.update(kw))
         await web_ops.OPS["verify"]["fn"]({"top": "5", "force": True})
@@ -221,7 +222,6 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
 
     async def test_tripped_before_the_pass_skips_it_in_one_line(
             self, db, add_job, local_track, monkeypatch, capsys):
-        from src.claude import api
         t = _track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
@@ -240,7 +240,6 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
 
     async def test_tripping_mid_round_halts_without_fetching_the_rest(
             self, db, add_job, local_track, monkeypatch, capsys):
-        from src.claude import api
         t = _track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")

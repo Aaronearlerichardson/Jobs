@@ -26,6 +26,7 @@ import sqlite3
 import io
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from src import config, runstate
@@ -328,7 +329,6 @@ def main(argv: list[str] | None = None) -> None:
 
     t = _resolve_track(args.track) if args.track else None
     if args.db:
-        from pathlib import Path
         config.STORE_DB_PATH = Path(args.db)
         if t is not None:
             t = t.model_copy(update={"db_path": Path(args.db)})

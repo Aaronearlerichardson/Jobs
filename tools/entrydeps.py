@@ -13,24 +13,17 @@ of YOUR modules does JobHarvester.exe have to contain, which does
 JobCrawlerUI.exe, and what is only in one of them.
 
 Uses the standard library's `modulefinder`, which reads compiled bytecode
-rather than the import lines. Three things make that the right tool here
-and a hand-rolled AST walk the wrong one:
+rather than the import lines, and scans only this repo's code:
 
-  * It follows imports inside FUNCTION BODIES. 71 of the harvester's 86
-    modules are reachable only that way -- harvest.py defers almost
-    everything into main() -- and Nuitka follows them too, so a tool that
-    reads only module-level imports reports the harvester as depending on
-    nearly nothing.
-  * It accounts for package __init__ execution. Importing
-    src.discovery.local_sourcing runs src/discovery/__init__.py, which
-    imports apply, bciwiki and pipeline: five modules nobody named. That
-    is the mechanism that makes one small-looking import expensive.
-  * It is what pydeps uses underneath, so this agrees with
-    `pydeps <entry> --only src --max-bacon=0` exactly (86 = 86, verified).
-
-If you want the picture rather than the numbers, pydeps draws it -- but
-pass `--max-bacon=0`. Its default of 2 truncates by distance from the
-entry point and reports 26 of the harvester's 86 modules.
+  * It follows imports inside function bodies, as Nuitka does. The entry
+    scripts import src only inside main() (so --help stays fast), so a
+    module-level walk finds none of the harvester's modules.
+  * It accounts for package __init__ execution: importing one module of
+    a package runs the package's __init__ and everything that imports.
+  * It agrees with `pydeps <entry> --only src --max-bacon=0` (142 = 142
+    for harvest.py, 2026-10-08). For a picture, use pydeps, but pass
+    `--max-bacon=0`: its default of 2 cuts the graph off by distance
+    from the entry point.
 """
 
 from __future__ import annotations
@@ -40,6 +33,7 @@ import sys
 from collections import Counter, defaultdict
 from modulefinder import Module, ModuleFinder
 from pathlib import Path
+from types import CodeType
 from typing import IO, Any, override
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,7 +53,13 @@ BINARY = {"harvest.py": "JobHarvester.exe", "webapp.py": "JobCrawlerUI.exe"}
 
 
 class _Finder(ModuleFinder):
-    """ModuleFinder that survives a namespace package.
+    """ModuleFinder that scans only this repo's code and survives a
+    namespace package.
+
+    modulefinder recurses once per import edge, and walking third-party
+    packages (aiohttp, pydantic, lxml...) blew the recursion limit. No
+    third-party module imports ours, so recording one without scanning it
+    loses nothing.
 
     modulefinder predates PEP 420 and assumes every spec has a loader; a
     namespace package's is None, and it dies with `'NoneType' object has
@@ -68,6 +68,12 @@ class _Finder(ModuleFinder):
     reporting it as not-found loses nothing -- `_safe_import_hook` already
     catches ImportError and files it under badmodules.
     """
+
+    @override
+    def scan_code(self, co: CodeType, m: Module) -> None:
+        path = getattr(m, "__file__", None)      # set by load_module, not in the stub
+        if isinstance(path, str) and Path(path).resolve().is_relative_to(ROOT):
+            super().scan_code(co, m)
 
     @override
     def find_module(self, name: str, path: str | None,
