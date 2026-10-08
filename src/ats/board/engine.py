@@ -135,6 +135,13 @@ async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
     >>> jobs = asyncio.run(board_jobs(messy, "Acme"))
     >>> [(j["id"], j["title"], j["location"]) for j in jobs]
     [('4', 'Data Engineer', 'Durham, NC')]
+
+    So is an employer's test requisition (config.PLACEHOLDER_TITLE_PHRASES):
+
+    >>> test = [{"id": "6", "title": "DO NOT APPLY - TEST REQ - Analyst", "url": "u6",
+    ...          "location": "", "description": ""}]
+    >>> asyncio.run(board_jobs(test, "Acme"))
+    []
     """
     rows = list(rows)
     posts = [r for r in rows if r and r.get("id")]
@@ -145,7 +152,7 @@ async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
             if not row or not row.get("id"):
                 continue
             title = clean_field(row.get("title"))
-            if not title:
+            if not title or any(p in title.lower() for p in config.PLACEHOLDER_TITLE_PHRASES):
                 continue
             row["title"] = title
             row["location"] = clean_field(row.get("location"))
@@ -813,7 +820,7 @@ class Board:
         def rows_of(parts: dict[str, str], payload: JSON) -> tuple[int, list[EngineRow]]:
             entries = decode.entries(payload, dec)
             return len(entries), [row(parts, e) for e in entries]
-        return await pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget)
+        return await pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget, label)
 
     async def listing(self, handle: str, label: str | None = None, cheap: bool = False,
                       rescue_cap: int | None = None) -> list[EngineRow]:

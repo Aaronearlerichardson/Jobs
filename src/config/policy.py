@@ -302,6 +302,16 @@ BOARD_MAX_ROWS = _pol.board_max_rows
 # deep verify is reused. A host's robots Crawl-delay still applies on top
 # (net.robots waits out whichever is longer).
 PAGE_DELAY_S = 0.3
+# A board's later page that fails (a Workday 502 or garbled answer, about one
+# board a day) is asked again PAGE_RETRIES times, PAGE_RETRY_PAUSE_S apart,
+# before the walk stops there and the pass reads incomplete. [policy]
+# page_retries / page_retry_pause_s.
+PAGE_RETRIES = _pol.page_retries
+PAGE_RETRY_PAUSE_S = _pol.page_retry_pause_s
+# tools/check_sources.py's pause between probes of one source, and between
+# web-search probes. [policy] probe_pause_s / search_probe_pause_s.
+PROBE_PAUSE_S = _pol.probe_pause_s
+SEARCH_PROBE_PAUSE_S = _pol.search_probe_pause_s
 SWEEP_DETAILS = 40
 SWEEP_DETAIL_DELAY_S = 0.2
 WHOLE_BOARD_DETAILS = 200
@@ -325,6 +335,13 @@ CAREERS_PAGE_MIN_LINKS = 3
 CAREERS_PAGE_TITLE_MAX = 90
 CAREERS_PAGE_LOCATION_MAX = 70
 BOARD_DETECT_CACHE_S = 6 * 3600
+
+# A posting its employer marks as not a real opening: an ATS's test or
+# placeholder requisition ("DO NOT APPLY - TEST REQ - ...", "Test Evergreen
+# (Kindly Ignore)"). A title holding one of these (case aside) is dropped
+# where every board's rows are cleaned (engine.board_jobs): 197 sat open,
+# 18 of them tracked, on 2026-10-08.
+PLACEHOLDER_TITLE_PHRASES = ("do not apply", "kindly ignore", "please ignore", "test req")
 
 
 # Honor robots.txt: skip paths a host asks crawlers to leave alone, and

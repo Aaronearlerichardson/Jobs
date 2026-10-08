@@ -275,7 +275,7 @@ async def probe_feeds() -> list[dict[str, Any]]:
         out.append({"section": "feeds", "name": label, "status": status,
                     "detail": detail, "rows": len(rows),
                     "seconds": round(time.monotonic() - started, 1)})
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(config.PROBE_PAUSE_S)
     return out
 
 
@@ -319,7 +319,7 @@ async def probe_search(deep: bool = False) -> list[dict[str, Any]]:
         out.append({"section": "search", "name": label, "status": status,
                     "detail": detail,
                     "seconds": round(time.monotonic() - started, 1)})
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(config.SEARCH_PROBE_PAUSE_S)
 
     # -- layer 2: the wrapper the crawl actually calls ---------------------
     # NB: ddg_text caches hits for 7 days, so a pass here can mean "served
@@ -343,7 +343,7 @@ async def probe_search(deep: bool = False) -> list[dict[str, Any]]:
         out.append({"section": "search", "name": f"ddg_text: {label}",
                     "status": status, "detail": detail, "rows": len(rows),
                     "seconds": elapsed})
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(config.SEARCH_PROBE_PAUSE_S)
 
     # -- layer 3: the whole pipeline --------------------------------------
     if deep:
@@ -364,7 +364,7 @@ async def probe_search(deep: bool = False) -> list[dict[str, Any]]:
             out.append({"section": "search", "name": f"fetch_websearch: {label}",
                         "status": status, "detail": detail, "rows": len(postings),
                         "seconds": round(time.monotonic() - started, 1)})
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(config.SEARCH_PROBE_PAUSE_S)
     return out
 
 
@@ -388,7 +388,7 @@ async def probe_forums() -> list[dict[str, Any]]:
         out.append({"section": "forums", "name": f"{label} (cat {cat})",
                     "status": status, "detail": detail, "rows": len(rows),
                     "seconds": round(time.monotonic() - started, 1)})
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(config.PROBE_PAUSE_S)
     return out
 
 

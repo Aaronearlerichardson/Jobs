@@ -4,7 +4,9 @@ feed, and the judgment that flags a platform breaking across its boards.
 A soft-failing fetcher returns [] like an empty board does, and dormancy
 treats errors as neutral, so a spec that breaks on every board parks them
 quietly. This rolls each pass up per platform (store.platform_health) and
-compares its error+empty rate with the platform's own trailing median.
+compares its error+empty rate with the platform's own trailing median over
+passes of the same kind: a whole-board harvest and a locality-scoped crawl
+read the same boards to very different counts.
 Thresholds: config.PLATFORM_HEALTH.
 """
 
@@ -35,8 +37,10 @@ class Counts(TypedDict):
 
 
 class HealthRow(Counts):
-    """A `platform_health` row; `fill` is JSON."""
+    """A `platform_health` row; `fill` is JSON, `kind` the pass's ("harvest"
+    or "crawl")."""
     pass_at: str
+    kind: str
     ats: str
     partial: int
     jobs: int
@@ -44,9 +48,10 @@ class HealthRow(Counts):
 
 
 class Tally:
-    """One pass's board outcomes, per platform.
+    """One pass's board outcomes, per platform; `kind` names the pass
+    ("harvest" or "crawl").
 
-    >>> t = Tally()
+    >>> t = Tally("crawl")
     >>> t.note("x", 2, {"title": 1.0}, err=None, snap={})
     >>> t.note("x", 0, {}, err=None, snap={"fetch_errors": 1, "incomplete": True})
     >>> t.note("x", 0, {}, err=None, snap={})
@@ -56,7 +61,8 @@ class Tally:
     (4, 1, 1, 1, 6, '{"title": 0.667}')
     """
 
-    def __init__(self) -> None:
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
         self._n: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._fill: defaultdict[str, defaultdict[str, float]] = defaultdict(
             lambda: defaultdict(float))
@@ -84,7 +90,7 @@ class Tally:
         """`note` for a board whose rows are in hand; the fill is the
         snapshot's (raw listing rows), else the kept `jobs`'.
 
-        >>> t = Tally()
+        >>> t = Tally("crawl")
         >>> t.note_jobs("x", [], None, {"fill": {"title": 0.5}, "fill_rows": 4})
         >>> t.rows("p")[0]["fill"]
         '{"title": 0.5}'
@@ -95,7 +101,7 @@ class Tally:
 
     def rows(self, pass_at: str) -> list[HealthRow]:
         """The `platform_health` rows of the pass, `fill` as JSON."""
-        return [{"pass_at": pass_at, "ats": ats, "boards": c["boards"], "errors": c["errors"],
+        return [{"pass_at": pass_at, "kind": self.kind, "ats": ats, "boards": c["boards"], "errors": c["errors"],
                  "partial": c["partial"], "empty": c["empty"], "jobs": c["jobs"],
                  "fill": json.dumps({k: round(v / c["filled"], 3)
                                      for k, v in self._fill[ats].items()} if c["filled"] else {})}
@@ -151,21 +157,28 @@ def record(conn: sqlite3.Connection, tally: Tally, now: datetime | None = None) 
     >>> from src.store import connect
     >>> conn = connect(":memory:")
     >>> for day in (1, 2, 3):
-    ...     t = Tally()
+    ...     t = Tally("crawl")
     ...     for i in range(8): t.note("x", 3, {}, err=None, snap={})
     ...     _ = record(conn, t, datetime(2026, 1, day))
-    >>> t = Tally()
+    >>> t = Tally("crawl")
     >>> for i in range(8): t.note("x", 0, {}, err=None, snap={"incomplete": True})
     >>> record(conn, t, datetime(2026, 1, 4))
     ['platform x: error+empty 100% of 8 boards, was 0%']
     >>> alerts(conn)
     ['x: error+empty 100% of 8 boards, was 0%']
+
+    A pass of the other kind is no baseline:
+
+    >>> t = Tally("harvest")
+    >>> for i in range(8): t.note("x", 0, {}, err=None, snap={})
+    >>> record(conn, t, datetime(2026, 1, 5))
+    []
     """
     stamp = (now or datetime.now()).isoformat()
     rows = tally.rows(stamp)
     lines = [f"platform {r['ats']}: {why}" for r in rows for why in flags(
         r, [cast(Counts, dict(h)) for h in store.platform_health_history(
-            conn, r["ats"], int(config.PLATFORM_HEALTH["window"]), stamp)])]
+            conn, r["ats"], int(config.PLATFORM_HEALTH["window"]), stamp, tally.kind)])]
     store.record_platform_health(conn, [dict(r) for r in rows])
     return lines
 
@@ -174,4 +187,5 @@ def alerts(conn: sqlite3.Connection) -> list[str]:
     """The flags of every platform's latest pass (the status view)."""
     return [f"{r['ats']}: {why}" for r in store.latest_platform_health(conn)
             for why in flags(cast(HealthRow, dict(r)), [cast(Counts, dict(h)) for h in store.platform_health_history(
-                conn, r["ats"], int(config.PLATFORM_HEALTH["window"]), r["pass_at"])])]
+                conn, r["ats"], int(config.PLATFORM_HEALTH["window"]), r["pass_at"],
+                r["kind"])])]

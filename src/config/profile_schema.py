@@ -288,6 +288,10 @@ class Policy(_Table):
     robots_connect_timeout: Annotated[float, Field(gt=0)] = 3.0
     robots_read_timeout: Annotated[float, Field(gt=0)] = 10.0
     browser_channels: list[str] = ["", "chrome", "msedge"]
+    page_retries: Annotated[int, Field(ge=0)] = 1
+    page_retry_pause_s: Annotated[float, Field(ge=0)] = 5.0
+    probe_pause_s: Annotated[float, Field(ge=0)] = 1.0
+    search_probe_pause_s: Annotated[float, Field(ge=0)] = 2.0
 
 
 # --- [candidate] / [mission] / [locality] ----------------------------------

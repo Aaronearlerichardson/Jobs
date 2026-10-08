@@ -28,6 +28,7 @@ from src.ats.board import engine as board
 from src.ats.feeds import discourse, getro, remoteok, remotive, usajobs
 from src.discovery import apply
 from src.net import http, util
+from src import config
 from src import store
 from src import tags
 from src.discovery import write
@@ -800,6 +801,23 @@ class TestGetroAttribution:
     def test_jobs_without_an_employer_pass_through(self, db):
         plain = {"id": "usajobs_1", "url": "https://www.usajobs.gov/job/1"}
         assert apply.attribute_employers(db, [plain]) == [plain]
+
+
+async def test_a_later_page_that_fails_once_is_asked_again(serve, monkeypatch):
+    """A Workday 502 on one page left the whole pass incomplete, closing
+    nothing ([policy] page_retries, page_retry_pause_s); a retry that lands
+    takes the failure back."""
+    monkeypatch.setattr(config, "PAGE_RETRY_PAUSE_S", 0)
+    monkeypatch.setattr(config, "PAGE_DELAY_S", 0)
+    rows = [{"id": str(i), "name": f"Engineer {i}", "location": {"city": "Durham"}}
+            for i in range(150)]
+    serve({"offset=100": [502, fake_response({"totalFound": 150, "content": rows[100:]})],
+           "offset=0": fake_response({"totalFound": 150, "content": rows[:100]}),
+           "postings/": fake_response({"jobAd": {"sections": {}}})})
+    http.reset_fetch_failures()
+    jobs = await board_for("smartrecruiters").jobs("acme")
+    assert len(jobs) == 150
+    assert not http.snapshot_info()["incomplete"]
 
 
 async def test_a_listing_redirected_to_the_vendor_names_no_board(serve):

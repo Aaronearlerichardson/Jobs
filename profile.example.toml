@@ -318,6 +318,18 @@ robots_read_timeout = 10.0
 # Playwright's own build.
 browser_channels = ["", "chrome", "msedge"]
 
+# A board's later page that fails mid-walk (a Workday 502 or garbled answer,
+# about one board a day) is asked again this many times, this many seconds
+# apart, before the pull stops there. A pull that stops early is incomplete
+# and closes none of that board's vanished postings. 0 = no retry.
+page_retries = 1
+page_retry_pause_s = 5.0
+
+# tools/check_sources.py's pause between two probes of a source, and between
+# two web-search probes (DuckDuckGo throttles fast).
+probe_pause_s = 1.0
+search_probe_pause_s = 2.0
+
 # ---------------------------------------------------------------------------
 # Who you are — injected verbatim into every scoring/discovery prompt. This is
 # the single highest-leverage block in the file: the scorer judges every

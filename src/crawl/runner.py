@@ -467,7 +467,7 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[SourceSpe
     seen_ids: set[str] = set()
     new_ids: set[str] = set()
     n_closed = n_reopened = n_seen = 0
-    tally = health.Tally()
+    tally = health.Tally("crawl")
 
     for spec, (jobs, err, snapshot) in zip(specs, fetched):
         c = spec["company"]

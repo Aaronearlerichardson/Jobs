@@ -25,8 +25,8 @@ from src import config
 from src.match.locality import LocationRE
 from src.net.util import clean_url
 from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob, str_or_none
-from .schema import (SqlScalar, _commit, apply_update, as_job, batch,  # noqa: F401 (doctests)
-                     connect, dedup_groups, _norm_url, sql, sql_function)
+from .schema import (SqlScalar, _commit, apply_update, as_job,
+                     dedup_groups, _norm_url, sql, sql_function)
 from .companies import harvestable_companies
 from .pipeline import RANKING_EXCLUDED_DISPOSITIONS
 
@@ -167,6 +167,7 @@ def crawl_seen(conn: sqlite3.Connection, job_id: str) -> bool:
     or stored it unscored under a budget guard. A row the harvester stored
     (no track yet) reads as unseen, so the crawl still gates and scores it:
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_job(conn, {"job_id": "h1", "title": "T",
     ...                       "harvested_at": "2026-09-10T01:00:00"})
@@ -211,6 +212,7 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
     here next pass. A cross-board duplicate (`dup_of`) waits for its survivor
     instead of costing a second hydrate and score.
 
+    >>> from src.store.schema import connect
     >>> from src.store import upsert_company
     >>> conn = connect(":memory:")
     >>> cid = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
@@ -247,6 +249,7 @@ def record_triage(conn: sqlite3.Connection, job_id: str, status: str, detail: st
     would, so crawl_seen reads the row as handled; `description` fills an
     empty body only; `scores` is a FitResult.as_columns() dict.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_job(conn, {"job_id": "j", "title": "T", "track": "x"})
     >>> record_triage(conn, "j", "ok", "y=ok", tracks=["y"],
@@ -281,6 +284,7 @@ def clear_triage(conn: sqlite3.Connection, job_id: str) -> None:
     again: every column it writes goes back to NULL except the body, and
     desc_checked_at (the detail retry clock) is left alone.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_job(conn, {"job_id": "j", "title": "T"})
     >>> record_triage(conn, "j", "ok", "y=ok", tracks=["y"],
@@ -304,6 +308,7 @@ def store_body(conn: sqlite3.Connection, job_id: str, description: str | None,
     the real location) on a row whose verdict is still open, so the next
     pass does not fetch it again. An empty body never blanks a stored one.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_job(conn, {"job_id": "j", "title": "T",
     ...                       "location": "2 Locations"})
@@ -338,6 +343,7 @@ def record_probe_outcome(conn: sqlite3.Connection, job_id: str, verified: bool,
     what rotates check_closed_jobs' bounded passes through the backlog --
     so a probe writes one row, not two:
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_job(conn, {"job_id": "j", "title": "T"})
     >>> record_probe_outcome(conn, "j", verified=False)
@@ -374,6 +380,7 @@ def triage_counts(conn: sqlite3.Connection, days: float | None = None) -> dict[s
     """{verdict: n} over triaged rows, optionally only those judged in the
     last `days` days -- the per-gate funnel the digest shows.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> for jid, st in [("a", "ok"), ("b", "title"), ("c", "title")]:
     ...     _ = upsert_job(conn, {"job_id": jid, "title": "T"})
@@ -404,6 +411,7 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
     overwriting it; a new row, or one with no location yet, stores what it
     was given.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_job(conn, {"job_id": "j", "title": "T",
     ...                       "location": "2 Locations"})
@@ -698,6 +706,7 @@ def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> lis
     company_id). A board reactivated or re-tiered is walked again, and the
     walk reopens what it still lists (sync_job_statuses).
 
+    >>> from src.store.schema import connect
     >>> from .companies import upsert_company
     >>> conn = connect(":memory:")
     >>> cid = upsert_company(conn, {"name": "Parked", "ats": "lever", "slug": "p",
@@ -1072,6 +1081,7 @@ def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) 
     others are deleted. Rows that are not one posting (same_posting)
     raise ValueError, nothing written.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_job(conn, {"job_id": "old_7", "title": "T", "url": "u",
     ...                       "track": "a", "resume_fit_score": 0.4})
@@ -1187,6 +1197,7 @@ def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:
     flag is recomputed from the open rows, so a loser whose survivor closed
     comes back.
 
+    >>> from src.store.schema import connect
     >>> from .companies import add_board, upsert_company
     >>> conn = connect(":memory:")
     >>> a = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})

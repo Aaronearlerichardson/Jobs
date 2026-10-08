@@ -40,14 +40,14 @@ from src.match.names import name_key as _name_key
 from src.net.util import dig
 from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
 from .employers import MISSION_COLS, apply_facts, write_mission
-from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
-                     connect, dedup_groups)
+from .schema import _commit, apply_update, dedup_groups
 
 
 def as_company(row: sqlite3.Row) -> CompanyRow:
     """A `SELECT *` companies_effective row as a CompanyRow: every column,
     which the total type promises, its `tags` in the canonical order.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "A", "tags": "sweep,nc_local"})
     >>> as_company(conn.execute("SELECT * FROM companies_effective").fetchone())["tags"]
@@ -102,6 +102,7 @@ def upsert_company(conn: sqlite3.Connection, company: CompanyIn) -> int | None:
     never moves that stamp -- it is the roster's birth record, not a
     last-touched field (`last_probed` is that one, and it does move):
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever"})
     >>> born = conn.execute("SELECT created_at FROM companies").fetchone()[0]
@@ -244,6 +245,7 @@ def plan_board(conn: sqlite3.Connection, company: CompanyIn) -> BoardPlan:
     no known employer is "new". `needs_score` says whether it also takes a
     mission call.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme"})
     >>> plan_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme"}).action
@@ -302,6 +304,7 @@ def add_board(conn: sqlite3.Connection, company: CompanyIn) -> tuple[int | None,
     The caller has validated the board live. A "replace" clears the old
     coordinates first.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme",
     ...                         "mission_tier": "core", "mission_score": 0.9, "tags": "local"})
@@ -401,6 +404,7 @@ def record_miss(conn: sqlite3.Connection, name: str, reason: str, /,
     The row is always written inactive, so it is invisible to every crawl
     path (all of which read get_companies(active_only=True)):
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = record_miss(conn, "Chiesi USA", "no-local-jobs", ats="greenhouse")
     >>> [c["name"] for c in get_companies(conn, active_only=True)]
@@ -470,6 +474,7 @@ def record_alias(conn: sqlite3.Connection, name: str, owner: CompanyRow) -> bool
     productive employer) skips it instead of resolving it every run.
     Declined, like record_miss, for an active row.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "CSL", "ats": "workday", "handle": "csl|1|Ext"})
     >>> owner = get_companies(conn)[0]
@@ -494,6 +499,7 @@ def miss_counts(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     """Misses per reason family, biggest first: the "where are we losing
     companies" tally.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> for n, r in [("a", "no-local-jobs"), ("b", "no-local-jobs"),
     ...              ("c", "ats-unsupported:ukg"),
@@ -515,6 +521,7 @@ def recent_miss_names(conn: sqlite3.Connection, days: int = 14) -> set[str]:
     """Names whose miss was recorded within `days`: the set a rerun skips
     instead of re-probing.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = record_miss(conn, "Fresh", "no-board-found")
     >>> _ = record_miss(conn, "Stale", "no-board-found")
@@ -543,6 +550,7 @@ def roster_growth(conn: sqlite3.Connection, days: int = 7) -> int:
     last_probed on every row, so only created_at can answer "did the roster
     grow this week".
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "New Co", "ats": "lever"})
     >>> roster_growth(conn, days=7)
@@ -617,6 +625,7 @@ def company_by_host(conn: sqlite3.Connection, url: str | None) -> CompanyRow | N
     is accepted too (careers sites live on jobs./careers. subdomains, the
     roster usually holds www.):
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = record_miss(conn, "Acme Health", "no-board-found",
     ...                 careers_url="https://www.acmehealth.org/careers/")
@@ -771,6 +780,7 @@ def _company_index(conn: sqlite3.Connection) -> _CompanyIndex:
     * ``by_domain``  _domain(host) -> [(row, host)], same order
     * ``employer_ids``  name_key -> the lowest employer id with that key
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "A", "ats": "lever", "slug": "a",
     ...                           "careers_url": "https://www.a.org/jobs/"})
@@ -864,6 +874,7 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
     Rows that are different boards of one employer (add_board's siblings)
     are never merged, and a merged row's employer takes over its losers':
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
     >>> _ = add_board(conn, {"name": "Acme", "ats": "ashby", "slug": "a"})
@@ -937,6 +948,7 @@ def realign_job_names(conn: sqlite3.Connection) -> int:
     linked to company "BD"), and shows a sibling board's jobs under its
     employer.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> a = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
     >>> b, _ = add_board(conn, {"name": "Acme", "ats": "ashby", "slug": "b"})
@@ -1018,6 +1030,7 @@ def set_company_tag(conn: sqlite3.Connection, name: str, tag: str,
     match). Returns its new comma-joined tags ('' when none), or None if no
     such company exists. Watching is set_watch's, not a tag.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
     >>> set_company_tag(conn, "acme", "sweep")
@@ -1210,6 +1223,7 @@ def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> lis
     Review candidates are `active = 0`, so they are never fetched -- the
     whole point of the queue is that an unconfirmed guess costs nothing:
 
+    >>> from src.store.schema import connect
     >>> from src.store import mark_pending
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, mark_pending(
@@ -1248,6 +1262,7 @@ def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> lis
 def blocked_name_keys(conn: sqlite3.Connection) -> set[str]:
     """Every blocklisted name key -- the set a paste is filtered against.
 
+    >>> from src.store.schema import connect
     >>> from src.store import block_name
     >>> conn = connect(":memory:")
     >>> blocked_name_keys(conn) == set()
@@ -1266,6 +1281,7 @@ def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     when there is no board to fetch (capture rows, no ATS, a dead-board,
     no-board or duplicate miss) or the name is blocklisted.
 
+    >>> from src.store.schema import connect
     >>> from src.store import block_name, mark_pending
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Dormant", "ats": "lever",
@@ -1377,6 +1393,7 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
         family -- no code path treats it as unfetchable or unsafe
         while it is active.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> cid = upsert_company(conn, {"name": "Acme", "ats": "lever",
     ...                             "slug": "acme", "total_job_count": 9})
@@ -1471,6 +1488,7 @@ def deactivate_company(conn: sqlite3.Connection, company_id: int,
     decision (probe the board, apply the off-mission policy) lives there,
     only the write lives here.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> cid = upsert_company(conn, {"name": "Gone Co", "ats": "lever",
     ...                             "slug": "gone", "notes": "was fine"})

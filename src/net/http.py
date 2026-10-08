@@ -632,6 +632,33 @@ def fetch_failures() -> int:
     return _account().n
 
 
+def failure_mark() -> tuple[int, str | None]:
+    """This context's (failure count, last failure), for withdraw_failures."""
+    acct = _account()
+    return acct.n, acct.last
+
+
+def withdraw_failures(mark: tuple[int, str | None], label: str, keep: int = 0) -> None:
+    """Count `keep` of the failures reported since `mark` (failure_mark):
+    0 when a retry `label` names repaired them, so the snapshot is not
+    incomplete for them; 1 when the retries failed too, one lost page
+    counted once, its last error kept.
+
+    >>> reset_fetch_failures(); mark = failure_mark()
+    >>> _ = fetch_failed("board p3", "HTTP 502", indent=0)
+    [!] board p3: HTTP 502
+    >>> withdraw_failures(mark, "board p3"); snapshot_info()["incomplete"]
+        board p3: recovered on retry
+    False
+    """
+    acct = _account()
+    if acct.n > mark[0] + keep:
+        acct.n = mark[0] + keep
+        if not keep:
+            acct.last = mark[1]
+            sys.stdout.write(f"    {label}: recovered on retry\n")
+
+
 def reset_fetch_failures() -> None:
     """Start this context's fetch accounting from zero: the failure count,
     the last-failure message, and the capped marker. One call per fetch

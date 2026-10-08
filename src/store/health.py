@@ -6,18 +6,20 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable, Mapping
 
-from .schema import connect  # noqa: F401  (the doctests open stores)
 
 def record_platform_health(conn: sqlite3.Connection, rows: Iterable[Mapping[str, object]]) -> None:
-    """Write one pass's per-platform rows (`pass_at, ats, boards, errors, partial, empty, jobs, fill` keys; `fill` already JSON).
+    """Write one pass's per-platform rows (`pass_at, kind, ats, boards, errors, partial, empty, jobs, fill` keys; `fill` already JSON).
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
-    >>> record_platform_health(conn, [dict(pass_at="2026-01-01", ats="x", boards=3, errors=1,
-    ...                                    partial=0, empty=0, jobs=9, fill="{}")])
-    >>> [r["ats"] for r in platform_health_history(conn, "x", 5)]
+    >>> record_platform_health(conn, [dict(pass_at="2026-01-01", kind="crawl", ats="x", boards=3,
+    ...                                    errors=1, partial=0, empty=0, jobs=9, fill="{}")])
+    >>> [r["ats"] for r in platform_health_history(conn, "x", 5, kind="crawl")]
     ['x']
+    >>> platform_health_history(conn, "x", 5, kind="harvest")
+    []
     """
-    cols = ("pass_at", "ats", "boards", "errors", "partial", "empty", "jobs", "fill")
+    cols = ("pass_at", "kind", "ats", "boards", "errors", "partial", "empty", "jobs", "fill")
     conn.executemany(
         f"INSERT OR REPLACE INTO platform_health ({', '.join(cols)}) "
         f"VALUES ({', '.join(':' + c for c in cols)})", list(rows))
@@ -25,9 +27,12 @@ def record_platform_health(conn: sqlite3.Connection, rows: Iterable[Mapping[str,
 
 
 def platform_health_history(conn: sqlite3.Connection, ats: str, n: int,
-                            before: str | None = None) -> list[sqlite3.Row]:
-    """The latest `n` rows for `ats`, newest first, older than pass `before`.
+                            before: str | None = None, kind: str | None = None) -> list[sqlite3.Row]:
+    """The latest `n` rows for `ats` of passes of `kind`, newest first,
+    older than pass `before`. A row recorded before kinds were (NULL) is
+    no pass's baseline.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> platform_health_history(conn, "x", 3)
     []
@@ -36,13 +41,14 @@ def platform_health_history(conn: sqlite3.Connection, ats: str, n: int,
     True
     """
     return conn.execute(
-        "SELECT * FROM platform_health WHERE ats = ? AND pass_at < ? "
-        "ORDER BY pass_at DESC LIMIT ?", (ats, before or "9999", n)).fetchall()
+        "SELECT * FROM platform_health WHERE ats = ? AND pass_at < ? AND kind IS ? "
+        "ORDER BY pass_at DESC LIMIT ?", (ats, before or "9999", kind, n)).fetchall()
 
 
 def latest_platform_health(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """The most recent row of every platform.
 
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> latest_platform_health(conn)
     []

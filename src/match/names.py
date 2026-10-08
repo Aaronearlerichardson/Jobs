@@ -195,6 +195,8 @@ def junk_name_reason(name: str | None) -> str:
 
     >>> junk_name_reason("Retired")
     'status-only'
+    >>> junk_name_reason("New"), junk_name_reason("New Relic")
+    ('common-word', '')
     >>> junk_name_reason("Jobs")
     'section-heading'
 
@@ -312,6 +314,12 @@ def junk_name_reason(name: str | None) -> str:
             "group", "team", "company", "companies", "industry", "industries",
             } for w in words):
         return "category-only"
+    # One common word alone: "New" resolved to an unrelated Greenhouse board
+    # "new" in both 2026-10-08 discover-local passes.
+    if len(words) == 1 and words[0] in {
+            "new", "next", "first", "best", "top", "great", "general", "global",
+            "national", "international", "american", "inc", "llc", "corp", "ltd"}:
+        return "common-word"
     # A single generic word describing a LISTING's own disposition, never an
     # employer's name: a scraped roster entry that kept only a status column
     # ("Retired") reads exactly like this, the same one-word-is-the-whole-name

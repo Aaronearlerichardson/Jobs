@@ -14,6 +14,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from src import config
+from src.net import http
 from src.net.http import note_capped
 from src.net.util import JSON
 from . import fields
@@ -177,8 +178,8 @@ async def walk(spec: Listing,
                              Awaitable[tuple[dict[str, str], JSON, str | Exception | None]]],
                rows_of: Callable[[dict[str, str], JSON], tuple[int, list[EngineRow]]],
                size: int | None = None, pages: int | None = None, cheap: bool = False,
-               scoped: bool = False,
-               budget: int | None = None) -> tuple[list[EngineRow] | None, int | None]:
+               scoped: bool = False, budget: int | None = None,
+               label: str | None = None) -> tuple[list[EngineRow] | None, int | None]:
     """(rows, total) for one listing `spec`; (None, None) when the first
     request failed. `await ask(n, vals, url)` makes page `n`'s request
     with the named values `vals` (`page_vals`), or follows a cursor's
@@ -201,8 +202,10 @@ async def walk(spec: Listing,
     the served count: the server caps its pages (three Phenom tenants
     serve 10 whatever the size, and a 250-row step read 20 of ~300 rows).
 
-    A later page's failure ends the walk with the rows so far (reported,
-    so the snapshot reads incomplete). The walk ends at a page listing no
+    A later page's failure is asked again config.PAGE_RETRIES times,
+    config.PAGE_RETRY_PAUSE_S apart (a repaired failure no longer counts),
+    then ends the walk with the rows so far (reported, so the snapshot
+    reads incomplete); `label` names the board in the recovery line. The walk ends at a page listing no
     posting (no row with an id), where `ended` says, or where a cursor's
     `has_next` says so; a total at the pager's `ceiling` is the most the
     server reports, not the board's size, so it ends nothing. The walk
@@ -226,7 +229,19 @@ async def walk(spec: Listing,
     seen: set[str | None] = set()
     total, size_known, capped, url, n = None, None, False, None, 0
     while True:
+        mark = http.failure_mark()
         parts, payload, err = await ask(n, page_vals(pager, n, step), url)
+        # A later page that fails is asked again before the walk gives up
+        # the rest of the board: one lost page left the whole pass
+        # incomplete, closing nothing (Pfizer read 20 of ~600, 2026-10-06).
+        retried = bool(err and n and config.PAGE_RETRIES)
+        for _ in range(config.PAGE_RETRIES if err and n else 0):
+            await asyncio.sleep(config.PAGE_RETRY_PAUSE_S)
+            parts, payload, err = await ask(n, page_vals(pager, n, step), url)
+            if not err:
+                break
+        if retried:
+            http.withdraw_failures(mark, f"{label or 'listing'} p{n}", keep=1 if err else 0)
         if err:
             return (None, None) if n == 0 else (rows, total)
         if n == 0 and pager and pager.total:

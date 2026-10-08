@@ -14,7 +14,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Literal
 
-from .schema import _commit, apply_update, connect  # noqa: F401  (connect: the doctests open stores)
+from .schema import _commit, apply_update
 
 #: The columns of one mission verdict, on an employer and on a board alike.
 MISSION_COLS = ("mission_tier", "mission_score", "mission_reason")
@@ -35,6 +35,7 @@ def write_mission(conn: sqlite3.Connection, company_id: int, **facts: object) ->
     EMPLOYER of board `company_id`; every board without an override of its
     own reads them.
 
+    >>> from src.store.schema import connect
     >>> from src.store import upsert_company
     >>> conn = connect(":memory:")
     >>> cid = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
@@ -62,6 +63,7 @@ def set_board_mission(conn: sqlite3.Connection, company_id: int, tier: str | Non
     verdict for this board only. Needs a tier or a score (neither reads as
     "inherit"). clear_board_override undoes it.
 
+    >>> from src.store.schema import connect
     >>> from src.store import add_board
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
@@ -108,6 +110,7 @@ def set_watch(conn: sqlite3.Connection, company_id: int, on: bool, *, board: boo
     `board` only this board. An employer-wide call drops the board's own
     override.
 
+    >>> from src.store.schema import connect
     >>> from src.store import add_board
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
@@ -129,6 +132,7 @@ def set_pending(conn: sqlite3.Connection, company_id: int, pending: bool = True,
     employer awaits its own review). `board=None` means the whole employer,
     except that a pending board of a multi-board employer is its own.
 
+    >>> from src.store.schema import connect
     >>> from src.store import add_board
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "a"})

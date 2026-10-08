@@ -557,7 +557,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
 
         t_start = time.monotonic()
         running: dict[int, CompanyRow] = {}    # id(company) -> company, mid-walk
-        tally = health.Tally()
+        tally = health.Tally("harvest")
 
         async def walk(group: list[CompanyRow]) -> None:
             loop = asyncio.get_running_loop()

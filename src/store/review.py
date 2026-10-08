@@ -17,9 +17,9 @@ from datetime import datetime
 from src import config
 from src.match.names import name_key as _name_key
 from src.rows import CompanyIn, CompanyRow
-from .companies import as_company, blocked_name_keys, get_company  # noqa: F401 (doctests)
+from .companies import as_company, get_company
 from .employers import clear_pending
-from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the doctests open stores)
+from .schema import _commit
 
 
 # --------------------------------------------------------------------------- #
@@ -68,6 +68,7 @@ def is_confirmed_company(conn: sqlite3.Connection, name: str) -> bool:
     Every discovery write asks this first -- a confirmed company is refreshed
     in place, anything else goes (back) to the queue.
 
+    >>> from src.store.schema import connect
     >>> from src.store import upsert_company, company_id_by_name, record_miss
     >>> conn = connect(":memory:")
     >>> is_confirmed_company(conn, "Acme")
@@ -100,6 +101,7 @@ def pending_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     """The review queue: candidates an automated path resolved and nobody has
     ruled on yet, newest first.
 
+    >>> from src.store.schema import connect
     >>> from src.store import upsert_company, record_miss
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, mark_pending(
@@ -139,6 +141,7 @@ def confirm_company(conn: sqlite3.Connection, cid: int,
 
     Returns the confirmed row, or None when there is no such company.
 
+    >>> from src.store.schema import connect
     >>> from src.store import (upsert_company, company_id_by_name,
     ...                         crawlable_companies)
     >>> conn = connect(":memory:")
@@ -202,6 +205,8 @@ def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None
 
     Returns the rejected name, or None when there is no such company.
 
+    >>> from src.store.companies import blocked_name_keys
+    >>> from src.store.schema import connect
     >>> from src.store import (upsert_company, company_id_by_name, upsert_job,
     ...                         get_companies, job_exists)
     >>> conn = connect(":memory:")
@@ -276,6 +281,8 @@ def block_name(conn: sqlite3.Connection, name: str, reason: str | None = None) -
     """Blocklist a company name so no discovery path adds it again. Returns
     its normalized key.
 
+    >>> from src.store.companies import blocked_name_keys
+    >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
     >>> block_name(conn, "Who You Are", "JD section header")
     'whoyouare'
