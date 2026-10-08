@@ -249,9 +249,12 @@ class TestReresolveWrites:
         assert "[dup]" in capsys.readouterr().out
         row = dict(db.execute(
             "SELECT * FROM companies WHERE name='SAS'").fetchone())
-        assert row["ats"] is None and row["miss_reason"] == "no-board-found"
-        assert row["miss_at"] > "2020-01-01", \
-            "re-stamped, so a bounded rerun moves past it"
+        owner = dict(db.execute(
+            "SELECT * FROM companies WHERE name='SAS Institute'").fetchone())
+        assert (row["ats"], row["miss_reason"], row["employer_id"]) == (
+            None, "duplicate", owner["employer_id"]), "an alias of the owner, not retried"
+        assert await repair.reresolve_misses(db=db, max_workers=1, t=self.T) == []
+        assert "no re-resolvable misses" in capsys.readouterr().out
 
     async def test_nothing_to_do_is_not_an_error(self, db, capsys):
         assert await repair.reresolve_misses(db=db, t=self.T) == []

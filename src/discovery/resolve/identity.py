@@ -35,6 +35,18 @@ from .fetchpool import Page
 
 _log = logging.getLogger(__name__)
 
+# Words that name no company in particular ("medical", "health", "group"):
+# config.DISCOVERY_GENERIC_NAME_WORDS (profile.toml [discovery]
+# generic_name_words), else these. Neither a host match nor a page's
+# corroboration may rest on one.
+GENERIC_NAME_WORDS = frozenset(getattr(config, "DISCOVERY_GENERIC_NAME_WORDS", None) or {
+    "medical", "center", "centre", "health", "healthcare", "regional",
+    "group", "services", "systems", "system", "technology", "technologies",
+    "imaging", "solutions", "associates", "partners", "care", "clinic",
+    "hospital", "labs", "laboratories", "company", "corporation", "global",
+    "national", "american", "international", "the", "and", "inc", "llc",
+})
+
 
 # ─── Truncated-domain corroboration ───────────────────────────────────────
 #
@@ -81,8 +93,9 @@ def _corroborates(text: str | None, name: str | None, skip_token: str = "") -> b
     """True if `text` actually mentions `name` beyond the (possibly
     generic/truncated) domain token that reached it — the check a
     risky-token hit (see _risky_token_in_url) must pass before it's
-    trusted. Requires a distinctive word (>=4 letters) from `name`, other
-    than `skip_token`, to appear in the text.
+    trusted. Requires a distinctive word (>=4 letters, not in
+    GENERIC_NAME_WORDS) from `name`, other than `skip_token`, to appear in
+    the text; when only generic words are left, the whole name.
 
     >>> _corroborates("Careers at Galaxy Diagnostics", "Galaxy Diagnostics", "galaxy")
     True
@@ -92,6 +105,14 @@ def _corroborates(text: str | None, name: str | None, skip_token: str = "") -> b
     >>> _corroborates("", "Galaxy Diagnostics", "galaxy")
     False
 
+    A generic word is no evidence: Gradient's environmental-consulting site
+    mentions "medical" and still is not Gradient Medical's (2026-10-08):
+
+    >>> _corroborates("Gradient: scientists for medical device risk", "Gradient Medical", "gradient")
+    False
+    >>> _corroborates("Welcome to Gradient Medical", "Gradient Medical", "gradient")
+    True
+
     A name with nothing left to check (every word is the skipped token, or
     too short) doesn't block the hit — there's no more precision to ask
     for:
@@ -99,12 +120,16 @@ def _corroborates(text: str | None, name: str | None, skip_token: str = "") -> b
     >>> _corroborates("anything", "Q2", "q2")
     True
     """
-    words = [w for w in re.findall(r"[a-z0-9]+", (name or "").lower())
-            if len(w) >= 4 and w != skip_token]
+    all_words: list[str] = re.findall(r"[a-z0-9]+", (name or "").lower())
+    words = [w for w in all_words if len(w) >= 4 and w != skip_token]
     if not words:
         return True
     blob = (text or "").lower()
-    return any(w in blob for w in words)
+    distinctive = [w for w in words if w not in GENERIC_NAME_WORDS]
+    if distinctive:
+        return any(w in blob for w in distinctive)
+    page_words: list[str] = re.findall(r"[a-z0-9]+", blob)
+    return " ".join(all_words) in " ".join(page_words)
 
 
 # (name, ats, board) whose foreign-board verdict was already printed this

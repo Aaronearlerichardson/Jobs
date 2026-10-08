@@ -431,11 +431,13 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
             board = coords.from_hit(hit, name=name)
             dup = await db.run(board_already_tracked, board)
             if dup:
-                # Someone else already holds this board. Leave the row as
-                # the miss it was, but re-stamp it so a bounded rerun moves
-                # past it instead of paying for the same fetch every night.
+                # Someone else already holds this board: the name is that
+                # employer's alias (store.record_alias), which no pass
+                # retries. Until 2026-10-08 it was re-stamped as the miss it
+                # was and re-resolved, to the same board, every night.
                 report_dup_board(name, dup)
-                await miss(name, was[name])
+                if commit:
+                    await db.run(store.record_alias, name, dup)
                 dups.append(name)
                 continue
             if not commit:
@@ -470,6 +472,12 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
               + f", {len(still)} still missing, of {len(rows)} tried.")
         if written and commit:
             print("  confirm or reject them in the roster review queue.")
+        blocked = [n for n, why in still if why.endswith(":site-blocked")]
+        if blocked:
+            print(f"  {len(blocked)} site(s) refuse the crawler (403/429): "
+                  + ", ".join(blocked[:5]) + (", ..." if len(blocked) > 5 else ""))
+            print('  register one\'s board as capture-only: '
+                  'discover.py --add-board "NAME" URL --capture')
         return written
 
 

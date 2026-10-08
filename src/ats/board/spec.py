@@ -478,6 +478,9 @@ class Listing(_Request):
     scope: Scope | None = Field(None, description="Narrows the listing to the locality")
     why: Why | None = Field(None, description='Why this fallback alternative exists: '
                                               '"reason, YYYY-MM"')
+    missing_at: Regex | None = Field(None, description="A final URL this matches means the "
+                                     "handle names no board: the vendor redirects an unknown "
+                                     "one to its own site. Reported as HTTP 404")
 
 
 class Detail(_Request):

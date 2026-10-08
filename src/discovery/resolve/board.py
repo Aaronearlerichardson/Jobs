@@ -275,9 +275,10 @@ async def classify_miss(name: str, careers_url: str = "") -> str:
     Dayforce, ...) is a very different problem from a company we could find
     nothing for, and the two were previously indistinguishable.
 
-    A bare "no-board-found" is itself four different problems (nothing
-    resolves, the domain is dead, a careers page exists with no known ATS,
-    or a candidate resolved to someone else's site) — sniffer.diagnose_no_board
+    A bare "no-board-found" is itself five different problems (nothing
+    resolves, the domain is dead, the site refuses the crawler, a careers
+    page exists with no known ATS, or a candidate resolved to someone
+    else's site) — sniffer.diagnose_no_board
     tells them apart, appended as the ':'-qualifier a rerun's miss_counts
     already knows how to aggregate past (see src.store.miss_family). A
     careers_url naming a board itself is that board, dead. With none given,
@@ -317,7 +318,8 @@ def _closest_miss(misses: list[str]) -> str:
     >>> _closest_miss(["no-board-found:wrong-domain", "no-board-found"])
     'no-board-found:wrong-domain'
     """
-    reached = ("careers-page-no-ats", "site-only-no-careers", "wrong-domain", "domain-unreachable")
+    reached = ("careers-page-no-ats", "site-only-no-careers", "site-blocked", "wrong-domain",
+               "domain-unreachable")
 
     def depth(reason: str) -> int:
         sub = reason.partition(":")[2]

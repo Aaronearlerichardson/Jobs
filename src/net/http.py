@@ -765,6 +765,17 @@ class HostBreaker:
     def clear(self, url: str) -> None:
         self._hits.pop(host_of(url), None)
 
+    def refused(self, url: str) -> bool:
+        """Whether the host of `url` has refused since it last answered,
+        `trips` or not.
+
+        >>> b = HostBreaker(ttl=60, trips=3); b.trip("https://a.example/")
+        >>> b.refused("https://a.example/x"), b.dead("https://a.example/x")
+        (True, False)
+        """
+        hit = self._hits.get(host_of(url))
+        return hit is not None and time.time() - hit[0] < self.ttl
+
     def dead(self, url: str) -> bool:
         host = host_of(url)
         hit = self._hits.get(host)
@@ -776,6 +787,12 @@ class HostBreaker:
 
 #: This run's blocking hosts (`send`): REFUSAL_TRIPS 403/429s in a row.
 _REFUSING = runstate.per_run(lambda: HostBreaker(ttl=REFUSAL_TTL_S, trips=REFUSAL_TRIPS))
+
+
+def refused(url: str) -> bool:
+    """Whether `url`'s host answered this run's last request to it with a
+    403 or 429 (`send`): a site that blocks the crawler, not a dead one."""
+    return _REFUSING().refused(url)
 
 
 async def _robots_txt(url: str) -> requests.Response:

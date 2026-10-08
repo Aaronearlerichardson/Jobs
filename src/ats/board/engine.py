@@ -597,6 +597,11 @@ class Board:
             status, r, err = await http.request(req.method, url, label, **kw)
             if err or r is None:
                 return status, None, err
+            # An unknown handle's 200 is the vendor's own page, not an empty
+            # board: JazzHR sent 20 phantom boards to its job-seekers page
+            # every pass, read as boards listing nothing (2026-10-08).
+            if isinstance(req, Listing) and req.missing_at and re.search(req.missing_at, r.url or ""):
+                return 404, None, http.failed(label, f"HTTP 404: redirected to {r.url}")
             try:
                 payload, hopped = await asyncio.to_thread(
                     lambda: decode.decode(dec, r.text, parts, url,

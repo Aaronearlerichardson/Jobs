@@ -802,6 +802,18 @@ class TestGetroAttribution:
         assert apply.attribute_employers(db, [plain]) == [plain]
 
 
+async def test_a_listing_redirected_to_the_vendor_names_no_board(serve):
+    """An unknown JazzHR slug answers 200 with the vendor's job-seekers page:
+    a 404 (`missing_at`), so the dead-board cycle can bury it, not a board
+    listing nothing."""
+    serve({"applytojob.com": fake_response(text="<html></html>",
+                                           url="https://www.jazzhr.com/job-seekers")})
+    http.reset_fetch_failures()
+    board = board_for("jazzhr")
+    assert await board.jobs("perk") == []
+    assert board.gone(str(http.snapshot_info()["last_error"]))
+
+
 class TestJobvite:
     """What the fixture contract above does not reach: the listing's
     fallback page and the whole-board pull's in-area detail reads."""

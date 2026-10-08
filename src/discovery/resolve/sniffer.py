@@ -23,6 +23,7 @@ from src.ats import coords
 from src.ats.board import board_for
 from src.ats.board.custom import custom_board_listing_url, is_board_page
 from src.ats.signatures import Detection, detect, pack
+from src.net import http
 from src.rows import BoardHit, Slug
 from .fetchpool import ROOT_PATTERNS
 from .identity import (candidate_pages, candidate_responses, corroborated,
@@ -156,7 +157,7 @@ async def sniff_careers_ats(name: str, careers_url: str = "") -> BoardHit | None
 # A bare "no-board-found" means "we don't know why" -- which of the very
 # different failure modes below it was is invisible until someone probes by
 # hand. diagnose_no_board turns the sniff's own fetch results into one of
-# four qualifiers (board.classify_miss appends it to the
+# five qualifiers (board.classify_miss appends it to the
 # "no-board-found" family, e.g. "no-board-found:site-only-no-careers").
 
 async def diagnose_no_board(name: str, careers_url: str = "") -> str:
@@ -164,6 +165,10 @@ async def diagnose_no_board(name: str, careers_url: str = "") -> str:
 
     - "domain-unreachable": not one candidate URL answered at all (DNS/SSL/
       timeout on every guess) -- likely defunct or acquired.
+    - "site-blocked": none answered with a page, but a candidate's host
+      refused the crawler (403/429, http.refused): a bot wall on a live
+      site, whose board `discover.py --add-board ... --capture` can still
+      register.
     - "wrong-domain": every page that DID answer was reached only through a
       truncated/generic domain token (see names.risky_domain_tokens) and
       none corroborated the company name -- the precise domain never
@@ -208,7 +213,8 @@ async def diagnose_no_board(name: str, careers_url: str = "") -> str:
                                             patterns=ROOT_PATTERNS, cap=None))
     hits = [(u, r) for u, r in answered if r is not None]
     if not hits:
-        return "domain-unreachable"
+        return ("site-blocked" if any(http.refused(u) for u, _ in answered)
+                else "domain-unreachable")
     safe_hits = await asyncio.to_thread(
         lambda: [r for url, r in hits if corroborated(url, name, r.text)])
     if not safe_hits:           # every page that answered failed to corroborate

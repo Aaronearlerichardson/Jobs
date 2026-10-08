@@ -369,6 +369,7 @@ MISS_REASONS = (
     # no-board-found qualifiers (src.discovery.resolve.sniffer.diagnose_no_board):
     #   :wrong-domain          a candidate resolved to an unrelated company
     #   :domain-unreachable    not one candidate URL answered
+    #   :site-blocked          the site refuses the crawler (403/429): --capture it
     #   :careers-page-no-ats   real job board found, but no known ATS on it
     #   :site-only-no-careers  domain answers, nothing careers-shaped on it
     "no-board-found",   # nothing resolved: sniff, slug-probe and websearch all missed

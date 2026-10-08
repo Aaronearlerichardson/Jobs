@@ -8,10 +8,12 @@ SPEC: dict[str, JSON] = {
     "detect": [{"host": "applytojob.com", "re": [r"(?i)([a-z0-9-]+)\.applytojob\.com"]}],
     "canary": {"name": "Cyclotron Research Centre", "handle": "cyclotroninc"},
     "sweep": True,
+    "prunable": True,
     "job_ref": {"re": r"(?i)^(https?://([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)[^?#]*)",
                 "parts": ["link", "slug", "jid"]},
     "listing": {
         "url": "https://{slug}.applytojob.com/",
+        "missing_at": r"(?i)^https?://(?:www\.)?jazzhr\.com/",
         "decoder": {"kind": "html", "select": "a[href*='/apply/']", "context": ["li"],
                     "cells": {"location": "li:has(.fa-map-marker)"}},
         "fields": {

@@ -233,11 +233,18 @@ class TestRootScan:
 
 
 class TestDiagnoseNoBoard:
-    """The four "no-board-found" qualifiers classify_miss appends (Task 1)."""
+    """The "no-board-found" qualifiers classify_miss appends."""
 
     async def test_domain_unreachable_when_nothing_answers(self, monkeypatch):
         _stub_fetch_all(monkeypatch, {})
         assert await sniffer.diagnose_no_board("Acme Genomics") == "domain-unreachable"
+
+    async def test_site_blocked_when_a_host_refused_the_crawler(self, monkeypatch):
+        """carolina.com answers every page 403: a live site behind a bot
+        wall, not an unreachable one (2026-10-08)."""
+        _stub_fetch_all(monkeypatch, {})
+        monkeypatch.setattr(sniffer.http, "refused", lambda u: "acmegenomics.com" in u)
+        assert await sniffer.diagnose_no_board("Acme Genomics") == "site-blocked"
 
     async def test_site_only_no_careers_when_a_page_answers_with_nothing_on_it(
             self, monkeypatch):

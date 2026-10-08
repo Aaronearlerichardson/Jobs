@@ -23,7 +23,7 @@ from src.match.names import name_key
 from src.net import ddg, http
 from src.net.http import HEADERS
 from src.net.http import FETCH_ERRORS
-from .identity import foreign_board
+from .identity import GENERIC_NAME_WORDS, corroborated, foreign_board
 from .probes import Slug
 
 _log = logging.getLogger(__name__)
@@ -52,19 +52,6 @@ _AGGREGATOR_HOSTS = tuple(
 _HINT = " OR ".join(t for _, t in sorted(p for b in BOARDS.values() for p in b.spec.discovery.hint))
 
 
-# Generic words that don't distinguish a company's domain — excluded when
-# matching a result host to a name, so "medicaljobs.com" doesn't match
-# "Sampson Regional Medical Center" on the word "medical". Source:
-# config.DISCOVERY_GENERIC_NAME_WORDS (profile.toml [discovery]
-# generic_name_words); falls back to these defaults when unconfigured.
-_DEFAULT_GENERIC_NAME_WORDS = {
-    "medical", "center", "centre", "health", "healthcare", "regional",
-    "group", "services", "systems", "system", "technology", "technologies",
-    "imaging", "solutions", "associates", "partners", "care", "clinic",
-    "hospital", "labs", "laboratories", "company", "corporation", "global",
-    "national", "american", "international", "the", "and", "inc", "llc",
-}
-_GENERIC_NAME_WORDS = getattr(config, "DISCOVERY_GENERIC_NAME_WORDS", None) or _DEFAULT_GENERIC_NAME_WORDS
 
 
 def _host_matches_name(url: str, name: str) -> bool:
@@ -75,7 +62,7 @@ def _host_matches_name(url: str, name: str) -> bool:
     hostslug = name_key(host)
     joined = name_key(name)
     tokens = {joined} | {w for w in re.findall(r"[a-z0-9]+", name.lower())
-                         if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
+                         if len(w) >= 4 and w not in GENERIC_NAME_WORDS}
     return any(len(t) >= 4 and t in hostslug for t in tokens)
 
 
@@ -89,7 +76,7 @@ def _slug_matches_name(slug: Slug, name: str) -> bool:
         return False
     tokens = {name_key(name)}
     tokens |= {w for w in re.findall(r"[a-z0-9]+", name.lower())
-               if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
+               if len(w) >= 4 and w not in GENERIC_NAME_WORDS}
     return any(len(t) >= 3 and (s in t or t in s) for t in tokens)
 
 
@@ -128,7 +115,9 @@ async def websearch_board(name: str, max_results: int = 8) -> Detection | None:
             except FETCH_ERRORS as e:
                 _log.debug("search hit %s: %s", u, type(e).__name__)
                 continue
-            own = _host_matches_name(r.url, name)
+            # A host matched on a truncated token ("gradientcorp.com" for
+            # Gradient Medical) must corroborate the name, as in the sniffer.
+            own = _host_matches_name(r.url, name) and corroborated(r.url, name, text)
             hit = await asyncio.to_thread(detect, text, r.url, leads=False)
             # Trust an embedded ATS when its slug matches the name OR it was
             # embedded on the company's own careers page (own-domain link).
