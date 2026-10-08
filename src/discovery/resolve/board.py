@@ -42,7 +42,7 @@ from src.match.locality import NC_RE, LocationRE
 from src.net import http
 from src.rows import BoardCoords, BoardHit, FetchedJob
 from .directory import find_boards
-from .domain import official_domain
+from .domain import seed_urls
 from .identity import foreign_board
 from .probes import Slug, probe_company
 from .websearch_board import websearch_board
@@ -127,21 +127,6 @@ async def _url_board(name: str, careers_url: str) -> tuple[str, Slug, str] | Non
     if not hit or await foreign_board(name, hit[1], hit[2]):
         return None
     return hit[1], hit[2], pack(hit[1], hit[2], careers_url)["careers_url"]
-
-
-async def _seeds(name: str, careers_url: str = "") -> list[str]:
-    """Root URLs of `name`'s official domain, one per `[discovery].domain_hosts`
-    entry; none when `careers_url` is given, the lookup is off, or it found
-    nothing (a failed lookup never fails a resolution)."""
-    if careers_url or not config.DISCOVERY_DOMAIN_LOOKUP:
-        return []
-    try:
-        domain = await official_domain(name)
-    except Exception:
-        _log.warning("official_domain %s failed", name, exc_info=True)
-        return []
-    return [f"https://{h.format(domain=domain)}/"
-            for h in config.DISCOVERY_DOMAIN_HOSTS] if domain else []
 
 
 async def _directory_hit(name: str, mk: Callable[..., Awaitable[BoardHit | None]]
@@ -252,7 +237,7 @@ async def _resolve(name: str, careers_url: str = "", websearch: bool = True
 
     # 1.5) The same sniff on the name's looked-up official domain
     # (resolve.domain), its hosts in order, stopping at the first board.
-    for seed in await _seeds(name, careers_url):
+    for seed in await seed_urls(name, careers_url):
         hit = await _sniff(seed)
         if hit:
             return _out(hit)
@@ -296,7 +281,7 @@ async def classify_miss(name: str, careers_url: str = "") -> str:
     tells them apart, appended as the ':'-qualifier a rerun's miss_counts
     already knows how to aggregate past (see src.store.miss_family). A
     careers_url naming a board itself is that board, dead. With none given,
-    the name's looked-up domain hosts (`_seeds`) are read after the plain
+    the name's looked-up domain hosts (`domain.seed_urls`) are read after the plain
     guesses.
 
     Notes:
@@ -312,7 +297,7 @@ async def classify_miss(name: str, careers_url: str = "") -> str:
     if not first.startswith("no-board-found"):
         return first
     misses = [first]
-    for seed in await _seeds(name, careers_url):
+    for seed in await seed_urls(name, careers_url):
         reason = await _classify(name, seed)
         if not reason.startswith("no-board-found"):
             return reason

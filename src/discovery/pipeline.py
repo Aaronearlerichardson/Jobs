@@ -212,6 +212,7 @@ async def validate_candidate(c: Candidate, delay: float = 0.3,
             c.confirmed  = True
             c.ats        = meta["ats"]
             c.slug       = coords.slug_text(meta["ats"], meta["slug"])
+            c.careers_url = meta.get("careers_url") or c.careers_url
             c.job_count  = meta["count"]
             c.via        = "js"
             c.tried_slugs.append(

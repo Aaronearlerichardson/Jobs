@@ -210,6 +210,8 @@ async def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch, hang):
     monkeypatch.setattr(config, "JS_PROBE_BUDGET_S", 0.1)
     monkeypatch.setattr(probes, "foreign_board", answer(False))
     monkeypatch.setattr(probes, "_scan_meta", count)
+    monkeypatch.setattr(probes, "seed_urls", answer([]))
+    monkeypatch.setattr(probes, "_drop_unresolvable", answer(lambda urls: urls))
     async with probes.JsScanProbePool(1) as js:
         js._browser = browser = Hung()
         t0 = time.monotonic()

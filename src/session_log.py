@@ -311,16 +311,21 @@ def open_log(mode: str, invocation: str, now: datetime | None = None) -> Session
     return SessionLog(mode, invocation, now=now)
 
 
-def start(argv: list[str], now: datetime | None = None) -> Path:
+def start(argv: list[str], now: datetime | None = None,
+          prog: str = "run_scraper.py") -> Path:
     """Begin mirroring stdout/stderr into a new session log; returns its
     path. finish() (registered atexit) restores the streams, detaches the
     logging handler and stamps a footer with the elapsed time.
 
     Notes:
         argv is the CLI argument list *without* the program name, exactly
-        what run_scraper.main() received. `now` exists for tests.
+        what run_scraper.main() received; `prog` names the script, and any
+        other than run_scraper.py prefixes the log's mode with its stem
+        (session-...-discover-local.log). `now` exists for tests.
     """
-    session = open_log(_mode(argv), "run_scraper.py " + " ".join(argv), now)
+    stem = prog.removesuffix(".py")
+    mode = _mode(argv) if stem == "run_scraper" else f"{stem}-{_mode(argv)}"
+    session = open_log(mode, f"{prog} " + " ".join(argv), now)
 
     # A Windows binary running with no console starts with sys.stdout and
     # sys.stderr both None. The tee still needs a stream behind it -- the

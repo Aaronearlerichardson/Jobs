@@ -96,11 +96,12 @@ def detect(text: str, final_url: str = "", leads: bool = True,
     True
     """
     blob = html.unescape(f"{final_url}\n{text}")
+    low = blob.lower()
     for b in (BOARDS.get(only),) if only else BOARDS.values():
         if b is None or not (b.fetchable or leads):
             continue
         slug = b.detect(blob, (lambda part: len(part) >= 2 and part.lower() not in BAD_SLUGS)
-                        if b.fetchable else (lambda part: len(part) >= 2))
+                        if b.fetchable else (lambda part: len(part) >= 2), low)
         if slug:
             return ("fetchable" if b.fetchable else "lead"), b.name, slug
     return None

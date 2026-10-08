@@ -47,7 +47,7 @@ from src.rows import BoardCoords, BoardHit, CompanyIn, CompanyRow, is_watched
 from src.store.companies import BoardPlan
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
-from .resolve.probes import nc_count, probe_company
+from .resolve.probes import probe_company
 from src.ats.signatures import Detection
 from .resolve.websearch_board import websearch_board
 
@@ -174,9 +174,9 @@ async def _js_scan_pass(hits: list[BoardHit], max_workers: int,
             t0 = time.monotonic()
             meta, outcome = await pool.probe(name)
             if outcome == "hit" and meta is not None:
-                ats, slug = meta["ats"], meta["slug"]
-                return {"name": name, "ats": ats, "slug": slug,
-                        "count": meta["count"], "nc": await nc_count(ats, slug)}
+                return await _hit_from_detection(name, {
+                    "ats": meta["ats"], "slug": meta["slug"],
+                    "careers_url": meta.get("careers_url") or ""})
             return {"name": name, "reason": outcome,
                     "elapsed": time.monotonic() - t0}
 

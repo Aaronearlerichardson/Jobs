@@ -86,7 +86,7 @@ class TestSeededResolution:
     def _stubs(self, monkeypatch):
         monkeypatch.setattr(config, "DISCOVERY_DOMAIN_LOOKUP", True)
         monkeypatch.setattr(config, "DISCOVERY_DOMAIN_HOSTS", HOSTS)
-        monkeypatch.setattr(resolve_board, "official_domain", answer("lilly.com"))
+        monkeypatch.setattr(domain, "official_domain", answer("lilly.com"))
         monkeypatch.setattr(resolve_board, "validate_board", answer((10, 3)))
         monkeypatch.setattr(resolve_board, "probe_company", answer(
             lambda *a, **k: pytest.fail("the seeded sniff should have won")))

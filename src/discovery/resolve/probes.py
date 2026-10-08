@@ -14,11 +14,12 @@ from src import config, runstate
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
 from src.ats.board.engine import Board
-from src.ats.signatures import detect
+from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE
 from src.match.names import slug_guesses
 from src.rows import BoardHit, Slug
-from .fetchpool import candidate_urls
+from .domain import seed_urls
+from .fetchpool import _drop_unresolvable, candidate_urls
 from .identity import candidate_pages, foreign_board
 
 
@@ -186,11 +187,20 @@ def _handle(ats: str, slug: Slug) -> str | None:
 async def _scan_meta(ats: str, handle: Slug, source_url: str) -> BoardHit:
     """probe_scan's answer for `ats`'s board `handle`, found at
     `source_url`: counted through its listing, `validated` when that
-    answered."""
-    h = _handle(ats, handle)
+    answered. `careers_url` is the board's as `pack` reads it off the page,
+    which a careers-URL-keyed board's handle needs."""
+    curl = pack(ats, handle, source_url)["careers_url"]
+    h = cast(Board, board_for(ats)).handle(coords.columns(ats, handle, curl))
     ok, n = await cast(Board, board_for(ats)).alive(h) if h else (False, 0)
     return {"ats": ats, "slug": handle, "count": n if ok else 0,
-            "validated": ok, "source_url": source_url}
+            "validated": ok, "source_url": source_url, "careers_url": curl}
+
+
+def page_hit(text: str | None, url: str = "") -> tuple[str, Slug] | None:
+    """(ats, handle) of the first fetchable board `text` or `url` names, any
+    platform (`signatures.detect`, as the careers-page sniff reads a page)."""
+    hit = detect(text or "", url, leads=False)
+    return (hit[1], hit[2]) if hit else None
 
 
 async def probe_scan(name: str, careers_url: str = "") -> BoardHit | None:
@@ -224,7 +234,9 @@ async def probe_scan(name: str, careers_url: str = "") -> BoardHit | None:
 # Many Fortune-500 careers pages (NetApp, Cisco, Syneos, Precision
 # BioSciences, WillowTree, etc.) are React/Angular SPAs: the board link
 # is only inserted into the DOM after JS runs, so the static probe_scan
-# above can't see it.
+# and sniff cannot see it. The rendered page is read for ANY fetchable
+# platform (`page_hit`): read for Workday alone, 15 of 17 majors' Phenom,
+# SuccessFactors and Eightfold boards came back "no board link" (2026-10-08).
 
 
 class JsScanProbePool:
@@ -306,7 +318,7 @@ class JsScanProbePool:
     @staticmethod
     async def _scan(page: _Page, url: str) -> tuple[str, Slug] | None:
         """
-        Navigate + wait for JS, returning `scan_hit`'s (ats, handle) or
+        Navigate + wait for JS, returning `page_hit`'s (ats, handle) or
         None. Has three short-circuits so we don't pay the full
         networkidle wait on obvious non-matches:
           1. Did the URL redirect straight to the vendor's host?
@@ -323,14 +335,14 @@ class JsScanProbePool:
                     and "Navigation timeout" not in msg):
                 _log.debug("js scan %s: goto failed: %s", url, e)
                 return None
-        if (hit := scan_hit(page.url)):
+        if (hit := page_hit("", page.url)):
             return hit
         try:
             html = await page.content()
         except PlaywrightError as e:
             _log.debug("js scan %s: content failed: %s", url, e)
             html = ""
-        if (hit := await asyncio.to_thread(scan_hit, html)):
+        if (hit := await asyncio.to_thread(page_hit, html)):
             return hit
         # Wait for JS-deferred content (iframes, ajax-injected links).
         try:
@@ -343,13 +355,21 @@ class JsScanProbePool:
         except PlaywrightError as e:
             _log.debug("js scan %s: re-read failed: %s", url, e)
             return None
-        return scan_hit(cur) or await asyncio.to_thread(scan_hit, html)
+        return page_hit("", cur) or await asyncio.to_thread(page_hit, html)
 
     @classmethod
     async def _scrape(cls, page: _Page, name: str,
                       careers_url: str) -> tuple[BoardHit | None, str]:
-        """probe's answer from `page`, once it has one."""
-        for url in candidate_urls(name, careers_url):
+        """probe's answer from `page`, once it has one. A guessed host that
+        does not resolve, or refused the static fetch, is not navigated:
+        each such goto spent seconds to minutes of the name's budget.
+        The official domain's pages (`domain.seed_urls`) go first: the
+        name guesses alone sent Eli Lilly to elililly.com and eli.com.
+        """
+        seeds = await seed_urls(name, careers_url)
+        urls = dict.fromkeys([*seeds, *(s + "careers" for s in seeds[:1]),
+                              *candidate_urls(name, careers_url)])
+        for url in await _drop_unresolvable(list(urls)):
             hit = await cls._scan(page, url)
             if not hit or await foreign_board(name, *hit):
                 continue

@@ -54,6 +54,7 @@ Notes:
 from __future__ import annotations
 
 import asyncio
+import importlib
 import re
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from typing import Literal, cast
@@ -316,11 +317,48 @@ def _run_start(rx: str) -> str:
     return f"{m.group(0)}(?<![a-z0-9]){rx[m.end():]}" if m else rx
 
 
-def _detector(entry: Detect) -> tuple[list[re.Pattern[str]], tuple[str | None, ...], set[str]]:
-    """A `detect` entry read once: (regexes, transform per group, blocklist)."""
+def _required(rx: str) -> str:
+    r"""The longest literal every match of `rx` contains, lowercased ("" for
+    none): a page without it cannot match, so `detect` skips the scan.
+
+    >>> _required(r"(?i)([a-z0-9-]+)\.icims\.com"), _required(r"(?i)jobs\.lever\.co/([^/]+)")
+    ('.icims.com', 'jobs.lever.co/')
+    >>> _required(r"(?i)([a-z0-9-]+\.eightfold\.ai)")
+    '.eightfold.ai'
+    >>> _required(r"(?i)(?:careers|jobs)\.x\.com"), _required(r"(a|b)")
+    ('.x.com', '')
+
+    Notes:
+        A 245 ms average `detect` over ten careers pages (one of 1 MB),
+        16 s of a discover-local run, was every spec's regexes scanning
+        pages that never named its host (2026-10-08 profile).
+    """
+    # The stdlib's own regex parser: `re` has no public one, and no stubs.
+    parser = importlib.import_module("re._parser")
+    best, run = "", ""
+
+    def walk(seq: Iterable[tuple[object, object]]) -> None:
+        nonlocal best, run
+        for op, av in seq:
+            if op is parser.LITERAL:
+                run += chr(cast(int, av)).lower()
+                continue
+            best, run = max(best, run, key=len), ""
+            if op is parser.SUBPATTERN:
+                walk(cast(tuple[Iterable[tuple[object, object]], ...], av)[-1])
+        best, run = max(best, run, key=len), ""
+    walk(parser.parse(rx))
+    return best
+
+
+def _detector(entry: Detect) -> tuple[list[re.Pattern[str]], tuple[str | None, ...], set[str],
+                                      tuple[str, ...]]:
+    """A `detect` entry read once: (regexes, transform per group, blocklist,
+    each regex's `_required` literal)."""
     regexes = [re.compile(_run_start(rx)) for rx in entry.re]
     groups = sum(rx.groups for rx in regexes)
-    return regexes, entry.transform or (None,) * groups, {v.lower() for v in entry.blocklist}
+    return (regexes, entry.transform or (None,) * groups, {v.lower() for v in entry.blocklist},
+            tuple(_required(rx) for rx in entry.re))
 
 
 def _row_mapper(fs: Fields, free: JSON = None) -> Callable[[dict[str, str], JSON], EngineRow]:
@@ -485,18 +523,21 @@ class Board:
         `handle` column (a hit carries it as a tuple, one value per part)."""
         return "handle" in self._columns
 
-    def detect(self, blob: str,
-               accept: Callable[[str], bool]) -> Slug:
+    def detect(self, blob: str, accept: Callable[[str], bool], low: str = "") -> Slug:
         """The handle the first of the spec's `detect` matches in `blob`
         names, or None: the first match of an entry's first regex, every
         other regex matching too, no part in its `blocklist`, and a first
         part `accept(part)` allows; the parts transformed, a tuple where
         the handle is `multi_column`, else joined by `sep`. A `blob` that
         opens with a URL an `off_page` regex matches (signatures.detect
-        puts the page's URL first) names none."""
+        puts the page's URL first) names none. `low` is `blob` lowercased,
+        when the caller has it."""
         if any(rx.match(blob) for rx in self._off_pages):
             return None
-        for regexes, transforms, blocked in self._detectors:
+        low = low or blob.lower()
+        for regexes, transforms, blocked, needs in self._detectors:
+            if any(n and n not in low for n in needs):
+                continue
             rest = [rx.search(blob) for rx in regexes[1:]]
             if not all(rest):
                 continue

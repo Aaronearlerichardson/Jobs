@@ -601,8 +601,13 @@ def geo_mode(location: str | None, description: str | None = "") -> str | None:
     unknown = location_unknown(location)
     if _names_place(location or "") or (unknown and _names_place(description or "")):
         return "onsite"
-    signal = remote_signal(location, description)
-    if signal and (signal.startswith("location:") or unknown):
+    if unknown:
+        return "remote" if remote_signal(location, description) else None
+    # A placed field is remote only on its own word; the body (62 phrase
+    # scans of ~4 KB) is read just for a veto, so only once the field
+    # already says remote: 98,781 rows a harvest (2026-10-08 profile).
+    if ((remote_signal(location) or "").startswith("location:")
+            and remote_signal(location, description)):
         return "remote"
     return None
 

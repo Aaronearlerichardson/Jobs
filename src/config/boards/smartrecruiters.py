@@ -6,7 +6,9 @@ from src.rows import JSON
 
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "smartrecruiters.com",
-                "re": [r"(?i)(?:careers|jobs)\.smartrecruiters\.com/([A-Za-z0-9_-]+)"]},
+                "re": [r"(?i)(?:careers|jobs)\.smartrecruiters\.com/([A-Za-z0-9_-]+)"],
+                # The vendor's apply widget, embedded on customer pages.
+                "blocklist": ["oneclick-ui"]},
                {"host": "smartrecruiters.com",
                 "re": [r"(?i)api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/"]}],
     "canary": {"name": "Eurofins", "handle": "Eurofins"},

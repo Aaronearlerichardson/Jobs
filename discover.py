@@ -173,6 +173,10 @@ def main() -> None:
 
     args = ap.parse_args()
 
+    # A CLI discovery run is logged like any other (data/logs).
+    from src import session_log
+    session_log.start(sys.argv[1:], prog="discover.py")
+
     from src.config import bootstrap
     bootstrap.ensure_profile()
 

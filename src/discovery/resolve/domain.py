@@ -8,6 +8,7 @@ accepts only a suggestion that names the same company.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterable
 from typing import TypedDict, cast
@@ -19,6 +20,8 @@ from src.net import http
 from src.net.util import cache_dir, dig, host_of, json_cache_get, json_cache_put
 from src.rows import str_or_none
 from src.runstate import per_run
+
+_log = logging.getLogger(__name__)
 
 # Dropped before two names are compared: legal forms, never industry words
 # ("Precision BioSciences" is not "Precision Nutrition").
@@ -154,3 +157,18 @@ async def official_domain(name: str) -> str | None:
         cache[key] = {"domain": domain, "at": now}
         json_cache_put(cache_dir("domains.json"), cache)
     return domain
+
+
+async def seed_urls(name: str, careers_url: str = "") -> list[str]:
+    """Root URLs of `name`'s official domain, one per `[discovery].domain_hosts`
+    entry; none when `careers_url` is given, the lookup is off, or it found
+    nothing (a failed lookup never fails a resolution)."""
+    if careers_url or not config.DISCOVERY_DOMAIN_LOOKUP:
+        return []
+    try:
+        domain = await official_domain(name)
+    except Exception:
+        _log.warning("official_domain %s failed", name, exc_info=True)
+        return []
+    return [f"https://{h.format(domain=domain)}/"
+            for h in config.DISCOVERY_DOMAIN_HOSTS] if domain else []
