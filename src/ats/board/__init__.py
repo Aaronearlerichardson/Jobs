@@ -13,7 +13,7 @@ spec by one engine.
                 hydrated (`fetch_company`, `hydrate_description`)
     closure.py  one stored posting's open/closed verdict (`probe_job_open`)
 
-No module outside config/boards.py names a platform.
+No module outside config/boards/ names a platform.
 """
 
 from __future__ import annotations

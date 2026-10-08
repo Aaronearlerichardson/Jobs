@@ -98,8 +98,9 @@ Also:
 
 ## Where things belong
 
-- A new board platform: a spec in `src/config/boards.py` `BOARDS`. No
-  per-platform module.
+- A new board platform: a module `src/config/boards/<name>.py` exporting
+  `SPEC`, registered (import + `BOARDS` entry, in detection order) in
+  `src/config/boards/__init__.py`.
 - A fetch-level signal: `src/net/http.py`, beside `fetch_failed`.
 - Closure rules: arguments on `store.jobs.sync_job_statuses`.
 - A scorer or hydrator parameter: threaded like triage's `mission_scorer`
