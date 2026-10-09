@@ -72,6 +72,7 @@ libcrypto, ...) never made it in (JobHarvester.exe, 2026-09-10).
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 import time
@@ -188,7 +189,12 @@ PACKAGE_CONFIG = "jobs.nuitka-package.config.yml"
 # exactly the engine modules the installed ddgs release ships, instead of
 # also compiling in ddgs.cli and ddgs.api_server, which nothing here calls
 # (2026-09-11).
-PACKAGES = ["playwright", "fake_useragent"]
+#: fake_useragent where the installed ddgs still reads it (see DATA_PACKAGES).
+#: ddgs 9.16 no longer depends on it (its requirements are click, lxml and
+#: primp), and asking Nuitka to include a package that is not installed is
+#: fatal: "failed to locate package 'fake_useragent'" (CI, 2026-10-09).
+FAKE_UA = ["fake_useragent"] if importlib.util.find_spec("fake_useragent") else []
+PACKAGES = ["playwright", *FAKE_UA]
 
 # No --include-module list: src/dispatch/registry.py names each operation's
 # target as a real import, so Nuitka follows it like any other. While the
@@ -220,7 +226,7 @@ PACKAGES = ["playwright", "fake_useragent"]
 # `FakeUserAgentError: Failed to load or parse browsers.json` — so the dork
 # sweep returned 0 results for every query in the packaged app while working
 # normally from a source checkout.
-DATA_PACKAGES = ["fake_useragent"]
+DATA_PACKAGES = [*FAKE_UA]
 
 # The harvester never serves the UI, runs a dork sweep, or probes a JS-only
 # board: it imports src.store, src.crawl and src.ats and nothing else at
