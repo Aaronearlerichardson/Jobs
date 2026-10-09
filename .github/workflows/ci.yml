@@ -90,12 +90,11 @@ jobs:
           tombi lint --offline --error-on-warnings src/config/boards
 
       - name: Type check (Pyrefly)
-        # Pinned in envs/requirements-dev.txt; it reads pyrefly.toml, whose
-        # python-interpreter-path names the owner's local conda env (for the
-        # PyCharm LSP). That path does not exist here, so the setup-python
-        # interpreter is passed instead: without it every third-party import
-        # reads as missing.
-        run: python -m pyrefly check --python-interpreter-path "$(python -c 'import sys; print(sys.executable)')"
+        # Installed from envs/requirements-dev.txt; it reads pyrefly.toml, which
+        # names no interpreter, so Pyrefly queries `python3` on PATH: the
+        # setup-python interpreter that "Install dependencies" filled, whose
+        # site-packages third-party imports resolve against.
+        run: python -m pyrefly check
 
       - name: Validate the example profile
         run: |
