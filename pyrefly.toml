@@ -7,7 +7,7 @@ search-path = ["."]
 # an activated venv or conda env, a .venv/venv/env in the project, then `python3` or
 # `python` on PATH (CI's setup-python). One named here would also override the
 # interpreter an editor passes in. PyCharm, once per machine: Settings | Python |
-# Tools | Pyrefly, Execution mode "Interpreter", with the `jobs` env
+# Tools | Pyrefly, tick Enable, Execution mode "Interpreter", with the `jobs` env
 # (envs/environment.yml) as the project interpreter; PyCharm passes it to the server.
 # strict: implicit-any family (disallow_any_*), unused-ignore (warn_unused_ignores),
 # missing-override-decorator, open-unpacking, strict-callable-subtyping.
