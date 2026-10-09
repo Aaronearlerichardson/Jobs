@@ -1,6 +1,8 @@
 """The schema of a `config.BOARDS` spec: frozen pydantic models, parsed once
 when the engine loads (`parse`). A key's meaning is its `Field` description
-and its default is declared on its model, nowhere else.
+and its default is declared on its model, nowhere else. `json_schema` is
+the same schema for an editor: after changing a model, rerun
+`python tools/board_catalog.py`.
 
 A model's `ADAPTATIONS` are the keys that adapt the engine to one platform's
 behavior; a `why` ("reason, YYYY-MM") may note them. A listing alternative
@@ -100,7 +102,8 @@ Css = Annotated[Template, AfterValidator(_css)]
 #: A field-grammar spec (fields.py): a path, a dict, or None.
 Raw = Annotated[JSON, SkipValidation()]
 Grammar = Annotated[Raw, AfterValidator(lambda v: [v, fields.check(v)][0])]
-Paths = Annotated[tuple[Str, ...], BeforeValidator(_listed)]
+Paths = Annotated[tuple[Str, ...],
+                  BeforeValidator(_listed, json_schema_input_type=Str | tuple[Str, ...])]
 #: Search terms each placed among every platform's: [position, text] pairs.
 Ranked = tuple[tuple[Int, Str], ...]
 Why = Annotated[str, Strict(),
@@ -229,7 +232,8 @@ class XmlDecoder(_Decoder):
 class HtmlDecoder(_Decoder):
     kind: Literal["html"] = Field(description="One entry per selected element (decode.elements)")
     entries: Paths = Field(("elements",), description="Where the decoded elements sit")
-    select: Annotated[tuple[Css, ...], BeforeValidator(_listed)] = Field(
+    select: Annotated[tuple[Css, ...], BeforeValidator(
+            _listed, json_schema_input_type=Css | tuple[Css, ...])] = Field(
         min_length=1, description="CSS templates (cssselect's dialect: :contains, not "
                                   ':-soup-contains) tried in order until one finds any; '
                                   '"$job_links": the careers-page reader (custom.read_page)')
@@ -440,7 +444,8 @@ class Handle(_Adaptation):
                     "settled once per handle")
     accept: Accept = Field(Accept(),
                            description="The answers that settle a `try` value")
-    follow: dict[Str, Annotated[tuple[Template, ...], BeforeValidator(_listed),
+    follow: dict[Str, Annotated[tuple[Template, ...], BeforeValidator(
+            _listed, json_schema_input_type=Template | tuple[Template, ...]),
                                 Field(min_length=1)]] = Field(
         default_factory=dict,
         description="A part that is the redirect target of its URL template, or of the "
@@ -510,9 +515,13 @@ class Rule(_Spec):
     why: Grammar = Field(None, description="Names the reason")
 
 
-#: A closure condition is its one rule; a rule list is as it is.
+#: A closure condition is its one rule; a rule list is as it is. (Each
+#: `json_schema_input_type` tells the JSON Schema what a before-validator
+#: accepts besides its field's type.)
 Rules = Annotated[tuple[Rule, ...],
-                  BeforeValidator(lambda v: [{"when": v}] if isinstance(v, dict) else v)]
+                  BeforeValidator(lambda v: [{"when": v}] if isinstance(v, dict) else v,
+                                  json_schema_input_type=Union[dict[Str, object],
+                                                               tuple[Rule, ...]])]
 
 
 class Closure(_Adaptation):
@@ -665,3 +674,28 @@ def walk(model: BaseModel, path: str = "") -> Iterator[tuple[str, object, bool, 
             for i, sub in enumerate(value):
                 if isinstance(sub, BaseModel):
                     yield from walk(sub, f"{key}[{i}].")
+
+
+def json_schema() -> dict[str, object]:
+    """The JSON Schema a spec file is checked against in an editor and by
+    `tombi lint`: BoardSpec's, plus what `BoardSpec._alternatives` reads
+    beside it (a lone listing as a table; fallbacks that take what they
+    leave out from the first, `reset` naming keys they do not inherit), and
+    a detect transform as one of the known names."""
+    schema = BoardSpec.model_json_schema()
+    defs, listing = schema["$defs"], schema["$defs"]["Listing"]
+    defs["ListingFallback"] = {
+        **{k: v for k, v in listing.items() if k != "required"},
+        "title": "ListingFallback",
+        "description": "A later listing alternative: what it leaves out is the first's",
+        "properties": {**listing["properties"], "reset": {
+            "type": "array", "uniqueItems": True, "items": {"enum": sorted(listing["properties"])},
+            "description": "Keys the first alternative sets that this one does not inherit"}},
+        "required": ["why"]}
+    schema["properties"]["listing"] = {
+        "description": schema["properties"]["listing"]["description"],
+        "anyOf": [{"$ref": "#/$defs/Listing"},
+                  {"type": "array", "minItems": 1, "prefixItems": [{"$ref": "#/$defs/Listing"}],
+                   "items": {"$ref": "#/$defs/ListingFallback"}}]}
+    defs["Detect"]["properties"]["transform"]["items"] = {"enum": sorted(fields.TRANSFORMS)}
+    return {"$schema": "https://json-schema.org/draft/2020-12/schema", **schema}

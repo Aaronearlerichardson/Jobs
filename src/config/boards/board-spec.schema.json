@@ -1,0 +1,2250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Accept": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "anyOf": [
+            {
+              "items": {
+                "maximum": 599,
+                "minimum": 100,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only these statuses; default any",
+          "title": "Status"
+        },
+        "status_not": {
+          "default": [],
+          "description": "None of these statuses",
+          "items": {
+            "maximum": 599,
+            "minimum": 100,
+            "type": "integer"
+          },
+          "title": "Status Not",
+          "type": "array"
+        },
+        "total": {
+          "default": false,
+          "description": "A listing answer carries an int total",
+          "title": "Total",
+          "type": "boolean"
+        }
+      },
+      "title": "Accept",
+      "type": "object"
+    },
+    "AtomDecoder": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": [
+            "entries"
+          ],
+          "description": "Where the decoded entries sit",
+          "title": "Entries"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Every dict holding this key stands for its value",
+          "title": "Values"
+        },
+        "kind": {
+          "const": "atom",
+          "description": "An Atom feed's entries",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "AtomDecoder",
+      "type": "object"
+    },
+    "Canary": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The employer the sample board belongs to",
+          "title": "Name",
+          "type": "string"
+        },
+        "handle": {
+          "description": "The sample board's handle",
+          "title": "Handle",
+          "type": "string"
+        },
+        "min_jobs": {
+          "default": 1,
+          "description": "The fewest postings a healthy board lists",
+          "minimum": 1,
+          "title": "Min Jobs",
+          "type": "integer"
+        },
+        "min_fill": {
+          "additionalProperties": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "description": "Per row field, the share of the board's rows that must fill it, over pager.FILL_FLOORS",
+          "propertyNames": {
+            "enum": [
+              "id",
+              "title",
+              "url",
+              "location",
+              "description",
+              "posted_at",
+              "remote_hint",
+              "department"
+            ]
+          },
+          "title": "Min Fill",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "handle"
+      ],
+      "title": "Canary",
+      "type": "object"
+    },
+    "Closure": {
+      "additionalProperties": false,
+      "properties": {
+        "why": {
+          "anyOf": [
+            {
+              "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the adaptation: \"reason, YYYY-MM\"",
+          "title": "Why"
+        },
+        "via": {
+          "anyOf": [
+            {
+              "enum": [
+                "detail",
+                "listing",
+                "page"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What judges a posting; default the detail where there is one, else its page",
+          "title": "Via"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Asked in place of the detail's URL",
+          "title": "Url"
+        },
+        "open": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/Rule"
+              },
+              "type": "array"
+            }
+          ],
+          "default": [],
+          "description": "A condition, or rules, proving the posting live",
+          "title": "Open"
+        },
+        "closed": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/Rule"
+              },
+              "type": "array"
+            }
+          ],
+          "default": [],
+          "description": "A condition, or rules, proving it closed",
+          "title": "Closed"
+        },
+        "unmatched": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The reason a readable answer neither rule matches closes the posting",
+          "title": "Unmatched"
+        },
+        "page_closed": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A match on the posting's own page proving it closed",
+          "title": "Page Closed"
+        }
+      },
+      "title": "Closure",
+      "type": "object"
+    },
+    "CursorPager": {
+      "additionalProperties": false,
+      "properties": {
+        "why": {
+          "anyOf": [
+            {
+              "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the adaptation: \"reason, YYYY-MM\"",
+          "title": "Why"
+        },
+        "pages": {
+          "default": 10,
+          "description": "The most pages a walk reads",
+          "minimum": 1,
+          "title": "Pages",
+          "type": "integer"
+        },
+        "total": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the board's total on the first page",
+          "title": "Total"
+        },
+        "ceiling": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The most rows the server serves: a total there ends nothing",
+          "title": "Ceiling"
+        },
+        "declared": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the last page, on every page",
+          "title": "Declared"
+        },
+        "size": {
+          "description": "Rows asked per page",
+          "minimum": 1,
+          "title": "Size",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "cursor",
+          "description": "Each page names the next, followed verbatim",
+          "title": "Kind",
+          "type": "string"
+        },
+        "next": {
+          "description": "The path of a page's next-page URL",
+          "title": "Next",
+          "type": "string"
+        },
+        "has_next": {
+          "description": "The path of a page's more-to-come flag",
+          "title": "Has Next",
+          "type": "string"
+        }
+      },
+      "required": [
+        "size",
+        "kind",
+        "next",
+        "has_next"
+      ],
+      "title": "CursorPager",
+      "type": "object"
+    },
+    "Detail": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "description": "The request's URL template",
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "method": {
+          "default": "GET",
+          "description": "The HTTP method",
+          "enum": [
+            "GET",
+            "POST"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "params": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Query parameters; a None one is left off",
+          "title": "Params"
+        },
+        "json": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JSON"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A JSON body template",
+          "title": "Json"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Over the shared request headers",
+          "title": "Headers",
+          "type": "object"
+        },
+        "decoder": {
+          "default": {
+            "entries": [
+              ""
+            ],
+            "values": null,
+            "kind": "json"
+          },
+          "description": "Reads the response body",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/JsonDecoder"
+            },
+            {
+              "$ref": "#/$defs/JsonInHtmlDecoder"
+            },
+            {
+              "$ref": "#/$defs/JsonLdDecoder"
+            },
+            {
+              "$ref": "#/$defs/AtomDecoder"
+            },
+            {
+              "$ref": "#/$defs/XmlDecoder"
+            },
+            {
+              "$ref": "#/$defs/HtmlDecoder"
+            }
+          ],
+          "title": "Decoder"
+        },
+        "fields": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JSON"
+          },
+          "description": "Row field (or internal _field) -> field spec",
+          "title": "Fields",
+          "type": "object"
+        },
+        "record": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The record's paths in an answer; default the decoder's first entry",
+          "title": "Record"
+        },
+        "location": {
+          "default": "never",
+          "description": "When the detail's location replaces the row's",
+          "enum": [
+            "always",
+            "if_unknown",
+            "never"
+          ],
+          "title": "Location",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "Detail",
+      "type": "object"
+    },
+    "Detect": {
+      "additionalProperties": false,
+      "properties": {
+        "re": {
+          "default": [],
+          "description": "Regexes that must all match; their groups are the handle's parts, in order",
+          "items": {
+            "type": "string"
+          },
+          "title": "Re",
+          "type": "array"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The vendor's host; an entry with no `re` names only that",
+          "title": "Host"
+        },
+        "transform": {
+          "default": [],
+          "description": "A fields.TRANSFORMS name per group (\"keep\": as captured); default all kept",
+          "items": {
+            "enum": [
+              "after_marker",
+              "alnum_tail",
+              "before",
+              "colon_location",
+              "cut_date_tail",
+              "dash_space",
+              "date",
+              "group",
+              "host",
+              "host_key",
+              "host_label",
+              "host_nowww",
+              "html_text",
+              "int",
+              "keep",
+              "loc_text",
+              "lower",
+              "one_line",
+              "origin",
+              "place",
+              "rstrip_slash",
+              "snippet",
+              "stable_id",
+              "strip_labels",
+              "underscore",
+              "unescape_html_text",
+              "unquote",
+              "url_key",
+              "ymd"
+            ]
+          },
+          "title": "Transform",
+          "type": "array"
+        },
+        "blocklist": {
+          "default": [],
+          "description": "Part values that reject a match",
+          "items": {
+            "type": "string"
+          },
+          "title": "Blocklist",
+          "type": "array"
+        },
+        "careers_url": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The board's URL, rebuilt from the parts or the {page} that carried the signature",
+          "title": "Careers Url"
+        },
+        "off_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A page whose URL matches carries no signature: the vendor's own pages are not a customer's board",
+          "title": "Off Page"
+        }
+      },
+      "title": "Detect",
+      "type": "object"
+    },
+    "Discovery": {
+      "additionalProperties": false,
+      "properties": {
+        "scan": {
+          "default": false,
+          "description": "No name guess reaches the handle: discovery reads it off the company's careers pages, fetched and then rendered in a headless browser",
+          "title": "Scan",
+          "type": "boolean"
+        },
+        "shared": {
+          "default": false,
+          "description": "A board can be a parent company's, serving its subsidiaries: one sharing no token with the company's name is asked who owns it",
+          "title": "Shared",
+          "type": "boolean"
+        },
+        "narrow": {
+          "default": false,
+          "description": "The vendor's host serves so many employers that a bare site: search of it is noise: the dork searches its `search` forms by name, with the profile's domain keywords",
+          "title": "Narrow",
+          "type": "boolean"
+        },
+        "search": {
+          "default": [],
+          "description": "The host forms the dork searches with site:, every platform's in position order",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Search",
+          "type": "array"
+        },
+        "hint": {
+          "default": [],
+          "description": "The vendor terms the web-search resolver ORs into its board query, every platform's in position order",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Hint",
+          "type": "array"
+        }
+      },
+      "title": "Discovery",
+      "type": "object"
+    },
+    "Handle": {
+      "additionalProperties": false,
+      "description": "A board's handle: its columns, and the adaptations that settle it.\n\nThe config key `try` fills `try_`:\n\n>>> Handle.model_validate({\"try\": {\"host\": [\"a\", \"b\"]}}).try_\n{'host': ('a', 'b')}",
+      "properties": {
+        "why": {
+          "anyOf": [
+            {
+              "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the adaptation: \"reason, YYYY-MM\"",
+          "title": "Why"
+        },
+        "columns": {
+          "default": [
+            "slug"
+          ],
+          "description": "The store columns naming the board; `handle` alone holds a handle of several parts, `sep`-joined (a hit carries it as a tuple)",
+          "items": {
+            "enum": [
+              "slug",
+              "handle",
+              "careers_url"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        },
+        "parts": {
+          "default": [],
+          "description": "The handle's pieces' names; default the columns",
+          "items": {
+            "type": "string"
+          },
+          "title": "Parts",
+          "type": "array"
+        },
+        "sep": {
+          "default": "|",
+          "description": "Joins the parts into one handle string",
+          "title": "Sep",
+          "type": "string"
+        },
+        "fold": {
+          "default": false,
+          "description": "The host answers a handle's case alike, so boards differing only in case are one board",
+          "title": "Fold",
+          "type": "boolean"
+        },
+        "try": {
+          "additionalProperties": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "description": "One part's templates, tried until an answer `accept` allows; settled once per handle",
+          "maxProperties": 1,
+          "title": "Try",
+          "type": "object"
+        },
+        "accept": {
+          "$ref": "#/$defs/Accept",
+          "default": {
+            "status": null,
+            "status_not": [],
+            "total": false
+          },
+          "description": "The answers that settle a `try` value"
+        },
+        "follow": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "minLength": 1
+          },
+          "description": "A part that is the redirect target of its URL template, or of the first of several that answers 200 (a root that refuses a client, then a known path); settled once per handle",
+          "title": "Follow",
+          "type": "object"
+        },
+        "prelude": {
+          "default": [],
+          "description": "Requests answering parts a listing or detail request needs (a token its own page or API hands out), each part settled once per handle and again, once, when a request is refused 401 or 403",
+          "items": {
+            "$ref": "#/$defs/Prelude"
+          },
+          "title": "Prelude",
+          "type": "array"
+        }
+      },
+      "title": "Handle",
+      "type": "object"
+    },
+    "HtmlDecoder": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": [
+            "elements"
+          ],
+          "description": "Where the decoded elements sit",
+          "title": "Entries"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Every dict holding this key stands for its value",
+          "title": "Values"
+        },
+        "kind": {
+          "const": "html",
+          "description": "One entry per selected element (decode.elements)",
+          "title": "Kind",
+          "type": "string"
+        },
+        "select": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "CSS templates (cssselect's dialect: :contains, not :-soup-contains) tried in order until one finds any; \"$job_links\": the careers-page reader (custom.read_page)",
+          "title": "Select"
+        },
+        "context": {
+          "anyOf": [
+            {
+              "enum": [
+                "parent",
+                "lines"
+              ],
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The block around an element: its parent, the nearest of these tags, or the nearest holding two lines",
+          "title": "Context"
+        },
+        "cells": {
+          "additionalProperties": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "description": "{name: CSS}: text found in the context",
+          "title": "Cells",
+          "type": "object"
+        },
+        "base": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Makes hrefs absolute; default the page",
+          "title": "Base"
+        },
+        "selects": {
+          "default": false,
+          "description": "Also the page's <select> fields, as \"selects\": [{name, options: [{value, label}]}]",
+          "title": "Selects",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "select"
+      ],
+      "title": "HtmlDecoder",
+      "type": "object"
+    },
+    "JSON": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JSON"
+          },
+          "type": "object"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JSON"
+          },
+          "type": "array"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "JobRef": {
+      "additionalProperties": false,
+      "properties": {
+        "re": {
+          "description": "Reads a stored posting URL",
+          "title": "Re",
+          "type": "string"
+        },
+        "parts": {
+          "default": [
+            "slug",
+            "jid"
+          ],
+          "description": "Its groups' names: handle parts, then the posting's own (jid, or listing keys its id reads)",
+          "items": {
+            "type": "string"
+          },
+          "title": "Parts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "re"
+      ],
+      "title": "JobRef",
+      "type": "object"
+    },
+    "JsonDecoder": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": [
+            ""
+          ],
+          "description": "Where the payload keeps its entries: the first path holding a list",
+          "title": "Entries"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Every dict holding this key stands for its value",
+          "title": "Values"
+        },
+        "kind": {
+          "const": "json",
+          "default": "json",
+          "description": "The payload itself",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "JsonDecoder",
+      "type": "object"
+    },
+    "JsonInHtmlDecoder": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": [
+            ""
+          ],
+          "description": "Where the payload keeps its entries: the first path holding a list",
+          "title": "Entries"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Every dict holding this key stands for its value",
+          "title": "Values"
+        },
+        "kind": {
+          "const": "json_in_html",
+          "description": "One JSON value on a page",
+          "title": "Kind",
+          "type": "string"
+        },
+        "regex": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ends just before the JSON in the page text",
+          "title": "Regex"
+        },
+        "element": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Else: the CSS of the element whose `attribute` (entity-decoded) is the JSON",
+          "title": "Element"
+        },
+        "attribute": {
+          "default": "value",
+          "description": "The `element` attribute holding the JSON",
+          "title": "Attribute",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "JsonInHtmlDecoder",
+      "type": "object"
+    },
+    "JsonLdDecoder": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": [
+            "postings"
+          ],
+          "description": "Where the decoded postings sit",
+          "title": "Entries"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Every dict holding this key stands for its value",
+          "title": "Values"
+        },
+        "kind": {
+          "const": "jsonld",
+          "description": "The page's schema.org JobPostings",
+          "title": "Kind",
+          "type": "string"
+        },
+        "cells": {
+          "additionalProperties": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "description": "{name: CSS}: a page naming no posting, as \"page\", the text of each",
+          "title": "Cells",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "JsonLdDecoder",
+      "type": "object"
+    },
+    "Listing": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "description": "The request's URL template",
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "method": {
+          "default": "GET",
+          "description": "The HTTP method",
+          "enum": [
+            "GET",
+            "POST"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "params": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Query parameters; a None one is left off",
+          "title": "Params"
+        },
+        "json": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JSON"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A JSON body template",
+          "title": "Json"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Over the shared request headers",
+          "title": "Headers",
+          "type": "object"
+        },
+        "decoder": {
+          "default": {
+            "entries": [
+              ""
+            ],
+            "values": null,
+            "kind": "json"
+          },
+          "description": "Reads the response body",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/JsonDecoder"
+            },
+            {
+              "$ref": "#/$defs/JsonInHtmlDecoder"
+            },
+            {
+              "$ref": "#/$defs/JsonLdDecoder"
+            },
+            {
+              "$ref": "#/$defs/AtomDecoder"
+            },
+            {
+              "$ref": "#/$defs/XmlDecoder"
+            },
+            {
+              "$ref": "#/$defs/HtmlDecoder"
+            }
+          ],
+          "title": "Decoder"
+        },
+        "fields": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JSON"
+          },
+          "description": "Row field (or internal _field) -> field spec",
+          "title": "Fields",
+          "type": "object"
+        },
+        "probe_url": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The URL a cheap read of ids, titles and the total asks instead",
+          "title": "Probe Url"
+        },
+        "pager": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "cursor": "#/$defs/CursorPager",
+                  "offset": "#/$defs/OffsetPager",
+                  "overlap": "#/$defs/OverlapPager",
+                  "page": "#/$defs/PagePager"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/OffsetPager"
+                },
+                {
+                  "$ref": "#/$defs/OverlapPager"
+                },
+                {
+                  "$ref": "#/$defs/PagePager"
+                },
+                {
+                  "$ref": "#/$defs/CursorPager"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How pages step; none reads one page",
+          "title": "Pager"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Scope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Narrows the listing to the locality"
+        },
+        "why": {
+          "anyOf": [
+            {
+              "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why this fallback alternative exists: \"reason, YYYY-MM\"",
+          "title": "Why"
+        },
+        "missing_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A final URL this matches means the handle names no board: the vendor redirects an unknown one to its own site. Reported as HTTP 404",
+          "title": "Missing At"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "Listing",
+      "type": "object"
+    },
+    "OffsetPager": {
+      "additionalProperties": false,
+      "properties": {
+        "why": {
+          "anyOf": [
+            {
+              "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the adaptation: \"reason, YYYY-MM\"",
+          "title": "Why"
+        },
+        "pages": {
+          "default": 10,
+          "description": "The most pages a walk reads",
+          "minimum": 1,
+          "title": "Pages",
+          "type": "integer"
+        },
+        "total": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the board's total on the first page",
+          "title": "Total"
+        },
+        "ceiling": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The most rows the server serves: a total there ends nothing",
+          "title": "Ceiling"
+        },
+        "declared": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the last page, on every page",
+          "title": "Declared"
+        },
+        "kind": {
+          "const": "offset",
+          "description": "\"$offset\" steps a page",
+          "title": "Kind",
+          "type": "string"
+        },
+        "size": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Rows asked per page; unset, the server sizes its pages and the walk learns it (pager.walk)",
+          "title": "Size"
+        },
+        "start": {
+          "default": 0,
+          "description": "The first row's offset",
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "OffsetPager",
+      "type": "object"
+    },
+    "OverlapPager": {
+      "additionalProperties": false,
+      "properties": {
+        "why": {
+          "anyOf": [
+            {
+              "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the adaptation: \"reason, YYYY-MM\"",
+          "title": "Why"
+        },
+        "pages": {
+          "default": 10,
+          "description": "The most pages a walk reads",
+          "minimum": 1,
+          "title": "Pages",
+          "type": "integer"
+        },
+        "total": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the board's total on the first page",
+          "title": "Total"
+        },
+        "ceiling": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The most rows the server serves: a total there ends nothing",
+          "title": "Ceiling"
+        },
+        "declared": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the last page, on every page",
+          "title": "Declared"
+        },
+        "size": {
+          "description": "Rows asked per page",
+          "minimum": 1,
+          "title": "Size",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "overlap",
+          "description": "\"$offset\" steps `step` < `size`: pages overlap",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step": {
+          "description": "Rows each page steps",
+          "minimum": 1,
+          "title": "Step",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "size",
+        "kind",
+        "step"
+      ],
+      "title": "OverlapPager",
+      "type": "object"
+    },
+    "PagePager": {
+      "additionalProperties": false,
+      "properties": {
+        "why": {
+          "anyOf": [
+            {
+              "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the adaptation: \"reason, YYYY-MM\"",
+          "title": "Why"
+        },
+        "pages": {
+          "default": 10,
+          "description": "The most pages a walk reads",
+          "minimum": 1,
+          "title": "Pages",
+          "type": "integer"
+        },
+        "total": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the board's total on the first page",
+          "title": "Total"
+        },
+        "ceiling": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The most rows the server serves: a total there ends nothing",
+          "title": "Ceiling"
+        },
+        "declared": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the last page, on every page",
+          "title": "Declared"
+        },
+        "kind": {
+          "const": "page",
+          "description": "\"$page\" counts pages",
+          "title": "Kind",
+          "type": "string"
+        },
+        "size": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Rows a page holds, when known",
+          "title": "Size"
+        },
+        "start": {
+          "default": 0,
+          "description": "The first page's number",
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "bare_first": {
+          "default": false,
+          "description": "The first page's request names no page",
+          "title": "Bare First",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "PagePager",
+      "type": "object"
+    },
+    "Prelude": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "description": "The request's URL template",
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "method": {
+          "default": "GET",
+          "description": "The HTTP method",
+          "enum": [
+            "GET",
+            "POST"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "params": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Query parameters; a None one is left off",
+          "title": "Params"
+        },
+        "json": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JSON"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A JSON body template",
+          "title": "Json"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Over the shared request headers",
+          "title": "Headers",
+          "type": "object"
+        },
+        "decoder": {
+          "default": {
+            "entries": [
+              ""
+            ],
+            "values": null,
+            "kind": "json"
+          },
+          "description": "Reads the response body",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/JsonDecoder"
+            },
+            {
+              "$ref": "#/$defs/JsonInHtmlDecoder"
+            },
+            {
+              "$ref": "#/$defs/JsonLdDecoder"
+            },
+            {
+              "$ref": "#/$defs/AtomDecoder"
+            },
+            {
+              "$ref": "#/$defs/XmlDecoder"
+            },
+            {
+              "$ref": "#/$defs/HtmlDecoder"
+            }
+          ],
+          "title": "Decoder"
+        },
+        "set": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "{part: path in the decoded answer}: the parts one answer settles",
+          "minProperties": 1,
+          "title": "Set",
+          "type": "object"
+        }
+      },
+      "required": [
+        "url",
+        "set"
+      ],
+      "title": "Prelude",
+      "type": "object"
+    },
+    "Rescue": {
+      "additionalProperties": false,
+      "properties": {
+        "when": {
+          "default": "scoped",
+          "description": "On a scoped pull, or every pull",
+          "enum": [
+            "scoped",
+            "always"
+          ],
+          "title": "When",
+          "type": "string"
+        },
+        "unknown": {
+          "description": "A listed location it matches is filled from the detail",
+          "title": "Unknown",
+          "type": "string"
+        },
+        "cap": {
+          "description": "The most detail reads a pull spends",
+          "minimum": 1,
+          "title": "Cap",
+          "type": "integer"
+        },
+        "cache_days": {
+          "default": 0,
+          "description": "Days a found location is cached; 0 none",
+          "minimum": 0,
+          "title": "Cache Days",
+          "type": "integer"
+        },
+        "free": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Free text tried against the area first",
+          "title": "Free"
+        },
+        "fields": {
+          "default": [
+            "location"
+          ],
+          "description": "The row fields the detail fills",
+          "items": {
+            "enum": [
+              "location",
+              "description",
+              "posted_at",
+              "remote_hint"
+            ],
+            "type": "string"
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "why": {
+          "description": "Why the listing needs rescuing: \"reason, YYYY-MM\"",
+          "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unknown",
+        "cap",
+        "why"
+      ],
+      "title": "Rescue",
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "when": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JSON"
+          },
+          "description": "A condition on the record",
+          "title": "When",
+          "type": "object"
+        },
+        "why": {
+          "$ref": "#/$defs/JSON",
+          "default": null,
+          "description": "Names the reason",
+          "title": "Why"
+        }
+      },
+      "required": [
+        "when"
+      ],
+      "title": "Rule",
+      "type": "object"
+    },
+    "Scope": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "facets",
+          "description": "Narrow by the facet values the area matches",
+          "title": "Kind",
+          "type": "string"
+        },
+        "facets": {
+          "description": "The facet groups' path on an unscoped first page",
+          "title": "Facets",
+          "type": "string"
+        },
+        "param": {
+          "description": "A group's (or value's) parameter name key",
+          "title": "Param",
+          "type": "string"
+        },
+        "param_re": {
+          "description": "The groups whose parameter it matches",
+          "title": "Param Re",
+          "type": "string"
+        },
+        "values": {
+          "description": "A group's (or value's nested) values key",
+          "title": "Values",
+          "type": "string"
+        },
+        "id": {
+          "description": "A value's id key",
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "description": "A value's label key, matched against the area",
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "facets",
+        "param",
+        "param_re",
+        "values",
+        "id",
+        "label"
+      ],
+      "title": "Scope",
+      "type": "object"
+    },
+    "XmlDecoder": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": [
+            "records"
+          ],
+          "description": "Where the decoded records sit",
+          "title": "Entries"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Every dict holding this key stands for its value",
+          "title": "Values"
+        },
+        "kind": {
+          "const": "xml",
+          "description": "One record per XML element of a local name (decode.xml_records); CDATA is text",
+          "title": "Kind",
+          "type": "string"
+        },
+        "select": {
+          "description": "The local name of the record elements",
+          "title": "Select",
+          "type": "string"
+        },
+        "lists": {
+          "default": [],
+          "description": "Child names read as a list of every occurrence, however many there are",
+          "items": {
+            "type": "string"
+          },
+          "title": "Lists",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "select"
+      ],
+      "title": "XmlDecoder",
+      "type": "object"
+    },
+    "ListingFallback": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "description": "The request's URL template",
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "method": {
+          "default": "GET",
+          "description": "The HTTP method",
+          "enum": [
+            "GET",
+            "POST"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "params": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Query parameters; a None one is left off",
+          "title": "Params"
+        },
+        "json": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JSON"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A JSON body template",
+          "title": "Json"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Over the shared request headers",
+          "title": "Headers",
+          "type": "object"
+        },
+        "decoder": {
+          "default": {
+            "entries": [
+              ""
+            ],
+            "values": null,
+            "kind": "json"
+          },
+          "description": "Reads the response body",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/JsonDecoder"
+            },
+            {
+              "$ref": "#/$defs/JsonInHtmlDecoder"
+            },
+            {
+              "$ref": "#/$defs/JsonLdDecoder"
+            },
+            {
+              "$ref": "#/$defs/AtomDecoder"
+            },
+            {
+              "$ref": "#/$defs/XmlDecoder"
+            },
+            {
+              "$ref": "#/$defs/HtmlDecoder"
+            }
+          ],
+          "title": "Decoder"
+        },
+        "fields": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JSON"
+          },
+          "description": "Row field (or internal _field) -> field spec",
+          "title": "Fields",
+          "type": "object"
+        },
+        "probe_url": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The URL a cheap read of ids, titles and the total asks instead",
+          "title": "Probe Url"
+        },
+        "pager": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "cursor": "#/$defs/CursorPager",
+                  "offset": "#/$defs/OffsetPager",
+                  "overlap": "#/$defs/OverlapPager",
+                  "page": "#/$defs/PagePager"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/OffsetPager"
+                },
+                {
+                  "$ref": "#/$defs/OverlapPager"
+                },
+                {
+                  "$ref": "#/$defs/PagePager"
+                },
+                {
+                  "$ref": "#/$defs/CursorPager"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How pages step; none reads one page",
+          "title": "Pager"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Scope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Narrows the listing to the locality"
+        },
+        "why": {
+          "anyOf": [
+            {
+              "pattern": "^\\S.*, 20\\d\\d-(0[1-9]|1[0-2])( \\(inferred\\))?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why this fallback alternative exists: \"reason, YYYY-MM\"",
+          "title": "Why"
+        },
+        "missing_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A final URL this matches means the handle names no board: the vendor redirects an unknown one to its own site. Reported as HTTP 404",
+          "title": "Missing At"
+        },
+        "reset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "decoder",
+              "fields",
+              "headers",
+              "json",
+              "method",
+              "missing_at",
+              "pager",
+              "params",
+              "probe_url",
+              "scope",
+              "url",
+              "why"
+            ]
+          },
+          "description": "Keys the first alternative sets that this one does not inherit"
+        }
+      },
+      "title": "ListingFallback",
+      "type": "object",
+      "description": "A later listing alternative: what it leaves out is the first's",
+      "required": [
+        "why"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "sweep": {
+      "default": false,
+      "description": "The lightweight sweep pulls it whole",
+      "title": "Sweep",
+      "type": "boolean"
+    },
+    "prunable": {
+      "default": false,
+      "description": "prune_dead_boards may deactivate it",
+      "title": "Prunable",
+      "type": "boolean"
+    },
+    "guess": {
+      "default": false,
+      "description": "Discovery may guess its handle from a name",
+      "title": "Guess",
+      "type": "boolean"
+    },
+    "eager": {
+      "default": false,
+      "description": "A whole-board pull reads each kept row's detail",
+      "title": "Eager",
+      "type": "boolean"
+    },
+    "handle": {
+      "$ref": "#/$defs/Handle",
+      "default": {
+        "why": null,
+        "columns": [
+          "slug"
+        ],
+        "parts": [],
+        "sep": "|",
+        "fold": false,
+        "try": {},
+        "accept": {
+          "status": null,
+          "status_not": [],
+          "total": false
+        },
+        "follow": {},
+        "prelude": []
+      },
+      "description": "How a store row names the board"
+    },
+    "job_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JobRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Reads a stored posting URL"
+    },
+    "listing": {
+      "description": "Alternatives tried in order until one yields a posting, each later one taking what it does not set from the first, but for the keys its `reset` names",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Listing"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/Listing"
+            }
+          ],
+          "items": {
+            "$ref": "#/$defs/ListingFallback"
+          }
+        }
+      ]
+    },
+    "rescue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Rescue"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Fills vague listed rows from the detail"
+    },
+    "detail": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Detail"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Reads one posting back"
+    },
+    "closure": {
+      "$ref": "#/$defs/Closure",
+      "default": {
+        "why": null,
+        "via": null,
+        "url": null,
+        "open": [],
+        "closed": [],
+        "unmatched": null,
+        "page_closed": null
+      },
+      "description": "Judges a stored posting open or closed"
+    },
+    "employer": {
+      "$ref": "#/$defs/JSON",
+      "default": null,
+      "description": "Names the employer on a listing entry",
+      "title": "Employer"
+    },
+    "unlocated": {
+      "default": "drop",
+      "description": "A location filter's verdict on a row naming no place",
+      "enum": [
+        "drop",
+        "keep"
+      ],
+      "title": "Unlocated",
+      "type": "string"
+    },
+    "detect": {
+      "default": [],
+      "description": "How a URL or page names the board",
+      "items": {
+        "$ref": "#/$defs/Detect"
+      },
+      "title": "Detect",
+      "type": "array"
+    },
+    "canary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Canary"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The public board tools/check_boards.py probes"
+    },
+    "discovery": {
+      "$ref": "#/$defs/Discovery",
+      "default": {
+        "scan": false,
+        "shared": false,
+        "narrow": false,
+        "search": [],
+        "hint": []
+      },
+      "description": "How discovery finds and vets a board"
+    }
+  },
+  "title": "BoardSpec",
+  "type": "object"
+}

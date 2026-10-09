@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-"""Write src/config/boards/README.md, the board catalog, from the bundled specs.
+"""Write the board specs' generated files: src/config/boards/README.md, the
+catalog, from the bundled specs, and board-spec.schema.json beside it, the
+JSON Schema editors and `tombi lint` check a spec file against.
 
-    python tools/board_catalog.py           # rewrite the catalog
-    python tools/board_catalog.py --check   # exit 1 when it is stale
+    python tools/board_catalog.py           # rewrite both
+    python tools/board_catalog.py --check   # exit 1 when either is stale
 
-The catalog is a view: a platform's row and notes come from its spec file
-(the data, and the comment block that opens the file), so edit those and
-rerun. A compiled build's overrides are not in it.
-tests/test_board_specs.py::test_the_board_catalog_is_current fails on a
-stale catalog.
+Both are views. A platform's row and notes come from its spec file (the
+data, and the comment block that opens the file); the schema comes from
+src.ats.board.spec (`json_schema`). Edit those and rerun. A compiled
+build's overrides are not in the catalog.
+tests/test_board_specs.py::test_the_generated_board_files_are_current fails
+on a stale one.
 """
 
 from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,7 +32,8 @@ from src.ats.board import spec                              # noqa: E402
 from src.ats.board.engine import Board                      # noqa: E402
 from src.config.boards import SPEC_DIR                      # noqa: E402
 
-CATALOG = ROOT / "src" / "config" / "boards" / "README.md"
+CATALOG = SPEC_DIR / "README.md"
+SCHEMA = SPEC_DIR / "board-spec.schema.json"
 
 HEADER = """\
 # Board catalog
@@ -87,17 +93,28 @@ def render() -> str:
     return f"{HEADER}{rows}\n\n## Notes and workarounds\n\n{sections}"
 
 
+def schema() -> str:
+    return json.dumps(spec.json_schema(), indent=2, ensure_ascii=False) + "\n"
+
+
+#: Each generated file and what renders it.
+GENERATED: dict[Path, Callable[[], str]] = {CATALOG: render, SCHEMA: schema}
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Write the board catalog from the specs")
-    ap.add_argument("--check", action="store_true", help="exit 1 if the catalog is stale")
-    text = render()
-    if ap.parse_args().check:
-        stale = not CATALOG.exists() or CATALOG.read_text("utf-8") != text
-        print(f"{CATALOG.relative_to(ROOT)}: {'stale' if stale else 'current'}")
-        return int(stale)
-    CATALOG.write_text(text, "utf-8", newline="\n")
-    print(f"wrote {CATALOG.relative_to(ROOT)} ({len(config.BUNDLED)} platforms)")
-    return 0
+    ap = argparse.ArgumentParser(description="Write the board catalog and spec schema")
+    ap.add_argument("--check", action="store_true", help="exit 1 if either is stale")
+    check, stale = ap.parse_args().check, 0
+    for path, make in GENERATED.items():
+        text, name = make(), path.relative_to(ROOT)
+        if check:
+            bad = not path.exists() or path.read_text("utf-8") != text
+            stale += bad
+            print(f"{name}: {'stale' if bad else 'current'}")
+        else:
+            path.write_text(text, "utf-8", newline="\n")
+            print(f"wrote {name}")
+    return int(bool(stale))
 
 
 if __name__ == "__main__":

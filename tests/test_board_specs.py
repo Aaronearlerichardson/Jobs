@@ -6,7 +6,7 @@ posting URL to its job reference. Over `config.BOARDS`: `_order.toml`
 lists every spec file once, an override replaces or adds a spec (and one
 the schema refuses gives way), only the declared overlaps depend on the
 order, the
-generated catalog (src/config/boards/README.md) is current, the schema
+generated catalog and JSON Schema are current, the schema
 refuses what it cannot read, no spec restates a default, every platform
 detected is a spec, every fetchable one has a canary, and nothing outside
 the spec names a platform. Each spec's listing and posting tests live in its own file
@@ -288,10 +288,12 @@ def test_a_refused_override_gives_way_to_the_bundled_spec(monkeypatch, capsys):
         engine._board("lever", broken)
 
 
-def test_the_board_catalog_is_current():
-    """src/config/boards/README.md is rendered from the specs: a spec changed
-    without rerunning `python tools/board_catalog.py` leaves it stale."""
-    assert board_catalog.CATALOG.read_text("utf-8") == board_catalog.render()
+def test_the_generated_board_files_are_current():
+    """The catalog (README.md) is rendered from the specs and the JSON Schema
+    from src.ats.board.spec: either changed without rerunning
+    `python tools/board_catalog.py` leaves a file stale."""
+    for path, make in board_catalog.GENERATED.items():
+        assert path.read_text("utf-8") == make(), path.name
 
 
 #: Inputs two specs both detect, by design: the first, earlier in `BOARDS`, wins.

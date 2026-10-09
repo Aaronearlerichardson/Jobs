@@ -80,10 +80,14 @@ jobs:
         # package re-export facades and the doctest-only imports carry.
         run: python -m flake8 --select=F src tools tests *.py
 
-      - name: Board specs in their canonical layout (tombi)
-        # One layout for every spec, so a diff shows only what changed. It
-        # reads tombi.toml; fix with `tombi format src/config/boards`.
-        run: tombi format --check --offline src/config/boards
+      - name: Board specs in their canonical layout, and valid (tombi)
+        # One layout for every spec, so a diff shows only what changed
+        # (fix with `tombi format src/config/boards`), and each checked
+        # against board-spec.schema.json, as an editor checks it. Both read
+        # tombi.toml.
+        run: |
+          tombi format --check --offline src/config/boards
+          tombi lint --offline --error-on-warnings src/config/boards
 
       - name: Type check (Pyrefly)
         # Pinned in envs/requirements-dev.txt; it reads pyrefly.toml, whose
