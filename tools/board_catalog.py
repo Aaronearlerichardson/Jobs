@@ -46,6 +46,15 @@ specs both match goes to the earlier one (tests/test_board_specs.py
 declares the overlaps). A **lead** is detected but not fetched. A key's
 meaning is its description in `src/ats/board/spec.py`.
 
+**Editing a spec.** Each `<name>.toml` here is one platform, and `_order.toml`
+sets detection order. An editor with the Tombi extension completes and checks
+a spec against `board-spec.schema.json` (associated in `tombi.toml`).
+`tombi format src/config/boards` lays the files out, and
+`tombi lint src/config/boards` checks them, as CI does. A compiled build also reads
+`DATA_DIR/boards/<name>.toml` (on Windows `%LOCALAPPDATA%\\JobCrawler\\boards`):
+a bundled name replaces that spec, and a new name adds a platform after the
+last.
+
 | # | Platform | Kind | Hosts | Listing | Closure | Flags | Canary |
 |---:|---|---|---|---|---|---|---|
 """
