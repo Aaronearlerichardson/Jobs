@@ -128,8 +128,7 @@ OPT_IN_FAMILIES = (SILENT_FAMILY, "fetch-error", "ats-unsupported")
 def bury_404_board(conn: sqlite3.Connection, company: CompanyRow,
                    error: str | None) -> str | None:
     """Mark `company` 'board-dead:<ats>' and deactivate it when `error`
-    proves its board gone (`Board.gone`); the caller has already seen the
-    board fail once before. Returns the reason written, else None.
+    proves its board gone (`Board.gone`). Returns the reason written, else None.
 
     Deactivated exactly as mark_harvested's promotion is, which is what
     lets reresolve_misses re-check it."""
@@ -140,7 +139,7 @@ def bury_404_board(conn: sqlite3.Connection, company: CompanyRow,
     reason = f"board-dead:{ats}"
     store.deactivate_company(conn, company["id"])
     store.record_miss(conn, company["name"], reason)
-    print(f"    [!] {company['name']} ({ats}): listing endpoint 404 twice - "
+    print(f"    [!] {company['name']} ({ats}): listing endpoint gone (404/410) - "
           f"board-dead, deactivated (reresolve re-checks it)")
     return reason
 

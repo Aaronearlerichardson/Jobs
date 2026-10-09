@@ -1070,7 +1070,8 @@ class Board:
 
     def gone(self, error: str | None) -> bool:
         """Whether `error`, a failed listing read's report, proves the board
-        does not exist: an HTTP 404 on a `prunable` spec.
+        does not exist: an HTTP 404 or 410 (a vendor redirect for an
+        unknown handle is reported as 404) on a `prunable` spec.
 
         Notes:
             Greenhouse harvard and cognitotherapeutics 404'd in the
@@ -1079,7 +1080,7 @@ class Board:
             would have kept spending. Workday is not prunable: its tenants
             404 transiently.
         """
-        return self.spec.prunable and bool(re.search(r"\bHTTP 404\b", error or ""))
+        return self.spec.prunable and bool(re.search(r"\bHTTP (?:404|410)\b", error or ""))
 
     async def local_count(self, handle: str, loc_re: LocationRE) -> int:
         """Postings on the board in `loc_re`'s area. Where the spec scopes,

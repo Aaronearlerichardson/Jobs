@@ -483,19 +483,20 @@ async def test_harvest_board_promotes_to_board_dead_after_three_days(
     assert "Acme" not in [r["name"] for r in store.harvestable_companies(conn)]
 
 
-@pytest.mark.parametrize("ats, dead", [("greenhouse", True),
-                                       ("workday", False)])
-async def test_harvest_board_buries_a_second_definitive_404(tmp_path, monkeypatch,
-                                                            ats, dead):
+@pytest.mark.parametrize("ats, err, dead", [
+    ("greenhouse", "HTTP 404", True), ("lever", "HTTP 410", True),
+    ("jazzhr", "HTTP 404: redirected to https://www.jazzhr.com/job-seekers", True),
+    ("greenhouse", "HTTP 403", False), ("workday", "HTTP 404", False)])
+async def test_harvest_board_buries_a_definitive_404_at_once(tmp_path, monkeypatch,
+                                                             ats, err, dead):
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", ats=ats)
-    _fetches(monkeypatch, lambda comp: http.fetch_failed("Acme", "HTTP 404"))
+    _fetches(monkeypatch, lambda comp: http.fetch_failed("Acme", err))
     await _harvest_board(c, db, delay=0)
-    await _harvest_board(store.get_company(conn, c["id"]), db, delay=0)
     row = store.get_company(conn, c["id"])
     assert (row["miss_reason"], row["active"]) == (
-        ("board-dead:greenhouse", 0) if dead else ("fetch-error:harvest", 1))
+        (f"board-dead:{ats}", 0) if dead else ("fetch-error:harvest", 1))
 
 
 @pytest.mark.parametrize("ats, dead", [("greenhouse", True),

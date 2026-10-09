@@ -444,10 +444,9 @@ def _write_board(conn: sqlite3.Connection, jobs: list[FetchedJob],
         return None
     promoted = store.mark_harvested(conn, company["id"], len(jobs),
                                     soft_fail=_soft_failed(stats), now=stamp_dt)
-    # `company` is the pre-pass row: a fetch-error miss already on it means
-    # this is the second failing pass in a row.
-    if (not promoted and _soft_failed(stats)
-            and company.get("miss_reason") == "fetch-error:harvest"):
+    # A definitive "no such board" answer (404/410) buries at once; any
+    # other failure waits out store.HARVEST_DEAD_AFTER_DAYS.
+    if not promoted and _soft_failed(stats):
         bury_404_board(conn, company, stats.get("last_error"))
     return promoted
 

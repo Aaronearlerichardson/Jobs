@@ -48,7 +48,10 @@ Gates, per configured track, in order:
                vocabulary rather than lifting the gate.
   --- hydrate survivors (the harvester's per-host caps and pauses) ---
   gates 3-6 again, now with a body
-  7. fit       Claude fit score (src.claude.fit); the verdict is 'fit' when the
+  7. body      a row whose detail fetch failed twice (the RETRY_DAYS retry too)
+               leaves the queue: closed where the closure probe says the
+               posting is gone, else dropped here as "no body after 2 fetches".
+  8. fit      Claude fit score (src.claude.fit); the verdict is 'fit' when the
                score is under every surfaced track's digest_min_fit, 'ok'
                otherwise. Either way the row is stamped with its track
                labels and score, so it enters the ranking like a crawled
@@ -90,6 +93,7 @@ from src import store
 from src import tags
 from src.ats import coords
 from src.ats.board import BOARDS
+from src.ats.board.closure import probe_job_open
 from src.ats.board.company import board_origin, needs_detail
 from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, FitResult, score_resume_fit
@@ -137,6 +141,8 @@ SCORE_CAP = 300
 # row stays pending until then. _hydrate stamps desc_checked_at for either
 # kind of failure.
 RETRY_DAYS = 3
+# closure.probe_job_open's shape: (url, job_id) -> (is_open, reason).
+type ProbeFn = Callable[[str | None, str | None], Awaitable[tuple[bool | None, str]]]
 # How many "still waiting on a body" rows _print_waiting names before it
 # collapses the rest into a count -- a whole-board pass can leave hundreds
 # pending and the point is a spot check, not a full dump.
@@ -520,7 +526,8 @@ def _hydrate_order(survivors: dict[str, tuple[CompanyRow, JobRow, str]]) -> Call
 
 async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]], summary: dict[str, float],
                    stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[BoardStats]],
-                   cutoff: str) -> dict[str, str]:
+                   cutoff: str, decided: dict[str, tuple[str, str, CompanyRow, JobRow]],
+                   probe_fn: ProbeFn = probe_job_open) -> dict[str, str]:
     """Phase 2: resolve every survivor company_fetch.needs_detail still
     flags -- a missing body, or a body already but a
     location the listing never named (see needs_detail/hydrate_description).
@@ -535,6 +542,12 @@ async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors
 
     Returns {job_id: reason} for every survivor this pass leaves still
     needing detail (skipped, or tried and failed): _body_gates names them.
+
+    A bodiless row whose retry (it already carried a failure stamp) fails
+    again ends the wait (a row with a body but no location goes on to the
+    body-rule geo verdict once stale instead): `probe_fn` (closure.probe_job_open) is asked, a row it finds
+    gone is closed, any other is dropped into `decided` as 'body'. Either
+    way it leaves `survivors`.
 
     Notes:
         A row inside the retry window is never batched, so a pass whose
@@ -604,6 +617,9 @@ async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors
                 continue                 # resolved (body, or just location)
             if j["id"] in tried:
                 await db.run(store.mark_desc_checked, j["id"], now=stamp)
+                if r.get("desc_checked_at") and not j.get("description"):
+                    await _give_up(db, survivors, decided, j["id"], probe_fn)
+                    continue
                 waiting[j["id"]] = "fetch failed this pass"
             else:
                 # Never reached hydrate_description at all: the board's
@@ -612,6 +628,21 @@ async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors
                 waiting[j["id"]] = "not reached this pass (board hydrate cap/pause)"
     print(f"  hydrated {summary['hydrated']} of {n_todo}")
     return waiting
+
+
+async def _give_up(db: store.Writer, survivors: dict[str, tuple[CompanyRow, JobRow, str]],
+                   decided: dict[str, tuple[str, str, CompanyRow, JobRow]], jid: str,
+                   probe_fn: ProbeFn) -> None:
+    """End a second-failed row's wait: close it where `probe_fn` finds the
+    posting gone, else drop it as 'body' in `decided`; out of `survivors`."""
+    c, r, _ = survivors.pop(jid)
+    is_open, why = await probe_fn(r.get("url"), jid)
+    await asyncio.sleep(config.HYDRATE_DELAY_S)
+    if is_open is False:
+        await db.run(store.set_job_status, jid, "closed")
+        print(f"    closed after a failed retry: {c.get('name')} | {r.get('title') or ''} | {why}")
+    else:
+        decided[jid] = ("body", f"no body after 2 fetches ({why})", c, r)
 
 
 async def _body_gates(db: store.Writer, companies: dict[int, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]],
@@ -785,6 +816,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
               score_cap: int = SCORE_CAP, fit: bool = True, hydrate: bool = True,
               mission_scorer: MissionScorer = score_company_mission,
               hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[BoardStats]] = hydrate_company,
+              probe_fn: ProbeFn = probe_job_open,
               now: datetime | None = None, requeue: bool = False,
               requeue_apply: bool = False) -> Mapping[str, object]:
     """Triage every pending row in the store. Returns the summary dict
@@ -802,7 +834,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
     `limit` caps the rows read this pass; `score_cap` the Claude fit calls;
     `fit=False` stamps survivors unscored (the crawl's self-heal scores
     them later); `hydrate=False` leaves undetailed survivors pending.
-    `mission_scorer` / `hydrate_fn` (coroutine functions) exist for tests.
+    `mission_scorer` / `hydrate_fn` / `probe_fn` (coroutine functions) exist for tests.
 
     `requeue=True` skips all five phases and instead runs `requeue_rows`
     (report-only unless `requeue_apply=True` too) -- see its docstring for
@@ -845,7 +877,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
         waiting: dict[str, str] = {}
         if hydrate:
             waiting = await _hydrate(db, companies, survivors, summary, stamp,
-                                     hydrate_fn, cutoff)
+                                     hydrate_fn, cutoff, decided, probe_fn)
         final = await _body_gates(db, companies, survivors, tracks, mission_scorer,
                                   decided, summary, waiting, cutoff)
         scores, over_cap = await _score(final, summary, score_cap, fit, max_workers)

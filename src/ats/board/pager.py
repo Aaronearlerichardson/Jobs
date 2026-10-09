@@ -213,7 +213,8 @@ async def walk(spec: Listing,
     read with the last still listing postings, a page adding no new
     posting or a cursor refused by `next_url`) with no total proving it
     complete; when it holds fewer rows than the total, unless `scoped` (a
-    scope's total counts rows the pull drops); and when rows or total
+    scope's total counts rows the pull drops) or it ended on its own within
+    config.NEAR_COMPLETE_ROWS / NEAR_COMPLETE_FRACTION of the total; and when rows or total
     reach the `ceiling`, unless the walk read past it (this board's server
     serves more; a total above it is the board's own). The capped total
     is the larger of total and rows, unknown on a scoped pull short of the
@@ -316,10 +317,26 @@ def _first_page(pager: Pager, payload: JSON, listed: list[EngineRow], n_entries:
 
 def _note(n_rows: int, total: int | None, size_known: int | None, capped: bool,
           ceiling: int | None, scoped: bool) -> None:
-    """Note a walk's snapshot capped where `walk` says it reads so."""
+    """Note a walk's snapshot capped where `walk` says it reads so.
+
+    >>> from src.net.http import reset_fetch_failures, snapshot_info
+    >>> def run(*a):
+    ...     reset_fetch_failures(); _note(*a); return snapshot_info()["capped"]
+    >>> run(1932, 1933, 1933, False, None, False)    # ended on its own, 1 short
+    False
+    >>> run(1932, 1933, 1933, True, None, False)     # page budget hit
+    True
+    >>> run(1800, 1933, 1933, False, None, False)    # well short
+    True
+    >>> run(2000, 2000, None, False, 2000, False)    # at the ceiling
+    True
+    """
     at_ceiling = bool(ceiling and n_rows <= ceiling <= max(total or 0, n_rows))
     complete = size_known is not None and n_rows >= size_known
-    short = size_known is not None and n_rows < size_known and not scoped
+    near = (size_known is not None and not capped
+            and size_known - n_rows <= max(config.NEAR_COMPLETE_ROWS,
+                                           config.NEAR_COMPLETE_FRACTION * size_known))
+    short = size_known is not None and n_rows < size_known and not scoped and not near
     if (capped and not complete) or short or at_ceiling:
         note_capped(max(total, n_rows)
                     if total is not None and (at_ceiling or not scoped) else None)

@@ -201,7 +201,7 @@ def descriptions_for_company(conn: sqlite3.Connection, company_id: int | None) -
 # Row verdicts, cheapest gate first. The digest and the pass summary count
 # rows by these; `ok` is the only one that puts a row into a track set.
 TRIAGE_GATES = ("mission", "title", "anchor", "geo", "exclude", "division",
-                "fit")
+                "body", "fit")
 TRIAGE_OK = "ok"
 
 

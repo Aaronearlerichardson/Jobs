@@ -587,6 +587,29 @@ async def test_waiting_reason_names_a_failed_fetch_then_the_retry_window(
     assert "waiting: Acme | Data Engineer" in out2 and "retries after" in out2
 
 
+@pytest.mark.parametrize("is_open, status, closed", [(None, "body", False),
+                                                      (False, None, True)])
+async def test_a_bodiless_row_failing_its_retry_leaves_the_queue(
+        tmp_path, tracks, stubs, local_addr, is_open, status, closed):
+    """A retry that fails again is not waited on a third time: the row is
+    closed where the closure probe finds it gone, else dropped as 'body'."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    _harvested(conn, c, "nobody", "Data Engineer", local_addr)
+    conn.execute("UPDATE jobs SET desc_checked_at='2020-01-01T00:00:00'")
+    conn.commit()
+
+    async def probe(url, job_id=None):
+        return is_open, "probe"
+
+    await _run(db, tracks, stubs, probe_fn=probe)
+    row = _row(conn, "nobody")
+    assert (row["triage_status"], row["status"] == "closed") == (status, closed)
+    if status:
+        assert "no body after 2 fetches" in row["triage_detail"]
+
+
 async def test_waiting_reason_tells_a_failed_fetch_from_a_row_over_the_cap(
         tmp_path, tracks, stubs, local_addr, capsys, monkeypatch):
     """The real hydrator names the rows it attempted (`tried`): with room

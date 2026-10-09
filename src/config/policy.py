@@ -311,6 +311,14 @@ PAGE_RETRY_PAUSE_S = _pol.page_retry_pause_s
 # tools/check_sources.py's pause between probes of one source, and between
 # web-search probes. [policy] probe_pause_s / search_probe_pause_s.
 PROBE_PAUSE_S = _pol.probe_pause_s
+# A walk that ended on its own is complete enough to close against when it
+# holds within max(NEAR_COMPLETE_ROWS, NEAR_COMPLETE_FRACTION of the total)
+# rows of the board's reported total: totals drift by a posting or two
+# between the count and the pages (J&J 1932/1933, Boston Scientific
+# 540/541, 2026-10-09), and 1% of a 2,000-row board is 20 rows, still a
+# handful of postings next to the hundreds a truncated walk loses.
+NEAR_COMPLETE_ROWS = 5
+NEAR_COMPLETE_FRACTION = 0.01
 SEARCH_PROBE_PAUSE_S = _pol.search_probe_pause_s
 SWEEP_DETAILS = 40
 SWEEP_DETAIL_DELAY_S = 0.2
