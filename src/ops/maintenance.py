@@ -160,7 +160,7 @@ def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None,
     >>> conn = store.connect(":memory:")
     >>> _ = store.upsert_job(conn, {"job_id": "j1", "title": "T", "track": "local-tech",
     ...                             "location": "Durham, NC", "description": "the body", "resume_fit_score": 0.5})
-    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), track="local-tech")
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), track="local-tech", geo_gate=False)
     >>> "description" in _ranked(conn, t)[0]
     False
     >>> _ranked(conn, t, with_description=True)[0]["description"]

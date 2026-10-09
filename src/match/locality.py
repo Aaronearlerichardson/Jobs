@@ -589,8 +589,9 @@ def geo_mode(location: str | None, description: str | None = "") -> str | None:
     'remote'
     >>> geo_mode("Alameda; Remote", "")
     'remote'
-    >>> geo_mode("Alameda", "Our Durham headquarters runs hybrid.")
-    >>> geo_mode("", "Hybrid from our Durham office.")
+    >>> here = config.LOCALITY_SUBSTRINGS[0].title()      # the profile's own place
+    >>> geo_mode("Alameda", f"Our {here} headquarters runs hybrid.")
+    >>> geo_mode("", f"Hybrid from our {here} office.")
     'onsite'
     """
     unknown = location_unknown(location)

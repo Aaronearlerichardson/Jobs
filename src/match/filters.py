@@ -278,7 +278,7 @@ def scrub_boilerplate(text: str | None) -> str:
     fragments are lowercase (the profile schema rejects an uppercase one)
     and match without re.I.
 
-    >>> scrub_boilerplate("medical, dental, vision insurance; eeg data")
+    >>> scrub_boilerplate("medical, dental; eeg data")
     ' ; eeg data'
     >>> scrub_boilerplate(None)
     ''

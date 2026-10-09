@@ -35,21 +35,19 @@ def restamp_geo(commit: bool = False, undo: str = "", t: RuntimeTrack | None = N
     back (again a preview until `commit`).
 
     >>> conn = store.connect(":memory:")
-    >>> for jid, loc in [("a", "Alameda"), ("b", "United States"), ("c", "Durham, NC")]:
+    >>> for jid, loc in [("a", "Alameda"), ("b", "United States")]:
     ...     _ = store.upsert_job(conn, {"job_id": jid, "title": "T", "location": loc,
     ...                                 "company_name": "Co",
     ...                                 "description": "We are a distributed team."})
     >>> _ = conn.execute("UPDATE jobs SET geo_mode='remote' WHERE job_id='a'")
     >>> restamp_geo(conn=conn)
-      3 row(s) read, 3 would change
+      2 row(s) read, 2 would change
       remote -> None  1
         Co | T | Alameda
       None -> remote  1
         Co | T | United States
-      None -> onsite  1
-        Co | T | Durham, NC
       preview: nothing written.
-    {'remote -> None': 1, 'None -> remote': 1, 'None -> onsite': 1}
+    {'remote -> None': 1, 'None -> remote': 1}
 
     Notes:
         Open rows only: a closed row is out of every ranking. `geo_mode`

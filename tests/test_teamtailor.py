@@ -29,10 +29,14 @@ class TestListing:
         assert rows[3]["url"] == POSTING and rows[3]["posted_at"] == "2025-02-20"
         assert "<" not in rows[3]["description"] and "seeking" in rows[3]["description"]
 
-    async def test_a_local_city_reads_as_local_without_its_state(self, serve):
+    async def test_a_local_city_reads_as_local_without_its_state(self, serve, cfg):
         """The feed names no region: the city and country code still place it."""
         from src.match.locality import is_nc
-        serve(fake_response(fixture("teamtailor_board.json")))
+        city = next(s for s in cfg.LOCALITY_SUBSTRINGS if s not in cfg.LOCALITY_STATE_SUFFIX)
+        d = copy.deepcopy(fixture("teamtailor_board.json"))
+        for it in d["items"][2:]:            # Morrisville, Raleigh -> the profile's own city
+            it["_jobposting"]["jobLocation"][0]["address"]["addressLocality"] = city.title()
+        serve(fake_response(d))
         rows = await BOARD.listing(SLUG)
         assert [is_nc(r["location"]) for r in rows] == [False, False, True, True]
 
