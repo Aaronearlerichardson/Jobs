@@ -1,5 +1,5 @@
 # tombi (https://tombi-toml.github.io/tombi): the layout of the board specs,
-# src/config/boards/*.toml. CI runs `tombi format --check` on them.
+# src/config/board_specs/*.toml. CI runs `tombi format --check` on them.
 [format.rules]
 line-width = 100
 indent-width = 4
@@ -8,5 +8,5 @@ indent-width = 4
 # for completion and hover docs in an editor with the Tombi extension, and
 # for `tombi lint` in CI. _order.toml is no spec.
 [[schemas]]
-path = "src/config/boards/board-spec.schema.json"
-include = ["src/config/boards/[a-z]*.toml"]
+path = "src/config/board_specs/board-spec.schema.json"
+include = ["src/config/board_specs/[a-z]*.toml"]

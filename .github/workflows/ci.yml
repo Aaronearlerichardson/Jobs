@@ -82,12 +82,12 @@ jobs:
 
       - name: Board specs in their canonical layout, and valid (tombi)
         # One layout for every spec, so a diff shows only what changed
-        # (fix with `tombi format src/config/boards`), and each checked
+        # (fix with `tombi format src/config/board_specs`), and each checked
         # against board-spec.schema.json, as an editor checks it. Both read
         # tombi.toml.
         run: |
-          tombi format --check --offline src/config/boards
-          tombi lint --offline --error-on-warnings src/config/boards
+          tombi format --check --offline src/config/board_specs
+          tombi lint --offline --error-on-warnings src/config/board_specs
 
       - name: Type check (Pyrefly)
         # Installed from envs/requirements-dev.txt; it reads pyrefly.toml, which

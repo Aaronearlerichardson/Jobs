@@ -338,7 +338,7 @@ LOCAL_COUNT_SAMPLE_PAGES = 5
 # The careers-page reader (src.ats.board.custom): the job links a page
 # needs to be a board, the most characters a title and a location keep, and
 # how long a detection verdict is reused. The hosts it never reads as a
-# company's own board derive from config.BOARDS (config/boards/).
+# company's own board derive from config.BOARDS (config/board_specs/).
 CAREERS_PAGE_MIN_LINKS = 3
 CAREERS_PAGE_TITLE_MAX = 90
 CAREERS_PAGE_LOCATION_MAX = 70

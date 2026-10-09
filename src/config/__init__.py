@@ -16,8 +16,9 @@ reads:
     src/config/tracks.py    [tracks.*] tables -> UI_TRACKS
     src/config/policy.py    [policy] + HTTP timeouts / user agents
     src/config/sources.py   [sources]: forums, web search, aggregator feeds
-    src/config/boards/      BOARDS: every per-platform ATS board fact, one TOML
-                        file each, and the host lists derived from them
+    src/config/boards.py    BOARDS: every per-platform ATS board fact, read from
+                        board_specs/ (one TOML file each), and the host
+                        lists derived from them
 
 Everything is re-exported here, so `import config; config.X` is the whole
 API and callers never name a submodule. Read mutable settings

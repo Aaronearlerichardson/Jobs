@@ -486,11 +486,11 @@ def _literals(path):
 
 def test_no_platform_names_in_src():
     """No `config.BOARDS` key is a string literal anywhere in src/ but
-    config/boards/: a platform's rules are its spec's data."""
+    config/boards.py: a platform's rules are its spec's data."""
     named = {}
     for path in (ROOT / "src").rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        hits = _literals(path) & set(config.BOARDS) if not rel.startswith("src/config/boards/") else None
+        hits = _literals(path) & set(config.BOARDS) if rel != "src/config/boards.py" else None
         if hits:
             named[rel] = hits
     assert named == {}

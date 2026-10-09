@@ -8,7 +8,7 @@ pytest-asyncio>=1.0
 # The CI lint is `flake8 --select=F`: pyflakes' checks, but honouring
 # `# noqa`, which the src/ re-export facades rely on.
 flake8>=7.0
-# Formats the board specs (src/config/boards/*.toml) in one layout; CI runs
+# Formats the board specs (src/config/board_specs/*.toml) in one layout; CI runs
 # `tombi format --check`. Pinned exactly: a formatter release can change its
 # output, and every spec would then fail the check at once.
 tombi==1.7.3

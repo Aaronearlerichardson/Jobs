@@ -98,10 +98,10 @@ Also:
 
 ## Where things belong
 
-- A new board platform: a file `src/config/boards/<name>.toml`, its line in
-  `src/config/boards/_order.toml` (detection order), and its catalog row
+- A new board platform: a file `src/config/board_specs/<name>.toml`, its line in
+  `src/config/board_specs/_order.toml` (detection order), and its catalog row
   (`python tools/board_catalog.py`, which also regenerates the spec
-  schema); `tombi format src/config/boards` lays it out and `tombi lint`
+  schema); `tombi format src/config/board_specs` lays it out and `tombi lint`
   checks it.
 - A fetch-level signal: `src/net/http.py`, beside `fetch_failed`.
 - Closure rules: arguments on `store.jobs.sync_job_statuses`.
