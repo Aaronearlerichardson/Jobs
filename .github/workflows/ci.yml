@@ -86,10 +86,12 @@ jobs:
         run: tombi format --check --offline src/config/boards
 
       - name: Type check (Pyrefly)
-        # Pinned in envs/requirements-dev.txt; it reads pyrefly.toml. It
-        # queries the `python` on PATH for site-packages, which is the
-        # setup-python interpreter here, so no interpreter flag is needed.
-        run: python -m pyrefly check
+        # Pinned in envs/requirements-dev.txt; it reads pyrefly.toml, whose
+        # python-interpreter-path names the owner's local conda env (for the
+        # PyCharm LSP). That path does not exist here, so the setup-python
+        # interpreter is passed instead: without it every third-party import
+        # reads as missing.
+        run: python -m pyrefly check --python-interpreter-path "$(python -c 'import sys; print(sys.executable)')"
 
       - name: Validate the example profile
         run: |
