@@ -54,7 +54,7 @@ class TestListing:
         assert rows[0]["id"] == "eightfold_caci_1443153815392"
         assert rows[0]["url"] == "https://caci.eightfold.ai/careers/job/1443153815392"
         assert rows[0]["location"] == "Sterling, VA, US; Denver, CO, US"
-        assert rows[0]["posted_at"] == "2026-10-04"
+        assert rows[0]["posted_at"] == "2026-10-05"
         assert [bool(r.get("remote_hint")) for r in rows] == [False, False, True]
 
     async def test_a_tenant_without_pcsx_is_read_through_the_older_api(self, tenant):

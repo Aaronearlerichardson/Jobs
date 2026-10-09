@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import warnings
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Literal, cast, overload
@@ -499,6 +499,9 @@ def norm_posted_date(value: object) -> str | None:
       * ISO datetimes with timezone — Greenhouse `first_published`,
         SmartRecruiters `releasedDate`, JSON-LD `datePosted`
       * epoch MILLISECONDS as a string — Lever `createdAt`
+      * epoch seconds — Eightfold `postedTs`, midnight UTC of the day.
+        Epochs are read in UTC, not the machine's zone, which put every
+        Eightfold date a day early west of Greenwich.
       * relative text — Workday's `postedOn` ("Posted 3 Days Ago",
         "Posted 30+ Days Ago", "Posted Today"). "30+" parses as 30, so
         treat old Workday dates as a floor, not an exact day.
@@ -512,6 +515,8 @@ def norm_posted_date(value: object) -> str | None:
     True
     >>> norm_posted_date("3 hours ago (10/8/2026 2:04 PM)"), norm_posted_date("13/8/2026") is None
     ('2026-10-08', True)
+    >>> norm_posted_date(1791158400), norm_posted_date("1791158400000")
+    ('2026-10-05', '2026-10-05')
     """
     if value is None:
         return None
@@ -521,7 +526,7 @@ def norm_posted_date(value: object) -> str | None:
             n /= 1000.0
         if n > 1e8:           # sanity: on/after ~1973
             try:
-                return datetime.fromtimestamp(n).strftime("%Y-%m-%d")
+                return datetime.fromtimestamp(n, UTC).strftime("%Y-%m-%d")
             except (OverflowError, OSError, ValueError):
                 return None
         return None
