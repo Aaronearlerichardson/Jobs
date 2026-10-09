@@ -1,0 +1,49 @@
+sweep = true
+prunable = true
+eager = true
+
+[[detect]]
+host = "bamboohr.com"
+re = ['(?i)([a-z0-9-]+)\.bamboohr\.com']
+
+[canary]
+name = "EMS Biomedical"
+handle = "ems"
+
+[discovery]
+search = [[8, "*.bamboohr.com/careers"]]
+hint = [[7, "bamboohr"]]
+
+[job_ref]
+re = '(?i)//([a-z0-9-]+)\.bamboohr\.com/careers/(\d+)'
+
+[listing]
+url = "https://{slug}.bamboohr.com/careers/list"
+decoder = { entries = "result" }
+
+[listing.fields]
+_loc = { join = ["location.city", "location.state"], sep = ", " }
+id = { format = "bamboo_{slug}_{id}" }
+title = "jobOpeningName"
+url = { format = "https://{slug}.bamboohr.com/careers/{id}" }
+# A posting the board marks remote, by flag or by location type.
+location = { first = [
+    { format = "Remote / {_loc}", when = { all = [
+        { any = [{ truthy = "isRemote" }, { eq = ["locationType", "1"] }] },
+        { truthy = "_loc" }
+    ] } },
+    { const = "Remote", when = { any = [{ truthy = "isRemote" }, { eq = ["locationType", "1"] }] } },
+    "_loc"
+] }
+remote_hint = { const = "bamboohr:locationType", when = { any = [
+    { truthy = "isRemote" },
+    { eq = ["locationType", "1"] }
+] } }
+department = "departmentLabel"
+
+[detail]
+url = "https://{slug}.bamboohr.com/careers/{jid}/detail"
+record = "result.jobOpening"
+
+[detail.fields]
+description = { of = "description", transform = "html_text" }

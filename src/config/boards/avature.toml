@@ -1,0 +1,83 @@
+# Avature portals: a path on the tenant's own host, keyed on its URL.
+#
+# Notes:
+#     Tenants size their own pages (12, 20); the page's legend gives the
+#     total. Fetchable since 2026-10.
+
+eager = true
+
+[[detect]]
+host = "avature.net"
+re = ['(?i)(https?://[a-z0-9.-]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/(?:SearchJobs|JobDetail)\b']
+careers_url = "{slug}"
+
+[canary]
+name = "Unifi"
+handle = "https://careers.unifiservice.com/careers"
+
+[handle]
+columns = ["careers_url"]
+parts = ["base"]
+
+[job_ref]
+re = '(?i)^(https?://[^/?#]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/JobDetail/(?:[^/?#]*/)?(\d+)'
+parts = ["base", "jid"]
+
+[listing]
+url = "{base|rstrip_slash}/SearchJobs"
+params = { jobOffset = "$offset" }
+
+# The tenant sizes its pages (12, 20); the page's legend says
+# "1-20 of 720 results".
+[listing.pager]
+kind = "offset"
+pages = 60
+total = { of = { of = "page", transform = 'group:(?s)\bof\s+([\d,]+)\s+results' }, transform = "int" }
+
+[listing.decoder]
+kind = "html"
+select = "article.article--result .article__header__text__title a"
+context = ["article"]
+
+[listing.decoder.cells]
+loc = ".list-item-location"
+country = ".list-item-country"
+dept = ".list-item-department"
+
+[listing.fields]
+_jid = { of = "url", transform = 'group:/(\d+)/?(?:[?#]|$)' }
+_key = { format = "{base}", transform = "host_key" }
+id = { format = "avature_{_key}_{_jid}", when = { truthy = "_jid" } }
+title = "text"
+url = "url"
+location = { first = ["loc", "country"] }
+department = "dept"
+
+# A list naming only a country is placed from its title, else its page.
+[rescue]
+when = "always"
+unknown = "^[^,]*$"
+cap = 150
+cache_days = 7
+free = "text"
+why = "a tenant's list names a country, its posting page the city, 2026-10"
+
+[detail]
+url = "{base|rstrip_slash}/JobDetail/-/{jid}"
+location = "if_unknown"
+
+[detail.decoder]
+kind = "html"
+select = "body"
+
+[detail.decoder.cells]
+city = ".article__content__view__field:contains('City') .article__content__view__field__value"
+state = ".article__content__view__field:contains('State') .article__content__view__field__value"
+description = "article:contains('Description') .article__content__view__field__value"
+
+[detail.fields]
+description = "description"
+location = { join = ["city", "state"], sep = ", " }
+
+[closure]
+via = "page"

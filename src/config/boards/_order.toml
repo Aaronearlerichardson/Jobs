@@ -1,0 +1,61 @@
+# Detection order: the specs are tried first to last, and an input two
+# specs both read goes to the earlier one (only the pairs
+# tests/test_board_specs.py declares in OVERLAPS may overlap). Every
+# spec file beside this one is listed exactly once; a compiled build's
+# added platforms (DATA_DIR/boards) follow the last.
+order = [
+    "greenhouse",
+    "lever",
+    "ashby",
+    "bamboohr",
+    "rippling",
+    "hibob",
+    "workable",
+    "paylocity",
+    "ultipro",  # ahead of ukg, which claims every ultipro.com host
+    "adp",
+    "smartrecruiters",
+    "workday",
+    "infor",
+    "jazzhr",
+    "jobvite",
+    "kula",
+    "successfactors",
+    "jibe",  # ahead of icims: a Jibe front also names its iCIMS tenant
+    "icims",
+    "peopleadmin",
+    "custom",
+    "wpjson",
+    "breezy",
+    "recruitee",
+    "pinpoint",
+    "phenom",
+    "oracle",
+    # Detection-only platforms: real ATSes discovery recognises but cannot
+    # fetch (bot-protected APIs or JS-only boards). A lead's detection
+    # names a host or path for the note; an entry with no `re` claims the
+    # vendor's host and detects nothing. Eightfold, Taleo and Avature among
+    # them are fetchable since 2026-10, left in place: this order is
+    # detection order (signatures.detect).
+    "eightfold",
+    "dayforce",
+    "cornerstone",
+    "recruiterbox",
+    "teamtailor",
+    "gem",
+    "taleo",
+    "taleo_enterprise",
+    "avature",
+    "ukg",
+    "paycom",
+    "gohire",
+    "polymer",
+    "gusto",
+    "amazon",
+    "joincom",
+    "personio",
+    "manatal",
+    "comeet",
+    "zohorecruit",
+    "paycor",
+]

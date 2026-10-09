@@ -54,7 +54,12 @@ That moves this report's decision table from "Phase 1 only" to **Phase 1 plus Ph
    This removes the prose churn seen in `e144c08`.
 5. **Generate the catalog README** (`src/config/boards/README.md`) from the specs, with a regenerate-and-compare test.
 
-**Phase 2: TOML 1.0 migration.**
+**Phase 2: TOML 1.0 migration.** Done on 2026-10-09:
+
+- **Conversion:** a one-off converter, not kept, wrote all 48 specs. Each loads (stdlib `tomllib`, Python 3.12) equal to its Python `SPEC`, with every `fields` table in its original order, and parses to the same `BoardSpec`.
+- **Comments:** the 186 were placed automatically on the key they preceded (inline-expression comments sit above their field). Bamboohr's shared `REMOTE` constant is written out where it was used.
+- **Overrides:** they apply only in a compiled build. From source you edit the repo file, so the tests never see a user's overrides.
+- **Deferred:** the JSON Schema for editor completion (it needs the fixes under "Schema and editor tooling"), and TOML 1.1.
 
 1. **Convert with a dedicated converter, not `tomli_w`** (it reordered keys in 42 of 48 specs). Use the house layout from Phase 2b below, then run `tombi format`. For all 48, verify both `tomllib.loads(out) == SPEC` and key order (by comparing `json.dumps` of both sides).
 2. **Port the 186 comments by hand.** Each docstring becomes the file's header comment.

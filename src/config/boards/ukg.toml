@@ -1,0 +1,5 @@
+# UKG Pro's other hosts: the board URL shape is the ultipro spec's.
+
+[[detect]]
+host = "ultipro.com"
+re = ['(?i)([a-z0-9-]+\.ultipro\.com)']

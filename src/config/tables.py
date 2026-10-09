@@ -1,7 +1,8 @@
 """The data tables shipped as .toml beside this module, loaded once.
 
 Each table's rationale is the comment header of its .toml file. The build
-bundles them by globbing src/config/*.toml (build_app.py).
+bundles them, and the board specs under boards/, by globbing
+src/config/**/*.toml (build_app.py).
 """
 
 from __future__ import annotations

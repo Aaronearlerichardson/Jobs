@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import re
+import sys
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from typing import Literal, cast
 
@@ -1296,7 +1297,23 @@ class Board:
         return True, f"{self.name} api: {live}"
 
 
-BOARDS = {name: Board(name, spec) for name, spec in config.BOARDS.items()}
+def _board(name: str, raw: JSON) -> Board | None:
+    """`raw` compiled. An override (`config.BOARDS` differing from
+    `config.BUNDLED`) the schema refuses is reported and gives way to the
+    bundled spec, or drops the platform it adds; a bundled spec it refuses
+    is a bug, raised."""
+    try:
+        return Board(name, raw)
+    except ValueError as e:
+        bundled = config.BUNDLED.get(name)
+        if raw is bundled:
+            raise
+        print(f"[!] board override {name} refused, "
+              f"{'the bundled spec kept' if bundled else 'platform dropped'}: {e}", file=sys.stderr)
+        return Board(name, bundled) if bundled else None
+
+
+BOARDS = {name: b for name, raw in config.BOARDS.items() if (b := _board(name, raw))}
 
 
 def board_for(ats: str | None) -> Board | None:

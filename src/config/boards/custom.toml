@@ -1,0 +1,22 @@
+sweep = true
+
+[canary]
+name = "Microsoft"
+handle = "https://microsoft.ai/careers/"
+
+# A self-hosted careers page, read by the careers-page reader
+# (src.ats.board.custom).
+[handle]
+columns = ["careers_url"]
+parts = ["page"]
+
+[listing]
+url = "{page}"
+decoder = { kind = "html", select = "$job_links" }
+
+[listing.fields]
+_key = { of = "url", transform = "url_key:48" }
+id = { format = "custom_{_key}" }
+title = "title"
+url = "url"
+location = "location"

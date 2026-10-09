@@ -2,8 +2,10 @@
 
 Per spec: a dead board reads as nothing, a pulled posting is a 404, a
 vendor's own host is no board, a board URL resolves to its handle and a
-posting URL to its job reference. Over `config.BOARDS`: every spec module
-is one entry, only the declared overlaps depend on its order, the
+posting URL to its job reference. Over `config.BOARDS`: `_order.toml`
+lists every spec file once, an override replaces or adds a spec (and one
+the schema refuses gives way), only the declared overlaps depend on the
+order, the
 generated catalog (src/config/boards/README.md) is current, the schema
 refuses what it cannot read, no spec restates a default, every platform
 detected is a spec, every fetchable one has a canary, and nothing outside
@@ -14,8 +16,7 @@ Offline: fixtures are served, the source is parsed with `ast`.
 """
 
 import ast
-import importlib
-import pkgutil
+import tomllib
 from pathlib import Path
 from typing import get_args
 
@@ -25,7 +26,7 @@ from conftest import fake_response, fixture
 from src import config, tags
 from src.config import boards
 from src.ats import signatures
-from src.ats.board import BOARDS, board_for, company, spec
+from src.ats.board import BOARDS, board_for, company, engine, spec
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect
 from src.rows import FetchedJob, FitColumns
@@ -249,13 +250,42 @@ def test_the_tables_name_only_platforms_in_boards():
     assert named <= set(FETCHABLE)
 
 
-def test_every_spec_module_is_one_boards_entry():
-    """A spec module left out of `BOARDS`, or listed under another name, is
-    never read: the package's modules and the table's keys are one set."""
-    modules = {m.name for m in pkgutil.iter_modules(boards.__path__)}
-    assert modules == set(config.BOARDS)
-    assert all(config.BOARDS[n] is importlib.import_module(f"{boards.__name__}.{n}").SPEC
-               for n in modules)
+def test_the_order_lists_every_spec_file_once():
+    """A spec file `_order.toml` leaves out is never read, and one it lists
+    twice has no single place in detection order."""
+    order = tomllib.loads((boards.SPEC_DIR / "_order.toml").read_text("utf-8"))["order"]
+    files = {p.stem for p in boards.SPEC_DIR.glob("*.toml") if not p.stem.startswith("_")}
+    assert sorted(order) == sorted(files) and list(config.BUNDLED) == order
+
+
+def test_an_override_replaces_a_spec_in_place_or_adds_one_last(tmp_path, capsys):
+    """A compiled build's DATA_DIR/boards: a bundled name is replaced where
+    it stands, a new one follows every bundled spec, a file that does not
+    parse is skipped, and each is reported."""
+    (tmp_path / "lever.toml").write_text("sweep = true\n")
+    (tmp_path / "acme.toml").write_text('[[detect]]\nhost = "acme.test"\n')
+    (tmp_path / "greenhouse.toml").write_bytes((boards.SPEC_DIR / "greenhouse.toml").read_bytes())
+    (tmp_path / "broken.toml").write_text("sweep =\n")
+    (tmp_path / "_notes.toml").write_text("x = 1\n")
+    specs, bundled = boards.load(boards.SPEC_DIR, tmp_path)
+    assert list(specs) == [*bundled, "acme"] and specs["lever"] == {"sweep": True}
+    assert specs["greenhouse"] == bundled["greenhouse"] and specs["acme"]["detect"]
+    err = capsys.readouterr().err
+    assert all(f"{name}.toml {verb}" in err for name, verb in [
+        ("broken", "skipped"), ("acme", "adds a platform"), ("lever", "replaces"),
+        ("greenhouse", "is the bundled spec")]) and "_notes" not in err
+
+
+def test_a_refused_override_gives_way_to_the_bundled_spec(monkeypatch, capsys):
+    """An override the schema refuses is reported: the bundled spec stands in,
+    an added platform is dropped. A refused bundled spec is a bug, raised."""
+    assert engine._board("lever", {"sweeps": True}).spec == BOARDS["lever"].spec
+    assert engine._board("acme", {"sweeps": True}) is None
+    assert capsys.readouterr().err.count("refused") == 2
+    broken = {"sweeps": True}
+    monkeypatch.setitem(config.BUNDLED, "lever", broken)
+    with pytest.raises(ValueError, match="^lever: "):
+        engine._board("lever", broken)
 
 
 def test_the_board_catalog_is_current():

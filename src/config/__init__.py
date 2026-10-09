@@ -16,8 +16,8 @@ reads:
     src/config/tracks.py    [tracks.*] tables -> UI_TRACKS
     src/config/policy.py    [policy] + HTTP timeouts / user agents
     src/config/sources.py   [sources]: forums, web search, aggregator feeds
-    src/config/boards/      BOARDS: every per-platform ATS board fact, as data,
-                        and the host lists derived from it
+    src/config/boards/      BOARDS: every per-platform ATS board fact, one TOML
+                        file each, and the host lists derived from them
 
 Everything is re-exported here, so `import config; config.X` is the whole
 API and callers never name a submodule. Read mutable settings
@@ -29,7 +29,7 @@ while a track runs, and a from-bound copy goes stale.
 from __future__ import annotations
 
 from .boards import (  # noqa: F401
-    BOARDS, AGGREGATOR_HOSTS, CAREERS_PAGE_ATS, DEFAULT_HANDLE_COLUMNS,
+    BOARDS, BUNDLED, AGGREGATOR_HOSTS, CAREERS_PAGE_ATS, DEFAULT_HANDLE_COLUMNS,
     FETCHABLE_HOSTS, SHARED_HOSTS, hosts_re,
 )
 from .paths import (  # noqa: F401

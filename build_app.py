@@ -166,7 +166,7 @@ DATA_FILES = [
     ("src/web/templates/index.html", "src/web/templates/index.html"),
     ("profile.example.toml", "profile.example.toml"),
     *((p, p) for p in sorted(f.relative_to(ROOT).as_posix()
-                             for f in (ROOT / "src" / "config").glob("*.toml"))),
+                             for f in (ROOT / "src" / "config").rglob("*.toml"))),
 ]
 DATA_DIRS = [("src/web/static", "src/web/static"),
             ("src/store/migrations", "src/store/migrations")]
