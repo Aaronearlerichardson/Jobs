@@ -8,10 +8,11 @@ site's navigation are refused and a specific slug is required
 (`find_job_links`). A page with too few such links names its
 "current openings" page, one hop away, on the same host (`read_page`).
 
-The `custom` spec reads a board through `read_page` (the html decoder's
-`"$job_links"`); discovery asks `custom_board_listing_url` whether a page
-is a board at all. The reader's constants live in config
-(CAREERS_PAGE_*, BOARD_DETECT_CACHE_S).
+The `custom` spec reads a board through `claude_page`, or `read_page`
+where Claude gives no answer (the html decoder's `"$job_links"`);
+discovery asks `custom_board_listing_url` whether a page is a board at
+all. The reader's constants live in config (CAREERS_PAGE_*,
+BOARD_DETECT_CACHE_S, CLAUDE_CAREERS_MODEL).
 """
 
 from __future__ import annotations
@@ -20,19 +21,22 @@ import asyncio
 import logging
 import re
 from typing import cast
-from urllib.parse import urldefrag, urljoin
+from urllib.parse import quote, urldefrag, urljoin
 
 from lxml import etree
 from typing_extensions import TypedDict
 
 from src import config
+from src.claude import api as claude_api
+from src.claude.reply import Reply
 from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS
 from src.net.http import FETCH_ERRORS
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
                           JSON, hashed_cache_path, host_of, json_cache_get,
-                          json_cache_put, links, node_text, parse_markup)
+                          json_cache_put, links, node_text, parse_markup,
+                          text_from_html)
 
 _log = logging.getLogger(__name__)
 _OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
@@ -198,6 +202,163 @@ def read_page(tree: etree._Element, page_url: str, area: LocationRE | None = Non
                         "location": clean_field(_location_near(a, area))
                         [:config.CAREERS_PAGE_LOCATION_MAX]})
     return {"elements": out}
+
+
+# --- Claude's reading ------------------------------------------------------
+#
+# The link reader takes any job-shaped link, so a page's office, category
+# and town links read as postings (Google Research's 27 "jobs" were its
+# offices, a town job board's 115 its towns), and openings listed as plain
+# text read as none (trial, 2026-10-09). `claude_page` reads the page as
+# text instead; the link reader answers wherever Claude gives nothing.
+
+
+class _Posting(Reply):
+    title: str
+    url: str
+    location: str
+
+
+class _Reading(Reply):
+    jobs: list[_Posting]
+    listing_url: str
+
+
+def _link_key(url: str) -> str:
+    return urldefrag(url).url.rstrip("/").lower()
+
+
+def _drop(el: etree._Element) -> None:
+    """Remove `el` and its content, keeping the text after it."""
+    parent = el.getparent()
+    if parent is None:
+        return
+    if el.tail:
+        prev = el.getprevious()
+        if prev is not None:
+            prev.tail = (prev.tail or "") + el.tail
+        else:
+            parent.text = (parent.text or "") + el.tail
+    parent.remove(el)
+
+
+def page_text(html: str, url: str) -> tuple[str, set[str]]:
+    """A careers page's `html` (at `url`) as Claude reads it: its URL, its
+    title and its visible text, each link written [text](absolute url) and
+    each repeated line once; and its links' URLs (`_link_key`). ("", set())
+    for a page with no text.
+
+    >>> text, hrefs = page_text('<title>Jobs</title><script>x=1</script><ul>'
+    ...     '<li><a href="/jobs/7">Data Engineer</a> Durham, NC</li></ul>',
+    ...     "https://x.test/careers")
+    >>> print(text)
+    Page: https://x.test/careers
+    Title: Jobs
+    <BLANKLINE>
+    [Data Engineer](https://x.test/jobs/7) Durham, NC
+    >>> hrefs
+    {'https://x.test/jobs/7'}
+    """
+    tree = parse_markup(html, url=url)
+    title = node_text(t) if (t := tree.find(".//title")) is not None else ""
+    for el in tree.xpath("//script|//style|//noscript|//svg|//template|//iframe"
+                         "|//select|//head"):
+        _drop(el)
+    hrefs: set[str] = set()
+    for a in tree.iter("a"):
+        href, text = (a.get("href") or "").strip(), node_text(a)
+        for child in list(a):
+            a.remove(child)
+        if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
+            a.text = text
+            continue
+        absu = urljoin(url, href)
+        hrefs.add(_link_key(absu))
+        a.text = f"[{text}]({absu})"
+    markup = re.sub(r"(?i)</(tr|td|th|section|article|ul|ol|table|header|footer|nav|dt|dd)>",
+                    "</div>", etree.tostring(tree, method="html", encoding="unicode"))
+    lines: list[str] = []
+    for line in (ln.strip() for ln in text_from_html(markup).splitlines()):
+        if line and (not lines or line != lines[-1]):
+            lines.append(line)
+    if not lines:
+        return "", set()
+    return f"Page: {url}\nTitle: {title}\n\n" + "\n".join(lines), hrefs
+
+
+def _reading_page(reading: _Reading, url: str, hrefs: set[str], hop: bool = True) -> Page:
+    """`read_page`'s answer from Claude's `reading` of the page at `url`,
+    whose links are `hrefs`: {"hop"} to the listing page it names when it
+    found no posting (only while `hop`), else {"elements"}. A posting whose
+    link is not on the page is dropped; one with no link of its own is
+    placed at the page's URL, keyed on its title.
+
+    >>> found = _Reading(jobs=[_Posting(title="Data Engineer", url="/jobs/7", location="Durham, NC"),
+    ...                        _Posting(title="Ghost", url="/jobs/999", location=""),
+    ...                        _Posting(title="Knitter", url="", location="")], listing_url="")
+    >>> [(e["title"], e["url"]) for e in _reading_page(
+    ...     found, "https://x.test/careers", {"https://x.test/jobs/7"})["elements"]]
+    [('Data Engineer', 'https://x.test/jobs/7'), ('Knitter', 'https://x.test/careers#Knitter')]
+    >>> _reading_page(_Reading(jobs=[], listing_url="/open-roles"), "https://x.test/careers", set())
+    {'hop': 'https://x.test/open-roles'}
+    """
+    target = urljoin(url, reading.listing_url) if reading.listing_url else ""
+    if hop and not reading.jobs and target and _link_key(target) != _link_key(url):
+        return {"hop": target}
+    out: list[PageElement] = []
+    for job in reading.jobs:
+        title = clean_field(job.title)[:config.CAREERS_PAGE_TITLE_MAX]
+        posting = urljoin(url, job.url) if job.url else ""
+        if not title or (posting and _link_key(posting) not in hrefs):
+            continue
+        out.append({"title": title, "href": job.url,
+                    "url": posting or f"{urldefrag(url).url}#{quote(title)}",
+                    "location": clean_field(job.location)[:config.CAREERS_PAGE_LOCATION_MAX]})
+    return {"elements": out}
+
+
+async def claude_page(html: str, url: str, hop: bool = True, employer: str = "") -> Page | None:
+    """`read_page`'s answer for the careers page `html` at `url`, as Claude
+    (config.CLAUDE_CAREERS_MODEL) reads its `page_text` (`_reading_page`)
+    as `employer`'s, where known; None where it gives none: no model or
+    API key, a page with no text, or no answer (call_claude_json), and the
+    caller reads the links instead. An answer is reused for the same page,
+    employer, model and prompt, config.CAREERS_PAGE_READ_CACHE_S.
+    """
+    model = config.CLAUDE_CAREERS_MODEL
+    if not (model and claude_api.have_api_key()):
+        return None
+    system = """You read one page from an organization's careers site, given as text with links written [text](url), and list the job postings it shows.
+
+A job posting is one specific open position: a title such as "Senior Data Engineer" or "Clinical Research Coordinator II", usually linking to a page of its own. These are not postings: navigation and menu links, job categories, departments, teams or locations, "view all jobs", "search jobs" or "join our talent community" links, benefits, culture or FAQ pages, blog posts, news, events, and people's bios.
+
+The employer, when known, is named on the first line. List only that employer's postings (its parent's or subsidiaries' count). A page belonging to another organization, such as a different company with a similar name or a job board listing many employers' positions, lists nothing.
+
+Answer with:
+- jobs: every posting on the page, in page order. title is the position title alone (no location, department, or "Apply"). url is the posting's link copied exactly from the page, or "" when it has no link of its own. location is the place the page gives for it (a city and state, "Remote", "Hybrid - Durham, NC"), or "" when it gives none.
+- listing_url: when the page lists no postings itself but links to the page that does (a "Careers", "Open positions" or "Search jobs" link, including one to an outside applicant-tracking site), that link copied exactly from the page; otherwise "".
+
+Never invent a posting, title, url or location that is not on the page."""
+    text, hrefs = await asyncio.to_thread(page_text, html, url)
+    if not text:
+        return None
+    if len(text) > config.CAREERS_PAGE_TEXT_MAX:
+        _log.debug("careers page %s: %d characters, the first %d read", url, len(text),
+                   config.CAREERS_PAGE_TEXT_MAX)
+        text = text[:config.CAREERS_PAGE_TEXT_MAX]
+    text = f"Employer: {employer}\n{text}" if employer else text
+    path = hashed_cache_path(cache_dir("careers_read"), f"{model}\n{system}\n{text}")
+    cached = await asyncio.to_thread(json_cache_get, path, config.CAREERS_PAGE_READ_CACHE_S)
+    if cached is not None:
+        reading = _Reading.model_validate(cached)
+    else:
+        got = await claude_api.call_claude_json(system, text, max_tokens=8000,
+                                                model=model, reply=_Reading)
+        if got is None:
+            return None
+        reading = got
+        await asyncio.to_thread(json_cache_put, path, reading.model_dump())
+    return _reading_page(reading, url, hrefs, hop)
 
 
 async def _page_tree(url: str) -> etree._Element | None:

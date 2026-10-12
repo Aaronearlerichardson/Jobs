@@ -130,7 +130,7 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
         conn.close()
 
     @staticmethod
-    def _board(company, loc_re=None):
+    def _board(company, loc_re=None, employer=""):
         return [{"title": "Data Engineer",
                  "description": f"A real JD body from {company['name']}."}]
 
@@ -166,7 +166,7 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
         self._seed(dbp, ["Acme", "Beacon", "Cirrus"])
         barrier = asyncio.Barrier(3)
 
-        async def _fetch(company, loc_re=None):
+        async def _fetch(company, loc_re=None, employer=""):
             async with asyncio.timeout(20):
                 await barrier.wait()
             return self._board(company)

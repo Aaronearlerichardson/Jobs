@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from urllib.parse import urljoin
@@ -65,6 +66,19 @@ def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | XmlDecoder | H
                                            for o in s.iterdescendants("option")]}
                               for s in tree.iter("select")]
     return payload, None
+
+
+async def adecode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | XmlDecoder | HtmlDecoder,
+                  text: str, parts: dict[str, str], url: str, area: LocationRE | None = None,
+                  hop: bool = True, employer: str = "") -> tuple[JSON, str | None]:
+    """`decode`, off the loop; a careers page (`"$job_links"`) read by
+    Claude first (`custom.claude_page`, as `employer`'s), by its links
+    where Claude gives no answer."""
+    if isinstance(dec, HtmlDecoder) and dec.select == ("$job_links",):
+        page = await custom.claude_page(text, url, hop, employer)
+        if page is not None:
+            return (None, page["hop"]) if "hop" in page else (page, None)
+    return await asyncio.to_thread(decode, dec, text, parts, url, area, hop)
 
 
 def entries(payload: JSON, dec: Decoder) -> list[dict[str, JSON]]:

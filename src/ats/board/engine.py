@@ -238,9 +238,11 @@ def adapt(jobs: Iterable[FetchedJob], ats: str,
 #: The named request values every listing request can use, and their
 #: unscoped defaults ("$size", "$offset" and "$page" come from the pager).
 #: "$area" is the location regex a pull is filtered by, for a decoder that
-#: chooses among the places a row names; "$plain_user_agent" a bare
-#: platform UA, for a WAF refusing a Chrome UA without Chrome's client hints.
-_NAMED: Vals = {"$facets": {}, "$search_text": "", "$area": None,
+#: chooses among the places a row names; "$employer" the pulled company's
+#: name, for a careers page Claude reads (custom.claude_page);
+#: "$plain_user_agent" a bare platform UA, for a WAF refusing a Chrome UA
+#: without Chrome's client hints.
+_NAMED: Vals = {"$facets": {}, "$search_text": "", "$area": None, "$employer": "",
                 "$plain_user_agent": config.PLAIN_USER_AGENT}
 
 #: The run's listings read for closure and deep verify, (ats, handle) ->
@@ -611,9 +613,8 @@ class Board:
             if isinstance(req, Listing) and req.missing_at and re.search(req.missing_at, r.url or ""):
                 return 404, None, http.failed(label, f"HTTP 404: redirected to {r.url}")
             try:
-                payload, hopped = await asyncio.to_thread(
-                    lambda: decode.decode(dec, r.text, parts, url,
-                                          vals["$area"], hop))
+                payload, hopped = await decode.adecode(dec, r.text, parts, url, vals["$area"],
+                                                       hop, str(vals["$employer"] or ""))
             except ValueError:
                 return status, None, http.failed(label, "unreadable response")
             if hopped:
@@ -883,9 +884,10 @@ class Board:
         return {"$facets": {}, "$search_text": default_search_text()}, "", total, []
 
     async def _pull(self, handle: str, label: str, loc_re: LocationRE | None = None,
-                    budget: int | None = None) -> list[EngineRow]:
+                    budget: int | None = None, employer: str = "") -> list[EngineRow]:
         """The board's rows in `loc_re`'s area (all of them when None), the
-        walk's page cap widened to cover `budget` rows where given. A
+        walk's page cap widened to cover `budget` rows where given, the
+        board's company named `employer` where known. A
         facets `scope` narrows the listing server-side (the first
         alternative only, where the facets vouch) and keeps every row they
         vouched for, else the rows `_rescue` shows in the area; a scope the
@@ -896,8 +898,8 @@ class Board:
         scope = self._listings[0].scope
         if loc_re is not None and scope:
             vals, vouched, board_total, page = await self._scope(handle, loc_re, scope)
-            rows, total = await self._walk(handle, label, vals=vals, scoped=True, first=vouched,
-                                           budget=budget)
+            rows, total = await self._walk(handle, label, vals={**vals, "$employer": employer},
+                                           scoped=True, first=vouched, budget=budget)
             rows = rows or []
             pager = cast(Pager, self._pager)     # a scoped listing pages
             cap = page_size(pager) * page_cap(pager, budget, pager.stride)
@@ -907,7 +909,8 @@ class Board:
                       f"({len(rows) if total is None else total} of {board_total or '?'} "
                       f"postings) - keeping listed-location matches only, no detail rescue")
             return await self._rescue(rows, loc_re, fetch and vouched, fetch, label)
-        rows = (await self._walk(handle, label, vals={"$area": loc_re}, budget=budget))[0] or []
+        rows = (await self._walk(handle, label, vals={"$area": loc_re, "$employer": employer},
+                                 budget=budget))[0] or []
         return [r for r in await self._rescue_all(rows, label) if self._in_area(r, loc_re)]
 
     def _in_area(self, row: EngineRow, loc_re: LocationRE | None) -> bool:
@@ -1023,14 +1026,16 @@ class Board:
         """The sweep: `board_jobs` over the listing (`_pull`), screened by
         `gate`; an `eager` platform's detail reads fill the row as the
         whole-board pull's do."""
-        rows = await self._pull(handle, self._label(handle, company_name), loc_re)
+        rows = await self._pull(handle, self._label(handle, company_name), loc_re,
+                                employer=company_name)
         return await board_jobs(rows, company_name, gate=gate,
                                 fetch_description=self._detail_rows(self.spec.eager),
                                 detail_delay=config.SWEEP_DETAIL_DELAY_S)
 
     async def whole_board(self, company: BoardCoords, loc_re: LocationRE | None = None,
-                          validate: bool = False) -> list[FetchedJob]:
-        """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
+                          validate: bool = False, employer: str = "") -> list[FetchedJob]:
+        """The company-vetted pull of the board of the company named
+        `employer` (where known): every row in `loc_re`'s area (`_pull`),
         adapted, each kept row filled from its detail (`_apply`) where the
         spec is `eager`. The walk reads up to `config.BOARD_MAX_ROWS`; a
         `validate` pull (discovery confirming a board and counting its
@@ -1039,7 +1044,7 @@ class Board:
         if not handle:
             return []
         rows = await self._pull(handle, self._label(handle), loc_re,
-                                None if validate else config.BOARD_MAX_ROWS)
+                                None if validate else config.BOARD_MAX_ROWS, employer)
         eager = self._detail_rows(True) if self.spec.eager else None
         jobs = await board_jobs(rows, "", fetch_description=eager,
                                 max_details=config.WHOLE_BOARD_DETAILS,
@@ -1152,13 +1157,27 @@ class Board:
                           if want and (self._rows[0](parts, e)["id"] or "").lower() == want),
                          None))
 
-    def row_id(self, handle: str, url: str) -> str | None:
-        """The id this board's listing gives the posting `url` names, or
-        None: the listing's `id` field read with the URL's job_ref parts
-        standing in for the listing entry, so it resolves where the spec
-        names those parts after the entry keys the id reads."""
-        ref = self.job_ref(url)
-        return self._rows[0](self._parts(handle), ref)["id"] if ref else None
+    def row_id(self, handle: str, url: str, job_id: str) -> str | None:
+        """The id this board's listing gives the stored row `job_id` at
+        `url` now, or None: the listing's `id` field read with the URL's
+        job_ref parts standing in for the listing entry, so it resolves
+        where the spec names those parts after the entry keys the id reads.
+        A platform with no job_ref (its postings are on any host) reads
+        `url` as the entry's own, for a row already in its namespace (the
+        id's first "_" token): another platform's row is not its to read.
+
+        >>> from src.ats.board import board_for
+        >>> b, page = board_for("custom"), "https://x.test/careers"
+        >>> [b.row_id(page, f"https://x.test/jobs/{n}?src=web", "custom_old") for n in (7, 8)]
+        ['custom_https-x-test-jobs-7-c53d6ea8c4', 'custom_https-x-test-jobs-8-8919f2007a']
+        >>> b.row_id(page, "https://x.test/jobs/7", "linkedin_7") is None
+        True
+        """
+        if self._ref_re is not None:
+            ref = self.job_ref(url)
+            return self._rows[0](self._parts(handle), ref)["id"] if ref else None
+        new = self._rows[0](self._parts(handle), {"url": url})["id"]
+        return new if new and new.split("_", 1)[0] == job_id.split("_", 1)[0] else None
 
     async def detail(self, ref: dict[str, str], report: bool = False, url: str | None = None
                      ) -> tuple[int | None, dict[str, JSON] | None, str | Exception | None]:

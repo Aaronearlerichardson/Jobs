@@ -203,8 +203,8 @@ _ARGUED: dict[str, Callable[[JSON, str], str | int | None]] = {
     "before": lambda v, marker: str(v).split(marker, 1)[0].strip(),
     "alnum_tail": lambda v, n: re.sub(r"[^a-z0-9]+", "", str(v).lower())[-int(n):],
     # The last n characters lowercased, each run of anything but letters
-    # and digits one "-".
-    "url_key": lambda v, n: re.sub(r"[^a-z0-9]+", "-", str(v).lower())[-int(n):],
+    # and digits one "-", none at either end.
+    "url_key": lambda v, n: re.sub(r"[^a-z0-9]+", "-", str(v).lower())[-int(n):].strip("-"),
 }
 
 TRANSFORMS: dict[str, Transform] = {

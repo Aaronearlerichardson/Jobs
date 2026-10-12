@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
+from contextlib import AsyncExitStack
 from collections.abc import Collection, Iterable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
@@ -21,6 +22,7 @@ from src.discovery.write import (board_already_tracked, mission_context,
                                  report_dup_board)
 from src.digest.render import score_text
 from src.discovery.resolve import board as resolve_board
+from src.discovery.resolve.probes import JsScanProbePool
 from src.match.names import junk_name_reason, name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
@@ -119,10 +121,19 @@ RERESOLVE_FAMILIES = ("no-board-found", _DEAD_BOARD_FAMILY)
 # reresolve_misses's `families` rather than getting it by default.
 SILENT_FAMILY = "silent-board"
 
+# Boards read as a self-hosted careers page (config.CAREERS_PAGE_ATS), and
+# rows holding only a careers URL, whose rendered page names a fetchable
+# platform: Siemens' page is an Avature board, GitHub's a Jibe one
+# (2026-10-09). The careers-page reader accepts any job-shaped links, so
+# the static resolver keeps answering with it; only a headless scan
+# (resolve_board.js_board_hit) reaches the platform. A page that still
+# names none keeps its row as it is.
+CAREERS_PAGE_FAMILY = "careers-page"
+
 # Every family a pass may be asked to retry: the defaults, plus the ones a
 # caller opts into. "fetch-error" rows died on a transient the harvest pass
 # does not clear; "ats-unsupported" rows wait on a fetcher that may exist now.
-OPT_IN_FAMILIES = (SILENT_FAMILY, "fetch-error", "ats-unsupported")
+OPT_IN_FAMILIES = (SILENT_FAMILY, CAREERS_PAGE_FAMILY, "fetch-error", "ats-unsupported")
 
 
 def bury_404_board(conn: sqlite3.Connection, company: CompanyRow,
@@ -241,6 +252,33 @@ def _silent_board_candidates(conn: sqlite3.Connection,
         (CAPTURE_ATS, harvested_cut, silent_cut, silent_cut)).fetchall()]
 
 
+def _reads_careers_page(r: CompanyRow) -> bool:
+    """Whether `r` is a CAREERS_PAGE_FAMILY row: a careers URL, read by the
+    careers-page reader or by nothing, and no miss of its own."""
+    return bool(r.get("careers_url")) and (
+        r.get("ats") == config.CAREERS_PAGE_ATS
+        or not (r.get("ats") or r.get("miss_reason")))
+
+
+def _careers_page_candidates(conn: sqlite3.Connection) -> list[CompanyRow]:
+    """The CAREERS_PAGE_FAMILY rows, active or not, by name.
+
+    >>> from src.store import connect, upsert_company
+    >>> conn = connect(":memory:")
+    >>> for row in [{"name": "Page", "ats": "custom", "careers_url": "https://p.test/jobs"},
+    ...             {"name": "Bare", "careers_url": "https://b.test/careers"},
+    ...             {"name": "Lev", "ats": "lever", "slug": "lev"}]:
+    ...     _ = upsert_company(conn, row)
+    >>> [c["name"] for c in _careers_page_candidates(conn)]
+    ['Bare', 'Page']
+    """
+    rows = conn.execute(
+        "SELECT * FROM companies_effective WHERE COALESCE(careers_url, '') != '' "
+        "AND COALESCE(ats, ?) = ? ORDER BY name",
+        (config.CAREERS_PAGE_ATS, config.CAREERS_PAGE_ATS)).fetchall()
+    return [r for r in map(store.as_company, rows) if _reads_careers_page(r)]
+
+
 def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
                           names: Iterable[str] | None = None, limit: int | None = 50,
                           families: Collection[str] = RERESOLVE_FAMILIES) -> list[CompanyRow]:
@@ -336,6 +374,10 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
                 if (not wanted or (r["name"] or "").strip().lower() in wanted)
                 and not (cutoff and (r.get("last_nonempty_at") or r.get("created_at")
                                      or "") > cutoff)]
+    if CAREERS_PAGE_FAMILY in families and not (limit and len(out) >= limit):
+        held = {r["id"] for r in out}
+        out += [r for r in _careers_page_candidates(conn) if r["id"] not in held
+                and (not wanted or (r["name"] or "").strip().lower() in wanted)]
     return out[:limit] if limit else out
 
 
@@ -364,6 +406,11 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
     so the silent coordinates themselves never come back as one; a miss on
     an inactive row is recorded as usual (record_miss declines on an
     active row, which then stays a candidate).
+
+    CAREERS_PAGE_FAMILY adds the careers-page rows, each given one headless
+    scan of its careers page first; one whose page names no fetchable
+    platform is kept as it is ("kept"), unless its own miss family was
+    asked for too, which then resolves it as usual.
 
     `commit=False` previews the pass: every sniff runs and every line is
     printed, but nothing is written and no mission score is requested;
@@ -415,10 +462,13 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
         print(f"  re-resolving {len(rows)} miss(es) "
               f"(careers-page sniff -> slug-probe -> web search; every board "
               f"validated by a live fetch)...")
-        # A silent-board candidate carries no miss_reason of its own (that
-        # is the point of the family), so `was` falls back to naming the
-        # family for the [miss]/[pending] print lines below.
-        was = {r["name"]: (r["miss_reason"] or SILENT_FAMILY) for r in rows}
+        # Silent-board and careers-page candidates carry no miss_reason of
+        # their own (that is the point of those families), so `was` falls
+        # back to naming the family for the print lines below.
+        pages = CAREERS_PAGE_FAMILY in families
+        was = {r["name"]: (r["miss_reason"] or (
+            CAREERS_PAGE_FAMILY if pages and _reads_careers_page(r) else SILENT_FAMILY))
+            for r in rows}
         written: list[CompanyIn] = []
         still: list[tuple[str, str]] = []
         stalled: list[CompanyRow] = []
@@ -426,6 +476,8 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
         async def settle(name: str, hit: BoardHit | None, reason: str | None) -> tuple[str, str]:
             """Write one name's outcome; returns its tag and the line's detail
             ("" when another function already printed it)."""
+            if not hit and reason is None:
+                return "kept", ""
             if not hit:
                 await miss(name, cast(str, reason))
                 still.append((name, cast(str, reason)))
@@ -460,15 +512,27 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
             return "pending", (f"{hit['ats']:12} {counts} {str(tier):18} "
                                f"{score_text(score)}  (was {was[name]})")
 
+        async def resolve(r: CompanyRow, js: JsScanProbePool | None
+                          ) -> tuple[BoardHit | None, str | None]:
+            name, url = r["name"], r.get("careers_url") or ""
+            if js is not None and _reads_careers_page(r):
+                if hit := await resolve_board.js_board_hit(name, url, js):
+                    return hit, None if hit["nc"] else "no-local-jobs"
+                if (r.get("miss_reason") or "").partition(":")[0] not in families:
+                    return None, None
+            return await resolve_board.resolve_or_miss(name, url)
+
         tags: Counter[str] = Counter()
-        async for r, (hit, reason) in fan_out(
-                rows, lambda r: resolve_board.resolve_or_miss(r["name"], r.get("careers_url") or ""),
-                lambda r: r["name"], max_workers, with_item=True,
-                stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
-            tag, detail = await settle(r["name"], hit, reason)
-            tags[tag] += 1
-            if detail:
-                print(f"    {f'[{tag}]':9} {r['name'][:30]:30} {detail}")
+        async with AsyncExitStack() as stack:
+            js = (await stack.enter_async_context(JsScanProbePool(max_workers))
+                  if pages else None)
+            async for r, (hit, reason) in fan_out(
+                    rows, lambda r: resolve(r, js), lambda r: r["name"], max_workers,
+                    with_item=True, stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
+                tag, detail = await settle(r["name"], hit, reason)
+                tags[tag] += 1
+                if detail:
+                    print(f"    {f'[{tag}]':9} {r['name'][:30]:30} {detail}")
         for r in stalled:
             await miss(r["name"], "fetch-error:stalled")
             still.append((r["name"], "fetch-error:stalled"))
@@ -477,6 +541,8 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
                  "(active=0, review pending)" if commit
                  else "would be re-resolved (preview: nothing written)")
               + (f", {tags['dup']} already tracked under another name" if tags["dup"] else "")
+              + (f", {tags['kept']} careers page(s) naming no platform kept"
+                 if tags["kept"] else "")
               + f", {len(still)} still missing, of {len(rows)} tried.")
         if written and commit:
             print("  confirm or reject them in the roster review queue.")

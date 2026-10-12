@@ -150,7 +150,7 @@ async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int 
     loc_re = None if whole_board(company,
                                   t.remote_mission_floor) else NC_RE
     try:
-        jobs = await company_fetch.fetch_company(company, loc_re)
+        jobs = await company_fetch.fetch_company(company, loc_re, employer=company["name"])
     except Exception as e:
         fetch_failed(f"fetch error for {company['name']}", e)
         return (0, 0, 0)

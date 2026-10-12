@@ -227,14 +227,15 @@ def build_payload(system_prompt: str, user_content: str, max_tokens: int = 1000,
     # thinking + response text TOGETHER, so thinking could eat a 300-token
     # scoring budget and truncate the JSON. When the caller does not ask for
     # thinking (docs build-with-claude/thinking-troubleshooting, 2026-09):
-    # these accept {"type": "disabled"} (Opus 5 only at effort high or below,
-    # its default, which build_payload leaves alone)...
-    thinking_optional = ("claude-sonnet-5", "claude-opus-5")
+    # these accept {"type": "disabled"} (Opus 5 and Haiku 5.5 only at effort
+    # high or below, their defaults, which build_payload leaves alone)...
+    thinking_optional = ("claude-sonnet-5", "claude-opus-5", "claude-haiku-5")
     # ...and these always think and reject "disabled" with a 400, so they get
     # no `thinking` field, effort "low", and room for that thinking on top of
     # the caller's max_tokens. Matched first: "claude-opus-5" is a prefix of
-    # "claude-opus-5-5".
-    thinking_always = ("claude-opus-5-5", "claude-fable-5", "claude-mythos-5")
+    # "claude-opus-5-5", "claude-sonnet-5" of "claude-sonnet-5-5".
+    thinking_always = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5",
+                       "claude-mythos-5")
     # Models without structured outputs (absent from the feature's
     # supportedModels, docs build-with-claude/structured-outputs, 2026-09).
     # They get the reply as a forced tool call instead; none of them thinks

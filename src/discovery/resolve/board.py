@@ -346,7 +346,7 @@ async def _classify(name: str, careers_url: str) -> str:
     return f"board-dead:{ats}"
 
 
-async def _js_hit(name: str, careers_url: str, js: JsScanProbePool) -> BoardHit | None:
+async def js_board_hit(name: str, careers_url: str, js: JsScanProbePool) -> BoardHit | None:
     """The board `js`'s headless scan of `name`'s careers page finds,
     validated like every other hit (``via='js'``), or None."""
     meta, _ = await js.probe(name, careers_url)
@@ -371,7 +371,7 @@ async def resolve_or_miss(name: str, careers_url: str = "",
     (``no-local-jobs``): worth keeping, not worth crawling today. A board
     found but unreadable (`read_board`) is ``fetch-error:unreadable-<ats>``,
     a transient, never ``board-dead``. With `js`, a ``no-board-found`` name
-    gets one headless scan of its careers page (`_js_hit`), for SPA pages
+    gets one headless scan of its careers page (`js_board_hit`), for SPA pages
     whose board link only exists once JS has run.
 
     Notes:
@@ -385,7 +385,7 @@ async def resolve_or_miss(name: str, careers_url: str = "",
         hit, unread = await _resolve(name, careers_url or "")
         miss = None if hit or unread else await classify_miss(name, careers_url)
         if js is not None and miss and miss.startswith("no-board-found"):
-            hit = await _js_hit(name, careers_url, js)
+            hit = await js_board_hit(name, careers_url, js)
     except Exception as e:          # noqa: BLE001 - the reason IS the result
         print(f"    [!] {name}: {type(e).__name__}: {e}")
         return None, f"fetch-error:{type(e).__name__}"

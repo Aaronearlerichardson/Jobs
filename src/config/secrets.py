@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     claude_model: str = "claude-sonnet-5"
     # Deep-verify pass over ranking finalists only (~15-30 calls a run).
     claude_verify_model: str = "claude-opus-5-5"
+    # Self-hosted careers pages read by Claude (src.ats.board.custom
+    # .claude_page), once per changed page; blank reads their links alone.
+    # Haiku 5.5 matched Sonnet 5 at a twentieth of the cost (2026-10-09).
+    claude_careers_model: str = "claude-haiku-5-5"
     # CLAUDE_PROMPT_CACHE=0 disables prompt caching; CLAUDE_CACHE_TTL=1h
     # buys the 1-hour cache; CLAUDE_USAGE_SUMMARY=0 silences the exit line.
     claude_prompt_cache: bool = True
@@ -64,7 +68,8 @@ class Settings(BaseSettings):
     # scope lives in profile [sources.usajobs].
     usajobs_api_key: str = ""
     usajobs_email: str = ""
-    # Where things live (src/config/paths.py, src/config/profile.py).
+    # Where things live (src/config/paths.py, src/config/profile.py,
+    # src/config/unpack_cache.py).
     jobs_data_dir: Path | None = None
     jobs_profile: Path | None = None
     jobs_resume: Path | None = None
@@ -139,6 +144,7 @@ GMAIL_APP_PASSWORD = SETTINGS.gmail_app_password
 ANTHROPIC_API_KEY = SETTINGS.anthropic_api_key
 CLAUDE_MODEL = SETTINGS.claude_model
 CLAUDE_VERIFY_MODEL = SETTINGS.claude_verify_model
+CLAUDE_CAREERS_MODEL = SETTINGS.claude_careers_model
 CAREERONESTOP_USER_ID = SETTINGS.careeronestop_user_id
 CAREERONESTOP_TOKEN = SETTINGS.careeronestop_token
 USAJOBS_API_KEY = SETTINGS.usajobs_api_key

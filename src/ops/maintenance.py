@@ -119,7 +119,7 @@ async def board_index(company: CompanyRow) -> dict[str, FetchedJob]:
     per-URL path either way.
     """
     try:
-        board = await company_fetch.fetch_company(company, loc_re=None)
+        board = await company_fetch.fetch_company(company, loc_re=None, employer=company["name"])
     except Exception as e:                      # noqa: BLE001 - reported
         fetch_failed(f"{company['name']}: board fetch failed", e)
         return {}

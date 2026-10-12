@@ -343,6 +343,12 @@ CAREERS_PAGE_MIN_LINKS = 3
 CAREERS_PAGE_TITLE_MAX = 90
 CAREERS_PAGE_LOCATION_MAX = 70
 BOARD_DETECT_CACHE_S = 6 * 3600
+# Claude's reading of a careers page (CLAUDE_CAREERS_MODEL): the most
+# characters of page text it is sent (about 20k tokens), and how long an
+# answer is reused. Answers are keyed on the text, so only a changed page
+# is read again.
+CAREERS_PAGE_TEXT_MAX = 80_000
+CAREERS_PAGE_READ_CACHE_S = 30 * 86400
 
 # A posting its employer marks as not a real opening: an ATS's test or
 # placeholder requisition ("DO NOT APPLY - TEST REQ - ...", "Test Evergreen

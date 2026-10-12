@@ -368,7 +368,7 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
     # time, so resetting around the fetch attributes them to this board.
     http.reset_fetch_failures()
     try:
-        jobs = await company_fetch.fetch_company(company) or []
+        jobs = await company_fetch.fetch_company(company, employer=company["name"]) or []
     except Exception as e:                      # noqa: BLE001 - reported
         stats["fetch_errors"] = http.fetch_failures()
         stats["incomplete"] = True

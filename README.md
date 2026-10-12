@@ -562,7 +562,10 @@ driver), so the headless probing of JS-only boards works by driving a Chrome
 or Edge already installed on the machine — only the ~150 MB per-platform
 browser download is missing, and a machine with neither browser degrades
 gracefully. First build downloads a C compiler if none is present and takes
-10–30 minutes; rebuilds are fast.
+10–30 minutes; rebuilds are fast. The binary unpacks itself once per build
+version, into `%LOCALAPPDATA%\JobCrawler\cache\<product>\<version>\`, and on
+Windows each launch deletes the folders older builds left there unless
+something is still running from them.
 
 ---
 
@@ -936,6 +939,7 @@ identically to a dead one.
 | `discover.py` / `capture.py` | entry points: roster growth, manual page capture |
 | `config/` / `profile.toml` | plumbing (secrets, paths, profile load, track tables, policy, sources; `import config` re-exports it all) vs. all search criteria |
 | `src/config/bootstrap.py` | first-run setup: seeds your profile, reports where data lives |
+| `src/config/unpack_cache.py` | the compiled binaries' onefile unpack cache: each binary deletes older builds' folders at startup |
 | `src/crawl/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
 | `src/ops/` | the operations, by family: `status.py` (status sync, closed-probe), `scoring.py` (self-heal, rescore, deep-verify), `backfill.py`, `ingest.py` (external ingest, manual adds), `repair.py` (dead boards, re-resolution, slug renames), `rekey.py`, `restamp.py` (geo_mode and mission-tier restamps), `roster.py` (composite targets); `maintenance.py` holds what they share |
 | `src/ats/registry.py` | the ATS sweep: which store rows it pulls whole, and a new board's seed tag |

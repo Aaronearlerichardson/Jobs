@@ -59,10 +59,12 @@ class EngineRow(TypedDict, total=False, closed=True):
 Fields = dict[str, JSON]
 
 #: The named request values a template reads ("$area": the pull's location
-#: regex, for a decoder that chooses among places).
+#: regex, for a decoder that chooses among places; "$employer": the pulled
+#: company's name, for a careers page Claude reads).
 Vals = TypedDict("Vals", {"$size": int, "$offset": int, "$page": int | None,
                           "$facets": dict[str, list[JSON]], "$search_text": str,
-                          "$area": LocationRE | None, "$plain_user_agent": str},
+                          "$area": LocationRE | None, "$employer": str,
+                          "$plain_user_agent": str},
                  total=False, closed=True)
 
 

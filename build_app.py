@@ -58,8 +58,11 @@ schedule_restart()) and so re-extracted its whole ~189 MB payload each
 time. The version comes from `git describe --tags --long`, so a build off a
 different commit gets a different folder; a rebuild of the SAME commit
 reuses the folder and the launcher refreshes its contents (measured
-2026-09-11, see build_command()). Delete the folder to reclaim the space;
-the next launch writes it again.
+2026-09-11, see build_command()). The binaries clean up after older builds
+themselves: at startup each deletes its own product's folders for OLDER
+versions that nothing is using (src/config/unpack_cache.py; Windows only).
+Deleting a folder by hand is safe too while nothing runs from it; the next
+launch of that build writes it again.
 
 Run it with the conda environment ACTIVATED (build_exe.bat does this; from
 a bare shell use `conda activate jobs` first, not just the env's python.exe
@@ -350,10 +353,20 @@ def build_command(name: str | None = None) -> list[str]:
     # it. One more level keeps build output and user data apart
     # (2026-09-11).
     #
-    # Known gap, deliberately not fixed here: every distinct {VERSION}
-    # leaves its own folder under that cache directory and nothing prunes
-    # the old ones, so a long series of builds accumulates unpack trees the
-    # user has to delete by hand.
+    # Every distinct {VERSION} leaves its own folder, and Nuitka never
+    # removes one (19 UI + 20 harvester folders, ~7 GB, by 2026-10-09). The
+    # binaries prune them at startup instead: src/config/unpack_cache.py,
+    # called from harvest.py's and src/web/server.py's main(), deletes the
+    # running product's folders for OLDER versions, skipping any that a
+    # process runs an image from or holds a file open in, and never its own
+    # or a newer one. So a Settings-save restart (same exe, same folder)
+    # and a harvester running beside the UI (another product's folder) are
+    # both left alone. It is done at runtime, not as a post-build step,
+    # because only the running binary knows which folder is current and
+    # which are in use, and the machine that builds need not be the one
+    # that runs. Windows only; macOS/Linux keep the gap (the module's
+    # Notes say why). tests/test_invariants.py pins this spec to the
+    # layout unpack_cache expects.
     cmd += ["--onefile-cache-mode=cached",
             "--onefile-tempdir-spec="
             "{CACHE_DIR}/{COMPANY}/cache/{PRODUCT}/{VERSION}"]

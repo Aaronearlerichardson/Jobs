@@ -21,7 +21,7 @@ from typing import Never
 
 from src import config, runstate
 from src.claude.api import have_api_key
-from src.config import bootstrap
+from src.config import bootstrap, unpack_cache
 from . import STATE, app
 
 _log = logging.getLogger(__name__)
@@ -196,12 +196,18 @@ def main() -> None:
             raise SystemExit(f"  [!] no free port in {port}..{port + 10}")
 
     bootstrap.ensure_profile()
+    # The exe's unpack folders for older builds (src/config/unpack_cache.py).
+    # Never this build's own, so a Settings-save restart, which relaunches
+    # this same exe, keeps reusing its folder.
+    pruned = unpack_cache.prune_stale()
 
     STATE["bound_port"] = port
     url = f"http://127.0.0.1:{port}"
     print(f"  job-crawler UI -> {url}")
     for line in bootstrap.status_lines():
         print(f"  {line}")
+    if pruned:
+        print(f"  {pruned}")
     print(f"  db      : {config.STORE_DB_PATH}")
     if not have_api_key():
         print("  [!] ANTHROPIC_API_KEY not set - scoring operations will no-op.")

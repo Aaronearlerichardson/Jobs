@@ -54,7 +54,7 @@ last.
 | 33 | `gem` | fetchable | jobs.gem.com | json | detail | — | ResProp Management |
 | 34 | `taleo` | fetchable | tbe.taleo.net | html · page pager | page | eager | Nurses and More, Inc. |
 | 35 | `taleo_enterprise` | lead | taleo.net | — | — | — | — |
-| 36 | `avature` | fetchable | avature.net | html · offset pager | page | eager | Unifi |
+| 36 | `avature` | fetchable | avature.net | html · offset pager → html · offset pager | page | eager | Unifi |
 | 37 | `ukg` | lead | ultipro.com | — | — | — | — |
 | 38 | `paycom` | lead | paycomonline.net | — | — | — | — |
 | 39 | `gohire` | lead | gohire.io | — | — | — | — |
@@ -229,8 +229,9 @@ Taleo Business Edition: an org on a site path, career center the (org, cws) pair
 
 Avature portals: a path on the tenant's own host, keyed on its URL.
 
-**Notes.** Tenants size their own pages (12, 20); the page's legend gives the total. Fetchable since 2026-10.
+**Notes.** Tenants size their own pages (12, 20); the page's legend gives the total. Fetchable since 2026-10. A portal on the folder layout lists role folders (FolderDetail), not postings (JobDetail): the fallback listing reads it, 2026-10-09 (Epic).
 
+- `listing[1]`: a tenant on the folder layout lists role folders, not postings, 2026-10
 - `rescue`: a tenant's list names a country, its posting page the city, 2026-10
 
 ### `ukg`

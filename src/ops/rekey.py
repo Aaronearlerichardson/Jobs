@@ -40,6 +40,8 @@ def rekey_jobs(ats: str, commit: bool = False, t: RuntimeTrack | None = None,
         domains can share requisition numbers. Run it before the first
         harvest under a new rule: upsert_job re-keys a row itself only on
         an exact URL and title match, and never moves its company_id.
+        2026-10-09: custom ids gained a hash of the whole URL, because a
+        page's postings can share their last 48 characters.
     """
     rekey_buckets = ("unchanged", "rekey", "merge", "conflict", "cross-tenant",
                      "unresolvable")
@@ -58,7 +60,8 @@ def rekey_jobs(ats: str, commit: bool = False, t: RuntimeTrack | None = None,
         new_ids: dict[int, str | None] = {}
         for r in rows:
             handle = board.handle(companies[r["company_id"]])
-            new_ids[r["id"]] = (board.row_id(handle, r["url"]) if handle else None) or None
+            new_ids[r["id"]] = (board.row_id(handle, r["url"], r["job_id"])
+                                if handle else None) or None
         # The board spec derives each row's new id (Python); which bucket it
         # lands in is one query. A row's HOLDER is the stored row that
         # already has the new id, else the first row of this batch to claim

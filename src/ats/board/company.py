@@ -195,9 +195,10 @@ def title_from_url_slug(url: str | None) -> str:
 # --- dispatch ------------------------------------------------------------------ #
 
 async def fetch_company(company: BoardCoords, loc_re: LocationRE | None = None,
-                        validate: bool = False) -> list[FetchedJob]:
+                        validate: bool = False, employer: str = "") -> list[FetchedJob]:
     """A store row's board pulled through its platform's engine
-    (`Board.whole_board`); [] for a platform no spec fetches.
+    (`Board.whole_board`), as the company named `employer` where known;
+    [] for a platform no spec fetches.
 
     `loc_re=None` pulls the whole board; pass NC_RE for a pull scoped to
     the profile's locality (the local track's default). A `validate` pull
@@ -205,7 +206,7 @@ async def fetch_company(company: BoardCoords, loc_re: LocationRE | None = None,
     pager's own page budget, not config.BOARD_MAX_ROWS.
     """
     board = board_for(company.get("ats"))
-    return await board.whole_board(company, loc_re, validate) if board else []
+    return await board.whole_board(company, loc_re, validate, employer) if board else []
 
 
 def board_origin(company: BoardCoords) -> str | None:

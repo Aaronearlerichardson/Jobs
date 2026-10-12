@@ -15,8 +15,14 @@ url = "{page}"
 decoder = { kind = "html", select = "$job_links" }
 
 [listing.fields]
-_key = { of = "url", transform = "url_key:48" }
-id = { format = "custom_{_key}" }
+# The URL's path tail, readable, then a hash of the whole URL: a page's
+# postings can share a long tail (Google Research's all end in one
+# "&src=..." query, 2026-10-09). "-" before the hash keeps the id one
+# token past "custom_", so no posting reads as a namespace of others
+# (store.sync_job_statuses).
+_path = { of = "url", transform = "before:?" }
+_key = { of = "_path", transform = "url_key:32" }
+id = { format = "custom_{_key}-{url:10|stable_id}" }
 title = "title"
 url = "url"
 location = "location"

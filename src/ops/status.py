@@ -100,7 +100,7 @@ async def sync_status_all(top_n: int = 15, t: RuntimeTrack | None = None) -> tup
         sources = [(c["name"], c["ats"] or "?",
                     (lambda cc=c: company_fetch.fetch_company(
                         cc, None if (whole_board(cc, t.remote_mission_floor)
-                                     or loc is None) else loc)))
+                                     or loc is None) else loc, employer=cc["name"])))
                    for c in companies]
         fetched = await fetch_all(sources)
         n_closed = n_reopened = n_boards = 0

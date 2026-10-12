@@ -200,7 +200,7 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
             for c in rows:
                 add(c["name"], c.get("ats") or "?",
                     (lambda cc=c: company_fetch.fetch_company(
-                        cc, None if ops.whole_board(cc, floor) else NC_RE)),
+                        cc, None if ops.whole_board(cc, floor) else NC_RE, employer=cc["name"])),
                     company=c, key=("store", (c["name"] or "").lower()))
         else:
             # Location-agnostic lightweight ATS sweep (JSON-API boards only;

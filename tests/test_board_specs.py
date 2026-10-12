@@ -175,13 +175,17 @@ BOARD_URLS = [
      "https://careers.unifiservice.com/careers"),
     ("https://careers.unifiservice.com/careers/JobDetail/Engineer/14712", "avature",
      "https://careers.unifiservice.com/careers"),
+    ("https://epic.avature.net/Careers/FolderDetail/Verona-Wisconsin-United-States-Trainer/12",
+     "avature", "https://epic.avature.net/Careers"),
 ]
 
 #: ats, a posting URL, the job reference it names (None: not a posting)
 JOB_REFS = [
     ("avature", "https://careers.unifiservice.com/careers/JobDetail/"
      "1160-RDU-Delta-Cabin-CB2SUP-Cabin-Supervisor-FT/14712",
-     {"base": "https://careers.unifiservice.com/careers", "jid": "14712"}),
+     {"base": "https://careers.unifiservice.com/careers", "kind": "Job", "jid": "14712"}),
+    ("avature", "https://epic.avature.net/Careers/FolderDetail/Verona-Wisconsin-United-States-Trainer/12",
+     {"base": "https://epic.avature.net/Careers", "kind": "Folder", "jid": "12"}),
     ("comeet", COMEET_POSTING, {"slug": "cheq", "cid": "65.005", "jid": "DD.B6F"}),
     ("gem", POSTINGS["gem"][1], {"slug": "resprop", "jid": "am9icG9zdDod14nfMKbLHoHk2zS1wEih"}),
     ("gem", "https://jobs.gem.com/the-swift-group/4123291008",

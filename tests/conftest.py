@@ -73,6 +73,9 @@ def _no_network(monkeypatch):
     def _refuse():
         raise AssertionError("test reached the network")
     monkeypatch.setattr(_http, "_session", _refuse)
+    # A developer's .env key must not reach a test (CI has none): with it,
+    # a careers page asks Claude before its links (custom.claude_page).
+    monkeypatch.setattr(_config, "ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY_HERE")
     # The resolver's domain lookup is a network call: off unless a test says so.
     monkeypatch.setattr(_config, "DISCOVERY_DOMAIN_LOOKUP", False)
     # Likewise the board directory, which reads a remote dataset.

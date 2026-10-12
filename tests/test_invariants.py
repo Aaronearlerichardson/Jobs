@@ -19,6 +19,7 @@ import asyncio
 import builtins
 import functools
 import re
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -1223,3 +1224,39 @@ def test_src_imports_only_at_module_level():
     assert not unlisted, (f"{unlisted}: import at module level, or add the pair "
                           "to DEFERRED_IMPORT_ALLOW with the reason it cannot be")
     assert not stale, f"stale DEFERRED_IMPORT_ALLOW entries: {stale}"
+
+
+# --------------------------------------------------------------------------- #
+#  The binaries prune the onefile unpack cache the build lays out             #
+# --------------------------------------------------------------------------- #
+
+def test_both_binaries_prune_their_unpack_cache_at_startup():
+    """Each binary's main() calls src/config/unpack_cache.prune_stale();
+    without it every build's ~120-300 MB unpack folder stays for good, and
+    nothing fails to say so."""
+    trees = dict(_parsed())
+    for rel in ("harvest.py", "src/web/server.py"):
+        main = next(n for n in trees[rel].body
+                    if isinstance(n, ast.FunctionDef) and n.name == "main")
+        assert any(isinstance(c, ast.Call) and _dotted(c.func) == "unpack_cache.prune_stale"
+                   for c in ast.walk(main)), f"{rel} main() no longer prunes its unpack cache"
+
+
+def test_the_build_unpacks_where_unpack_cache_looks(monkeypatch):
+    """build_app.py unpacks each version to
+    <unpack_cache.cache_root()>/<product>/<version>, named with a version
+    unpack_cache.version_key() reads: prune() finds nothing to do anywhere
+    else, so a drifted spec would quietly bring the old gap back."""
+    import build_app
+    from src.config import unpack_cache
+    monkeypatch.setattr(sys, "argv", ["build_app.py"])
+    monkeypatch.setattr(build_app, "version", lambda: "0.1.0.7")
+    monkeypatch.setattr(build_app, "report_path", lambda name=None: Path("report.xml"))
+    for name in build_app.TARGETS:
+        cmd = build_app.build_command(name)
+        assert "--onefile-tempdir-spec={CACHE_DIR}/{COMPANY}/cache/{PRODUCT}/{VERSION}" in cmd
+        assert f"--company-name={config.APP_NAME}" in cmd
+        # {VERSION} is the file version when the product version matches it.
+        assert {"--file-version=0.1.0.7", "--product-version=0.1.0.7"} <= set(cmd)
+    assert unpack_cache.version_key(build_app.parse_describe("v0.1-158-g5525f88")) \
+        == (0, 1, 0, 158)

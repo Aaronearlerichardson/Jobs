@@ -251,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     from src import runstate, session_log
+    from src.config import unpack_cache
     from src.crawl import harvest
 
     only = ({s.strip() for s in args.only.split(",") if s.strip()}
@@ -277,6 +278,11 @@ def main(argv: list[str] | None = None) -> int:
     if lock is None:
         print("  [!] another harvester holds the lock; exiting")
         return 0
+    # The exe's unpack folders for older builds (src/config/unpack_cache.py),
+    # once per run, not per pass, and only by the copy that holds the lock.
+    pruned = unpack_cache.prune_stale()
+    if pruned:
+        print(f"  {pruned}")
 
     async def one_pass(scheduled: float | None = None) -> None:
         # Captured before session_log.start() so a slow log-file open (or

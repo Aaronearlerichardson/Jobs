@@ -37,7 +37,7 @@ async def _harvest_board(company, db, **kw):
 
 def _fetches(monkeypatch, fetch):
     """The board fetch answering `fetch(company)`: its list, or its raise."""
-    async def afetch(company, loc_re=None):
+    async def afetch(company, loc_re=None, employer=""):
         return fetch(company)
     monkeypatch.setattr(harvest.company_fetch, "fetch_company", afetch)
 

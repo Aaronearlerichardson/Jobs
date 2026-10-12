@@ -2,13 +2,15 @@
 #
 # Notes:
 #     Tenants size their own pages (12, 20); the page's legend gives the
-#     total. Fetchable since 2026-10.
+#     total. Fetchable since 2026-10. A portal on the folder layout lists
+#     role folders (FolderDetail), not postings (JobDetail): the fallback
+#     listing reads it, 2026-10-09 (Epic).
 
 eager = true
 
 [[detect]]
 host = "avature.net"
-re = ['(?i)(https?://[a-z0-9.-]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/(?:SearchJobs|JobDetail)\b']
+re = ['(?i)(https?://[a-z0-9.-]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/(?:SearchJobs|JobDetail|FolderDetail)\b']
 careers_url = "{slug}"
 
 [canary]
@@ -20,10 +22,10 @@ columns = ["careers_url"]
 parts = ["base"]
 
 [job_ref]
-re = '(?i)^(https?://[^/?#]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/JobDetail/(?:[^/?#]*/)?(\d+)'
-parts = ["base", "jid"]
+re = '(?i)^(https?://[^/?#]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/(Job|Folder)Detail/(?:[^/?#]*/)?(\d+)'
+parts = ["base", "kind", "jid"]
 
-[listing]
+[[listing]]
 url = "{base|rstrip_slash}/SearchJobs"
 params = { jobOffset = "$offset" }
 
@@ -53,6 +55,29 @@ url = "url"
 location = { first = ["loc", "country"] }
 department = "dept"
 
+# The folder layout: one row per role folder, paged by folderOffset, its
+# legend "38 matching positions". Neither its list nor a folder's page
+# names a location.
+[[listing]]
+params = { folderOffset = "$offset" }
+why = "a tenant on the folder layout lists role folders, not postings, 2026-10"
+
+[listing.pager]
+kind = "offset"
+pages = 60
+total = { of = { of = "page", transform = 'group:(?s)\b([\d,]+)\s+matching positions' }, transform = "int" }
+
+[listing.decoder]
+kind = "html"
+select = "li.jobResultItem h3.jobTitleMain a"
+
+[listing.fields]
+_jid = { of = "url", transform = 'group:/(\d+)/?(?:[?#]|$)' }
+_key = { format = "{base}", transform = "host_key" }
+id = { format = "avature_{_key}_{_jid}", when = { truthy = "_jid" } }
+title = "text"
+url = "url"
+
 # A list naming only a country is placed from its title, else its page.
 [rescue]
 when = "always"
@@ -63,7 +88,7 @@ free = "text"
 why = "a tenant's list names a country, its posting page the city, 2026-10"
 
 [detail]
-url = "{base|rstrip_slash}/JobDetail/-/{jid}"
+url = "{base|rstrip_slash}/{kind}Detail/-/{jid}"
 location = "if_unknown"
 
 [detail.decoder]
@@ -73,7 +98,7 @@ select = "body"
 [detail.decoder.cells]
 city = ".article__content__view__field:contains('City') .article__content__view__field__value"
 state = ".article__content__view__field:contains('State') .article__content__view__field__value"
-description = "article:contains('Description') .article__content__view__field__value"
+description = "article:contains('Description') .article__content__view__field__value, .jobDetailDescription"
 
 [detail.fields]
 description = "description"
