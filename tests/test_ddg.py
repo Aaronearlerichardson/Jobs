@@ -10,6 +10,9 @@ too, or nothing is configured, a breaker skips web search for a window,
 then lets one probe through (2026-09-22 reresolve: a permanent breaker
 left 24 names unsearched after a transient host DNS hiccup).
 
+A first page DDG missed goes to Firecrawl's paid search, within the run's
+credits (TestFirecrawlFallback).
+
 Offline: the DDGS class and ddgs's HTTP-client module are both faked.
 """
 
@@ -20,6 +23,7 @@ import types
 
 import pytest
 
+from conftest import fake_response
 from src.net import ddg
 
 REFUSED = Exception(
@@ -145,6 +149,72 @@ class TestResolverFallback:
                                                 [{"href": "https://a.example/"}]])
         assert out == [{"href": "https://a.example/"}]
         assert wired.primp.Client is wired.original # ordinary retry path
+
+
+FIRECRAWL = "api.firecrawl.dev"
+
+
+def _answer(*urls, credits=2):
+    """A Firecrawl search reply listing `urls`."""
+    return fake_response({"success": True, "creditsUsed": credits, "data": {
+        "web": [{"url": u, "title": "t", "description": "d"} for u in urls]}})
+
+
+class TestFirecrawlFallback:
+    """A first page DDG missed is asked of Firecrawl, within the run's
+    credits; its requests are the test's (`serve`)."""
+
+    @pytest.fixture(autouse=True)
+    def _keyed(self, monkeypatch, wired):
+        monkeypatch.setattr(ddg.config, "FIRECRAWL_API_KEY", "k")
+        monkeypatch.setattr(ddg.config, "DISCOVERY_FIRECRAWL_CREDITS", 100)
+        monkeypatch.setattr(ddg.config, "FIRECRAWL_GAP_S", 0)
+
+    async def test_a_miss_is_asked_of_it_and_the_answer_cached(self, monkeypatch, serve):
+        sent = serve({FIRECRAWL: _answer("https://jobs.lever.co/acme")})
+        out, _ = await _search(monkeypatch, [[]])
+        assert out == [{"href": "https://jobs.lever.co/acme", "title": "t", "body": "d"}]
+        assert sent[0].kw["json"]["query"] == "acme careers"
+        assert sent[0].headers["Authorization"] == "Bearer k"
+        out, made = await _search(monkeypatch, [[]])
+        assert out[0]["href"] == "https://jobs.lever.co/acme"
+        assert made == [] and len(sent) == 1
+
+    async def test_a_hit_or_a_search_without_fallback_never_asks_it(self, monkeypatch, serve):
+        sent = serve({FIRECRAWL: _answer("https://x.example/")})
+        hit = [{"href": "https://acme.example/careers"}]
+        assert (await _search(monkeypatch, [hit]))[0] == hit
+        Fake, _made = _fake_ddgs([[]])
+        monkeypatch.setattr(ddg, "_ddgs_class", lambda: Fake)
+        assert await ddg.search("beta jobs", budget=5, fallback=False) == []
+        assert sent == []
+
+    async def test_a_miss_streak_asks_it_first_and_no_later_page(
+            self, monkeypatch, serve, capsys):
+        sent = serve({FIRECRAWL: _answer()})
+        for i in range(ddg.MISS_STREAK):
+            await _search(monkeypatch, [[]], q=f"q{i}")
+        out, made = await _search(monkeypatch, [[]], q="next")
+        assert out == [] and made == [] and len(sent) == ddg.MISS_STREAK + 1
+        assert "answers first" in capsys.readouterr().out
+        Fake, made = _fake_ddgs([[]])
+        monkeypatch.setattr(ddg, "_ddgs_class", lambda: Fake)
+        assert await ddg.search("next", budget=5, page=2) == []
+        assert made == [] and len(sent) == ddg.MISS_STREAK + 1
+
+    async def test_a_refused_key_stops_the_runs_searches(self, monkeypatch, serve, capsys):
+        sent = serve({FIRECRAWL: fake_response({"success": False}, status=402)})
+        await _search(monkeypatch, [[]])
+        await _search(monkeypatch, [[]], q="beta")
+        assert len(sent) == 1 and "out of credits" in capsys.readouterr().out
+
+    async def test_the_runs_credits_cap_its_searches(self, monkeypatch, serve, capsys):
+        monkeypatch.setattr(ddg.config, "DISCOVERY_FIRECRAWL_CREDITS", 3)
+        sent = serve({FIRECRAWL: _answer("https://a.example/")})
+        await _search(monkeypatch, [[]])
+        out, made = await _search(monkeypatch, [[]], q="beta")
+        assert out == [] and len(made) == 1 and len(sent) == 1
+        assert "3 credits are spent" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("cut", ["budget", "cancel"])

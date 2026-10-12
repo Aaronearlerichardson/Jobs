@@ -11,6 +11,8 @@ import tomllib
 from pathlib import Path
 from typing import TypedDict, cast
 
+from src.rows import JSON
+
 
 def load_table[T](name: str) -> T:
     """The parsed src/config/<name>.toml, typed as the caller's annotation says.
@@ -38,9 +40,18 @@ class OpenFdaSpec(TypedDict):
     specialty_search: str
 
 
+class GoogleJobsSpec(TypedDict):
+    actor: str
+    input: dict[str, JSON]
+    company_keys: list[str]
+    location_keys: list[str]
+    title_keys: list[str]
+
+
 class Registries(TypedDict):
     nih_sbir: NihSbirSpec
     openfda_devices: OpenFdaSpec
+    google_jobs: GoogleJobsSpec
 
 
 NON_US_PLACES: dict[str, list[str]] = load_table("places")

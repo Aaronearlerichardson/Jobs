@@ -102,6 +102,17 @@ That directory holds `jobs.db`, your `profile.toml`, your résumé,
   see [Gated employers](#gated--big-company-employers). `USAJOBS_EMAIL` must be
   the address the key was registered to; the API reads it as the User-Agent
   and rejects a key sent with any other.
+- **FIRECRAWL_API_KEY** (optional, paid, discovery only) answers the web
+  searches DuckDuckGo misses: the resolver's careers search, the dork sweep,
+  name harvesting. A run spends at most `[discovery].firecrawl_credits` (100
+  by default, 2 per 10 results; the free plan has 1,000 a month) and prints
+  what it spent. The crawl's daily websearch feed never uses it.
+- **APIFY_API_KEY** (optional, paid) runs the `google_jobs` registry: add it
+  to `[discovery].registries` and `discover.py --registries` reads who is
+  hiring near you for your kind of role on Google Jobs, then resolves each
+  employer the roster lacks to its board, queued for review. One run reads
+  `[sources.google_jobs].max_items` postings (about $0.45 per 100 on
+  2026-10-12) and is reused for `refresh_days`.
 
 **Prompt caching is on by default.** Every scorer sends the same stable system
 prompt (rubric + profile) with a per-posting user turn, so `src/claude/api.py`

@@ -17,3 +17,19 @@ count = "registration.name.exact"
 search = "registration.state_code:{state}"
 # One clause per [discovery].registry_specialties entry, ORed in.
 specialty_search = 'products.openfda.medical_specialty_description.exact:"{value}"'
+
+# Google Jobs, read through an Apify actor (APIFY_API_KEY): who is hiring
+# for [sources.google_jobs]'s searches near you. Free Apify plans can run
+# this actor; memo23/google-jobs-scraper refused them, and no actor tried
+# returned apply links on the free plan (2026-10-12), so the employer NAME
+# is what a posting gives the resolver.
+[google_jobs]
+actor = "khadinakbar/google-jobs-scraper"
+# The actor's input. A string value that is exactly "{searches}" (the
+# "<query> <location>" list), "{queries}", "{locations}" or "{max_items}"
+# is replaced by that value. `maxResults` caps the whole run.
+input = { searchQueries = "{searches}", maxResults = "{max_items}" }
+# Item keys of a posting's employer, location and title; first present wins.
+company_keys = ["company_name", "companyName", "company"]
+location_keys = ["location"]
+title_keys = ["job_title", "title"]

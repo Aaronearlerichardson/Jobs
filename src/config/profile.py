@@ -293,6 +293,9 @@ DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
 # minutes of rate-limit stalls across a full ~100+ name gather); 0 disables
 # the bulk websearch pass entirely.
 DISCOVERY_WEBSEARCH_CAP      = PROFILE.discovery.websearch_cap
+# Firecrawl credits one run may spend on web searches DuckDuckGo missed
+# (src/net/firecrawl.py); 0 never asks Firecrawl.
+DISCOVERY_FIRECRAWL_CREDITS  = PROFILE.discovery.firecrawl_credits
 DISCOVERY_MISS_RETRY_DAYS    = PROFILE.discovery.miss_retry_days
 # Job-aggregator hosts to skip, and generic words to ignore, when resolving a
 # search result to a company's own ATS board (src/discovery/websearch_board.py).

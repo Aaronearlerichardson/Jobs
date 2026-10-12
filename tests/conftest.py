@@ -76,6 +76,9 @@ def _no_network(monkeypatch):
     # A developer's .env key must not reach a test (CI has none): with it,
     # a careers page asks Claude before its links (custom.claude_page).
     monkeypatch.setattr(_config, "ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY_HERE")
+    # Nor a paid search's: with it, every search DDG missed asks Firecrawl.
+    monkeypatch.setattr(_config, "FIRECRAWL_API_KEY", "")
+    monkeypatch.setattr(_config, "APIFY_API_KEY", "")
     # The resolver's domain lookup is a network call: off unless a test says so.
     monkeypatch.setattr(_config, "DISCOVERY_DOMAIN_LOOKUP", False)
     # Likewise the board directory, which reads a remote dataset.

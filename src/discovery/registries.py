@@ -7,11 +7,16 @@ already holds, ranks the rest by how much their project titles read like the
 mission-aligned employers' (`vocab.title_vocab`), and resolves the
 best unprocessed batch at a time, queueing boards for review as
 `registry:<name>` and recording the rest as misses.
+
+`google_jobs` is the paid one: employers hiring near you for your kind of
+role, as Google Jobs lists them, read through an Apify actor.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import date
@@ -21,9 +26,10 @@ from typing import NamedTuple, cast
 from pydantic import BaseModel
 
 from src import config, store
+from src.match.locality import is_nc
 from src.match.names import junk_name_reason, name_key, strip_suffixes
-from src.net import http
-from src.net.util import cache_dir, json_cache_get, json_cache_put
+from src.net import apify, http
+from src.net.util import cache_dir, hashed_cache_path, json_cache_get, json_cache_put
 from src.net.util import JSON
 from src.rows import str_or_none
 from .local_sourcing import queue_names
@@ -69,9 +75,21 @@ def _clean(name: str | None) -> str:
     return strip_suffixes(n.title() if n.isupper() else n)
 
 
-def _named(rows: Iterable[tuple[str | None, str | None, str | None]], label: str
-           ) -> list[NamedSource]:
-    """One source per distinct, employer-shaped cleaned name of the
+def _display(name: str | None) -> str:
+    """A job listing's employer name less a trailing legal form. Its
+    industry words stay (`_clean` drops them): a listing names the
+    employer as it calls itself, not by its registered legal name.
+
+    >>> _display("Ten63 Therapeutics, Inc."), _display("CVS Health"), _display(None)
+    ('Ten63 Therapeutics', 'CVS Health', '')
+    """
+    return re.sub(r"[,\s]+(?:inc|incorporated|llc|l\.l\.c|ltd|corp|corporation|co|plc|gmbh|lp|llp)"
+                  r"\.?$", "", (name or "").strip(), flags=re.IGNORECASE)
+
+
+def _named(rows: Iterable[tuple[str | None, str | None, str | None]], label: str,
+           clean: Callable[[str | None], str] = _clean) -> list[NamedSource]:
+    """One source per distinct, employer-shaped `clean` name of the
     (name, city, text) `rows`, in order of first appearance, its distinct
     texts joined as the blurb.
 
@@ -81,7 +99,7 @@ def _named(rows: Iterable[tuple[str | None, str | None, str | None]], label: str
     """
     out: dict[str, NamedSource] = {}
     for raw, city, text in rows:
-        name = _clean(raw)
+        name = clean(raw)
         if not name or junk_name_reason(name):
             continue
         key = name_key(name)
@@ -186,8 +204,109 @@ async def openfda_devices(state: str) -> list[NamedSource]:
     return _named(fda_rows(data), "openfda_devices")
 
 
+def fill(template: Mapping[str, JSON], values: Mapping[str, JSON]) -> dict[str, JSON]:
+    """`template` with each string value that is exactly "{name}", for a
+    name in `values`, replaced by that value.
+
+    >>> fill({"q": "{searches}", "n": "{max_items}", "c": "us", "x": "{other}"},
+    ...      {"searches": ["a b"], "max_items": 5})
+    {'q': ['a b'], 'n': 5, 'c': 'us', 'x': '{other}'}
+    """
+    return {k: values.get(v[1:-1], v) if isinstance(v, str) and v[:1] == "{" and v[-1:] == "}"
+            else v for k, v in template.items()}
+
+
+def places(locations: Sequence[str], substrings: Sequence[str], state_suffix: Sequence[str]
+           ) -> list[str]:
+    """`locations` when given, else "<Place>, <ST>" for each [locality]
+    place `substrings` names that is not the state itself.
+
+    >>> places([], ["north carolina", "durham", "chapel hill"], ["nc", "north carolina"])
+    ['Durham, NC', 'Chapel Hill, NC']
+    >>> places(["Austin, TX"], ["durham"], ["nc"]), places([], ["durham"], ["texas"])
+    (['Austin, TX'], [])
+    """
+    if locations:
+        return list(locations)
+    state = state_code(state_suffix)
+    states = {s.lower() for s in state_suffix}
+    return [f"{p.title()}, {state}" for p in substrings if p.lower() not in states] if state else []
+
+
+def searches(queries: Sequence[str], where: Sequence[str], cap: int) -> list[str]:
+    """"<query> <place>" for every query in the first place, then the
+    second, and so on: at most `cap`.
+
+    >>> searches(["data scientist", "bioinformatics"], ["Durham, NC", "Cary, NC"], 3)
+    ['data scientist Durham, NC', 'bioinformatics Durham, NC', 'data scientist Cary, NC']
+    """
+    return [f"{q} {p}" for p in where for q in queries][:cap]
+
+
+def posting_rows(items: Iterable[Mapping[str, JSON]], keys: Mapping[str, Sequence[str]],
+                 local: Callable[[str | None], bool] = is_nc
+                 ) -> list[tuple[str | None, str | None, str | None]]:
+    """(employer, city, title) of each posting whose location is `local`
+    (in your [locality]), each read from the first of its `keys`
+    ("company", "location", "title" lists) the item has.
+
+    >>> keys = {"company": ["company_name", "company"], "location": ["location"],
+    ...         "title": ["job_title"]}
+    >>> posting_rows([{"company": "Acme Bio", "location": "Here, ST", "job_title": "ML"},
+    ...               {"company_name": "Far Co", "location": "Anywhere", "job_title": "ML"}],
+    ...              keys, local=lambda where: where == "Here, ST")
+    [('Acme Bio', 'Here', 'ML')]
+    """
+    def first(item: Mapping[str, JSON], field: str) -> str | None:
+        return next((v for k in keys[field] if (v := str_or_none(item.get(k)))), None)
+    rows: list[tuple[str | None, str | None, str | None]] = []
+    for item in items:
+        where = first(item, "location")
+        if local(where):
+            rows.append((first(item, "company"), (where or "").split(",")[0].strip(),
+                         first(item, "title")))
+    return rows
+
+
+async def google_jobs(state: str) -> list[NamedSource]:
+    """Employers with a posting in your [locality] that Google Jobs lists
+    for the [sources.google_jobs] searches, their job titles as the blurb:
+    the `google_jobs` spec's Apify actor, run at most once per
+    `refresh_days` (a dry run and the --apply after it share one run)."""
+    cfg, spec = config.GOOGLE_JOBS, config.REGISTRIES["google_jobs"]
+    track = config.track_for_engine("local")
+    kw = config.KEYWORDS_BY_TRACK.get(track.id)
+    queries = cfg.queries or (kw.core if kw else [])
+    where = places(cfg.locations, config.LOCALITY_SUBSTRINGS, config.LOCALITY_STATE_SUFFIX)
+    wanted = searches(queries, where, cfg.max_searches)
+    if not wanted:
+        print("  google_jobs skipped: needs [sources.google_jobs] queries and locations "
+              "(or a location-scoped track's core keywords and [locality] places)")
+        return []
+    run_input = fill(spec["input"], {"searches": wanted, "queries": list(queries),
+                                     "locations": where, "max_items": cfg.max_items})
+    path = hashed_cache_path(cache_dir("google_jobs"),
+                             json.dumps([spec["actor"], run_input], sort_keys=True))
+    items = cast(list[Mapping[str, JSON]] | None,
+                 await asyncio.to_thread(json_cache_get, path, cfg.refresh_days * 86400))
+    if items is None:
+        print(f"  google_jobs: {len(wanted)} search(es), at most {cfg.max_items} postings "
+              f"and ${cfg.max_charge_usd:.2f}")
+        items = await apify.run_actor(spec["actor"], run_input, max_charge_usd=cfg.max_charge_usd)
+        if items is None:
+            return []
+        await asyncio.to_thread(json_cache_put, path, items)
+    keys = {"company": spec["company_keys"], "location": spec["location_keys"],
+            "title": spec["title_keys"]}
+    # An employer field that names one of your places ("nc") names no employer.
+    here = {name_key(p) for p in (*config.LOCALITY_SUBSTRINGS, *config.LOCALITY_WORD_TOKENS,
+                                  *config.LOCALITY_STATE_SUFFIX)}
+    rows = [r for r in posting_rows(items, keys) if name_key(r[0]) not in here]
+    return _named(rows, "google_jobs", clean=_display)
+
+
 READERS: dict[str, Callable[[str], Awaitable[list[NamedSource]]]] = {
-    "nih_sbir": nih_sbir, "openfda_devices": openfda_devices}
+    "nih_sbir": nih_sbir, "openfda_devices": openfda_devices, "google_jobs": google_jobs}
 
 
 def ranked(sources: Iterable[NamedSource], vocab: dict[str, float]) -> list[NamedSource]:

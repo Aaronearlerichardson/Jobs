@@ -86,6 +86,17 @@ RSS_FEEDS: list[tuple[str, str, str]] = [(f.label or f.url, f.url, f.location)
 # the jobhive dataset of live postings, read for boards the roster lacks.
 BOARD_DIRECTORY = _src.board_directory
 
+# Google Jobs — [sources.google_jobs] (the `google_jobs` registry,
+# src/discovery/registries.py): the searches an Apify actor runs for
+# employers hiring near you, and what one run may cost.
+GOOGLE_JOBS = _src.google_jobs
+
 # Wikidata's API: the domain lookup's fallback (src/discovery/resolve/domain.py)
 # and tools/miss_cleanup.py.
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+
+# The two paid APIs discovery may use, each only with its key set:
+# Firecrawl's search (src/net/firecrawl.py) and Apify's actor runs
+# (src/net/apify.py).
+FIRECRAWL_API = "https://api.firecrawl.dev/v2"
+APIFY_API = "https://api.apify.com/v2"

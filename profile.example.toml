@@ -478,6 +478,20 @@ min_gate_titles = 1          # local title-gate passes a board needs to be impor
 max_scored_per_run = 200     # mission scores per --apply run (about $1)
 refresh_days = 7
 
+# Google Jobs: who is hiring near you for your kind of role, read through an
+# Apify actor (APIFY_API_KEY) when "google_jobs" is in [discovery].registries.
+# Each employer the roster lacks is resolved to its board and queued for
+# review like any registry name. Paid: one run reads `max_items` postings
+# and charges at most `max_charge_usd`; its postings are reused for
+# `refresh_days`, so a dry run and the --apply after it cost one run.
+[sources.google_jobs]
+queries = []                 # [] = the location-scoped track's core keywords
+locations = []               # "City, ST"; [] = your [locality] places
+max_searches = 12            # query x location pairs per run
+max_items = 100
+max_charge_usd = 0.5
+refresh_days = 7
+
 # ---------------------------------------------------------------------------
 # Discovery — how the roster of companies to crawl gets built (discover.py).
 # Everything here is a starting pool; each name is probed for a real job board
@@ -508,7 +522,8 @@ domain_lookup_urls = ["https://autocomplete.clearbit.com/v1/companies/suggest?qu
 domain_hosts = ["{domain}", "careers.{domain}", "jobs.{domain}"]
 locale_paths = ["/us/en", "/en-us", "/en"]
 # Structured name registries read by `discover.py --registries`; the state is
-# the first two-letter [locality].state_suffix entry.
+# the first two-letter [locality].state_suffix entry. Add "google_jobs" (paid,
+# see [sources.google_jobs]) to read who is hiring near you.
 registries = ["nih_sbir", "openfda_devices"]
 # openFDA lists every device establishment, distributors included; keep the
 # ones with a device in these medical specialties (openFDA's own labels, e.g.
@@ -530,6 +545,10 @@ name_blocklist = []
 # after probe+sniff leave them unboarded (DDG rate-limits, so this is capped
 # rather than run over the whole gather). Omit for the built-in default (20).
 # websearch_cap = 20
+# With FIRECRAWL_API_KEY set, a discovery search DuckDuckGo misses is asked
+# of Firecrawl instead: at most this many credits per run (2 per 10
+# results; its free plan has 1,000 a month). 0 never asks it.
+# firecrawl_credits = 100
 # Days a name that missed (no board found) is skipped by every discovery
 # rerun before it is tried again; 0 retries every miss every run.
 # miss_retry_days = 14

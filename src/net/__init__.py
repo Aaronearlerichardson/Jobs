@@ -4,7 +4,9 @@
                  limiter, fetch accounting
     robots.py    robots.txt parsing and the per-host crawl-delay
     parallel.py  the task fan-outs, their watchdogs, and a single-flight memo
-    ddg.py       DuckDuckGo search
+    ddg.py       web search: DuckDuckGo, Firecrawl behind it
+    firecrawl.py Firecrawl's paid search, within a run's credits
+    apify.py     one paid Apify actor run and its results
     util.py      small shared helpers (worker counts, id and date norms)
 """
 

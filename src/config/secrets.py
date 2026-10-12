@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # scope lives in profile [sources.usajobs].
     usajobs_api_key: str = ""
     usajobs_email: str = ""
+    # Firecrawl search (https://firecrawl.dev): discovery's web search when
+    # DuckDuckGo misses (src/net/firecrawl.py). Paid in credits;
+    # [discovery].firecrawl_credits caps a run.
+    firecrawl_api_key: str = ""
+    # Apify (https://apify.com): runs the `google_jobs` registry's actor
+    # (src/net/apify.py). Paid per run; [sources.google_jobs] caps one.
+    apify_api_key: str = ""
     # Where things live (src/config/paths.py, src/config/profile.py,
     # src/config/unpack_cache.py).
     jobs_data_dir: Path | None = None
@@ -149,3 +156,5 @@ CAREERONESTOP_USER_ID = SETTINGS.careeronestop_user_id
 CAREERONESTOP_TOKEN = SETTINGS.careeronestop_token
 USAJOBS_API_KEY = SETTINGS.usajobs_api_key
 USAJOBS_EMAIL = SETTINGS.usajobs_email
+FIRECRAWL_API_KEY = SETTINGS.firecrawl_api_key
+APIFY_API_KEY = SETTINGS.apify_api_key

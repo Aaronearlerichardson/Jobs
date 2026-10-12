@@ -24,10 +24,12 @@ async def fetch_websearch(label: str, query: str, max_results: int = 15,
                           gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
     """
     Run one DDG query; for each result URL, scan for JSON-LD JobPosting.
-    `label` is used as the company name when we can't infer one.
+    `label` is used as the company name when we can't infer one. The
+    crawl runs these every day, so never on Firecrawl's paid fallback:
+    its credits are discovery's.
     """
     print(f"    -> Query: {query!r}")
-    results = await ddg.search(query, max_results=max_results)
+    results = await ddg.search(query, max_results=max_results, fallback=False)
     if not results:
         return []
 

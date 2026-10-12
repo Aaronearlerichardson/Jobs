@@ -1,4 +1,4 @@
-"""The one DuckDuckGo text-search client.
+"""The one web text-search client: DuckDuckGo, and Firecrawl behind it.
 
 DDG is the crawl's single biggest time sink: a plain `DDGS().text(q)` has no
 wall-clock bound, so when DDG rate-limits (frequent), the library's internal
@@ -9,6 +9,10 @@ dork sweep, the websearch fetcher) goes through `search`, which has:
   * one disk cache (7-day TTL) so repeat runs -- and repeat queries within a
     run -- return instantly instead of re-hitting DDG; only genuine non-empty
     hits are cached, so a throttled/empty query is retried next run;
+  * one paid fallback: a first page DDG missed is asked of Firecrawl
+    (src.net.firecrawl, when FIRECRAWL_API_KEY is set), within the run's
+    credits; discovery's searches take it, the crawl's websearch feed
+    does not;
   * one wall-clock budget per query: the library runs on a daemon thread
     of its own, the caller stops waiting for it at the deadline
     (asyncio.timeout), and it starts no retry once no one waits, so one
@@ -41,6 +45,7 @@ from types import ModuleType
 from typing import Protocol, TypedDict, cast
 
 from src import config, runstate
+from src.net import firecrawl
 from src.net.util import JSON, hashed_cache_path, json_cache_get, json_cache_put
 
 # File-only diagnostics (session log DEBUG channel -- never printed).
@@ -48,6 +53,10 @@ _log = logging.getLogger("discovery")
 
 CACHE_DIR = config.DATA_DIR / ".cache" / "ddg"
 RETRY_PAUSE = 2.5               # seconds, scaled by the attempt number
+# DDG misses in a row (empty, throttled or timed out) after which a
+# fallback search goes to Firecrawl first: on a throttled day each miss
+# costs up to a whole `budget`.
+MISS_STREAK = 3
 
 # ddgs (via primp) resolves hostnames with its OWN resolver rather than the
 # OS one, and on a multi-adapter machine (VPN up, Wi-Fi also up) it can pick
@@ -79,15 +88,17 @@ class _Ddgs(Protocol):
 
 
 class _Searches:
-    """What a run's searches share: the resolver breaker, and whether the
-    missing package was announced. Their threads share it too, hence the
-    lock."""
+    """What a run's searches share: the resolver breaker, whether the
+    missing package was announced, and DDG's miss streak. Their threads
+    share it too, hence the lock."""
 
     def __init__(self) -> None:
         self.down_until = 0.0       # time.monotonic() deadline of the window
         self.backoff = 0.0          # current window; 0 = breaker closed
         self.probing = False        # a probe is in flight; others keep skipping
         self.missing_announced = False
+        self.misses = 0             # DDG misses in a row (read on the loop only)
+        self.firecrawl_first = False    # announced: Firecrawl now answers first
         self.lock = threading.Lock()
 
 
@@ -350,18 +361,53 @@ def _on_own_thread[T](loop: asyncio.AbstractEventLoop, fn: Callable[[threading.E
 
 
 async def search(query: str, max_results: int = 10, page: int = 1, budget: float = 25.0,
-                 retries: int = 2) -> list[Hit]:
-    """Bounded, cached, retried DDG text search. Returns a list of result
+                 retries: int = 2, fallback: bool = True) -> list[Hit]:
+    """Bounded, cached, retried web text search. Returns a list of result
     dicts (each with 'href'/'title'/...), or [] on miss, timeout or missing
     package -- every caller already tolerates an empty list. `budget` is
-    the hard per-query wall-clock cap, in seconds. The disk cache is read
-    and written off the loop."""
+    DDG's hard per-query wall-clock cap, in seconds. The disk cache is read
+    and written off the loop.
+
+    With `fallback`, a first page DDG missed is asked of Firecrawl
+    (`firecrawl.search`), whose answer is cached even when empty: it is
+    an answer, not a throttle. After MISS_STREAK DDG misses in a row,
+    Firecrawl is asked first and a later page not at all, until the run's
+    Firecrawl credits are spent.
+    """
     key = f"{query}||{max_results}" + (f"||page={page}" if page != 1 else "")
     cached = await asyncio.to_thread(cache_get, key)
     if cached is not None:
         hits = cast(list[Hit], cached)
         _log.debug("ddg cache hit (%d result(s)): %s", len(hits), query)
         return hits
+    s = _SEARCHES()
+    skip = fallback and s.misses >= MISS_STREAK and firecrawl.usable(max_results)
+    if skip and not s.firecrawl_first:
+        s.firecrawl_first = True
+        print(f"  web search: DuckDuckGo missed {s.misses} in a row; Firecrawl "
+              f"answers first for the rest of this run")
+    hits: list[Hit] = [] if skip else await _ddg(query, max_results, page, budget, retries)
+    if hits:
+        s.misses = 0
+        await asyncio.to_thread(cache_put, key, hits)       # cache only genuine hits
+        return hits
+    if not skip:
+        s.misses += 1
+    if not fallback or page != 1:
+        return []
+    found = await firecrawl.search(query, max_results)
+    if found is None:
+        return []
+    hits = [{"href": r.url, "title": r.title, "body": r.description} for r in found]
+    _log.debug("firecrawl answered, %d result(s): %s", len(hits), query)
+    await asyncio.to_thread(cache_put, key, hits)
+    return hits
+
+
+async def _ddg(query: str, max_results: int, page: int, budget: float,
+               retries: int) -> list[Hit]:
+    """`search`'s DDG query, uncached: [] on a miss, a timeout, a missing
+    package or while the resolver breaker is open."""
     probe = _resolver_gate()
     if probe is None:
         _log.debug("ddg skipped, resolver breaker tripped: %s", query)
@@ -393,8 +439,6 @@ async def search(query: str, max_results: int = 10, page: int = 1, budget: float
     if out is None:                      # no ddgs package (announced)
         return []
     _log.debug("ddg live query, %d result(s): %s", len(out), query)
-    if out:                              # cache only genuine hits
-        await asyncio.to_thread(cache_put, key, out)
     return out
 
 

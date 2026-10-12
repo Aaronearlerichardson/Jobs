@@ -1,7 +1,8 @@
 """The registry name sources, offline.
 
-Both APIs are served from tests/fixtures; the resolver and the store are the
-test's own (the in-memory store, a stand-in for `queue_names`).
+The public APIs are served from tests/fixtures, Apify's from the test; the
+resolver and the store are the test's own (the in-memory store, a stand-in
+for `queue_names`).
 """
 
 import pytest
@@ -49,6 +50,55 @@ async def test_openfda_specialties_narrow_the_query(serve, monkeypatch):
     await reg.openfda_devices("NC")
     assert sent[0].kw["params"]["search"].endswith('AND (products.openfda.medical_specialty_'
                                                    'description.exact:"Radiology")')
+
+
+def _run(status, **more):
+    return fake_response({"data": {"id": "r1", "status": status, **more}})
+
+
+class TestGoogleJobs:
+    """The paid registry: one Apify actor run, cached; the employers of its
+    postings in your locality, under the names they post as."""
+
+    @pytest.fixture(autouse=True)
+    def _wire(self, monkeypatch, tmp_path, local_addr, elsewhere):
+        monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(config, "APIFY_API_KEY", "k")
+        monkeypatch.setattr(config, "GOOGLE_JOBS", config.PROFILE.sources.google_jobs.model_copy(
+            update={"queries": ["data scientist"], "locations": [local_addr]}))
+        self.search = f"data scientist {local_addr}"
+        self.items = [
+            {"company_name": "Ten63 Therapeutics, Inc.", "location": local_addr,
+             "job_title": "Data Scientist"},
+            {"company_name": "Ten63 Therapeutics", "location": local_addr, "job_title": "ML Engineer"},
+            {"company_name": "Far Away Co", "location": elsewhere, "job_title": "Data Scientist"},
+            {"company_name": None, "location": local_addr, "job_title": "Analyst"},
+            {"company_name": local_addr.split(",")[0], "location": local_addr,
+             "job_title": "Clinical Informatics Director"}]
+
+    async def test_local_employers_once_each_with_their_titles_and_one_paid_run(self, serve):
+        sent = serve({"/runs": _run("SUCCEEDED", defaultDatasetId="d1", usageTotalUsd=0.02),
+                      "datasets/d1/items": fake_response(self.items)})
+        got = await reg.google_jobs("ST")
+        assert [(s.name, s.blurb, s.source) for s in got] == [
+            ("Ten63 Therapeutics", "Data Scientist; ML Engineer", "registry:google_jobs")]
+        assert sent[0].kw["json"] == {"searchQueries": [self.search], "maxResults": 100}
+        assert sent[0].params["maxTotalChargeUsd"] == 0.5
+        assert [s.name for s in await reg.google_jobs("ST")] == ["Ten63 Therapeutics"]
+        assert len(sent) == 2                       # the second read is the cached run's
+
+    async def test_a_running_actor_is_polled_and_a_failed_run_names_no_one(self, serve, capsys):
+        sent = serve({"/runs": _run("RUNNING"),
+                      "actor-runs/r1": _run("FAILED", statusMessage="quota")})
+        assert await reg.google_jobs("ST") == []
+        assert [r.url.rsplit("/", 1)[-1] for r in sent] == ["runs", "r1"]
+        assert "run FAILED" in capsys.readouterr().out
+
+    async def test_no_key_runs_nothing(self, serve, monkeypatch, capsys):
+        monkeypatch.setattr(config, "APIFY_API_KEY", "")
+        sent = serve({})
+        assert await reg.google_jobs("ST") == [] and sent == []
+        assert "APIFY_API_KEY" in capsys.readouterr().out
 
 
 class TestDiscoverRegistries:

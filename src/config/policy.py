@@ -385,6 +385,10 @@ ROBOTS_EXEMPT_HOSTS = tuple(
 SEARCH_DNS_FALLBACK = tuple(
     s.strip() for s in _pol.search_dns_fallback if s.strip())
 
+# Seconds between two Firecrawl searches (src/net/firecrawl.py): its free
+# plan answers 10 a minute and 429s the rest.
+FIRECRAWL_GAP_S = 6.0
+
 # robots.txt fetch timeouts, as (connect, read).
 #
 # Split because the two phases fail for different reasons. Discovery probes a

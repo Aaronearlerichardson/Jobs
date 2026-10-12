@@ -405,6 +405,22 @@ class BoardDirectory(_Table):
     refresh_days: Count = 7
 
 
+class GoogleJobs(_Table):
+    # Job searches, each run in each of `locations`; [] -> the core
+    # keywords of the location-scoped track.
+    queries: list[str] = []
+    # "City, ST" places; [] -> your [locality] places with its state code.
+    locations: list[str] = []
+    # (query, location) pairs one run searches, every query in the first
+    # location before the second.
+    max_searches: Annotated[int, Field(ge=1)] = 12
+    # Postings one run reads, and the most it may charge (USD).
+    max_items: Annotated[int, Field(ge=1)] = 100
+    max_charge_usd: Annotated[float, Field(gt=0)] = 0.5
+    # Days one run's postings are reused before the actor runs again.
+    refresh_days: Count = 7
+
+
 class Sources(_Table):
     remoteok: bool = True
     remotive: bool = True
@@ -418,6 +434,7 @@ class Sources(_Table):
     usajobs: Usajobs = Field(default_factory=Usajobs)
     getro: Getro = Field(default_factory=Getro)
     board_directory: BoardDirectory = Field(default_factory=BoardDirectory)
+    google_jobs: GoogleJobs = Field(default_factory=GoogleJobs)
 
 
 # --- [discovery] -------------------------------------------------------------
@@ -458,7 +475,9 @@ class Discovery(_Table):
     # Tried after a seeded host's root, which some careers sites refuse.
     locale_paths: list[str] = ["/us/en", "/en-us", "/en"]
     # Structured name registries `discover.py --registries` reads.
-    registries: list[Literal["nih_sbir", "openfda_devices"]] = [
+    # "google_jobs" is paid (APIFY_API_KEY, [sources.google_jobs]): add it
+    # to opt in.
+    registries: list[Literal["nih_sbir", "openfda_devices", "google_jobs"]] = [
         "nih_sbir", "openfda_devices"]
     # openFDA medical specialties worth reading (its own labels); [] = all.
     registry_specialties: list[str] = []
@@ -466,6 +485,9 @@ class Discovery(_Table):
     brainstorm_names: Count = 50
     name_blocklist: list[str] = []
     websearch_cap: Count = 20
+    # Firecrawl credits a run may spend searching what DuckDuckGo missed
+    # (FIRECRAWL_API_KEY; 2 credits per 10 results); 0 never asks it.
+    firecrawl_credits: Count = 100
     # Days a name that missed is skipped by every discovery rerun; 0 = never.
     miss_retry_days: Count = 14
     aggregator_hosts: list[str] = []
