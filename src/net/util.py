@@ -251,7 +251,7 @@ def parse_markup(markup: str | bytes | None, xml: bool = False, url: str = "") -
         fatal = None if xml else parser.error_log.filter_from_fatals()
         if root is not None and not fatal:
             for sib in list(root.itersiblings(etree.Element)):
-                root.extend(sib)
+                root.extend(list(sib))     # its children: sib is the parser's second <html>
             return root
         reason = f"lxml gave up: {fatal[0].message.strip()}" if fatal else "lxml found no document"
     host = host_of(url) or "?"

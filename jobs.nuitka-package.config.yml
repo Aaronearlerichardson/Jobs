@@ -38,9 +38,16 @@
 # own _libs directory to the DLL search path (os.add_dll_directory) and the
 # extension modules load duckdb.dll / libduckdb from there at import. Nuitka
 # sees no import of that file, so ship every file in _libs to the same place.
-- module-name: 'bareduckdb' # checksum: e319b240
+# Its compiled modules also import each other from C (connection imports
+# result and python_to_value), which Nuitka cannot follow: without the
+# implicit imports the exe answered "No module named
+# 'bareduckdb.core.impl.result'" at the first query (2026-10-13 log).
+- module-name: 'bareduckdb' # checksum: e7ed8b1f
   dlls:
     - from_filenames:
         relative_path: '_libs'
         prefixes:
           - ''
+  implicit-imports:
+    - depends:
+        - 'iterate_modules("bareduckdb.core.impl")'
