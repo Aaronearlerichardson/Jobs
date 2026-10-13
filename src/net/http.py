@@ -525,6 +525,15 @@ async def request_json(method: str, url: str, label: str | None = None, *,
     decoded off the loop, its failure counted here (`_account`)."""
     _account()
     status, r, err = await request(method, url, label, polite=polite, **kw)
+    return await json_reply(status, r, err, label)
+
+
+async def json_reply(status: int | None, r: requests.Response | None,
+                     err: str | Exception | None, label: str | None = None
+                     ) -> tuple[int | None, JSON, str | Exception | None]:
+    """`request_json`'s answer from `request`'s, for a caller that looks
+    at the response before decoding it."""
+    _account()
     return await asyncio.to_thread(_json_of, status, r, err, label)
 
 

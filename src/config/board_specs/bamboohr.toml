@@ -19,6 +19,7 @@ re = '(?i)//([a-z0-9-]+)\.bamboohr\.com/careers/(\d+)'
 
 [listing]
 url = "https://{slug}.bamboohr.com/careers/list"
+missing_at = '(?i)^https?://(?:www\.)?bamboohr\.com(?:[/?#]|$)'
 decoder = { entries = "result" }
 
 [listing.fields]

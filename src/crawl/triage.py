@@ -694,15 +694,22 @@ def _print_waiting(rows: list[tuple[CompanyRow, JobRow]], reasons: dict[str, str
 
 async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], summary: dict[str, float], score_cap: int, fit: bool,
                  max_workers: int) -> tuple[dict[str, FitResult], set[str]]:
-    """Phase 4: the only paid step, best companies first, under the cap.
+    """Phase 4: the only paid step, best companies first, under the cap;
+    within a mission tie, titles that read in-field (`is_relevant`) first.
 
     Returns (scores, over_cap). Rows over the cap stay pending -- their
     bodies are stored now, so the next pass reaches them for free. A row
     the scorer refuses for a body under fit.MIN_DESC_CHARS (its SKIP-SCORE
     print) is counted in summary['skip_score'].
+
+    Notes:
+        Mission alone left a roster with no mission scores (the 2026-10-12
+        restore) in arrival order: the cap went on A-named companies,
+        twenty-odd BCBA postings among them, while 1357 rows waited.
     """
     order = sorted(final.values(),
-                   key=lambda x: -(x[0].get("mission_score") or 0.0))
+                   key=lambda x: (-(x[0].get("mission_score") or 0.0),
+                                  not is_relevant(x[1].get("title") or "")))
     to_score: list[tuple[CompanyRow, JobRow, list[str], str]] = order[:score_cap] if fit else []
     over_cap: set[str] = {x[1]["job_id"] for x in order[score_cap:]} if fit else set()
     scores: dict[str, FitResult] = {}

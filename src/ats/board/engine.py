@@ -601,17 +601,18 @@ class Board:
         if timeout:
             kw["timeout"] = timeout
         url = url or fields.fmt(req.url, lambda k: parts[k] if k in parts else named.get(f"${k}"))
+        status, r, err = await http.request(req.method, url, label, **kw)
+        if err or r is None:
+            return status, None, err
+        # An unknown handle's 200 is the vendor's own page, not an empty
+        # board: JazzHR sent 20 phantom boards to its job-seekers page
+        # every pass, read as boards listing nothing (2026-10-08); BambooHR
+        # sends them to its home page, read as "non-JSON response" (2026-10-12).
+        if isinstance(req, Listing) and req.missing_at and re.search(req.missing_at, r.url or ""):
+            return 404, None, http.failed(label, f"HTTP 404: redirected to {r.url}")
         if dec.kind == "json":
-            status, payload, err = await http.request_json(req.method, url, label, **kw)
+            status, payload, err = await http.json_reply(status, r, err, label)
         else:
-            status, r, err = await http.request(req.method, url, label, **kw)
-            if err or r is None:
-                return status, None, err
-            # An unknown handle's 200 is the vendor's own page, not an empty
-            # board: JazzHR sent 20 phantom boards to its job-seekers page
-            # every pass, read as boards listing nothing (2026-10-08).
-            if isinstance(req, Listing) and req.missing_at and re.search(req.missing_at, r.url or ""):
-                return 404, None, http.failed(label, f"HTTP 404: redirected to {r.url}")
             try:
                 payload, hopped = await decode.adecode(dec, r.text, parts, url, vals["$area"],
                                                        hop, str(vals["$employer"] or ""))
@@ -1039,9 +1040,12 @@ class Board:
         adapted, each kept row filled from its detail (`_apply`) where the
         spec is `eager`. The walk reads up to `config.BOARD_MAX_ROWS`; a
         `validate` pull (discovery confirming a board and counting its
-        local postings) reads the pager's own page budget."""
+        local postings) reads the pager's own page budget. A row whose
+        handle is missing a part is a reported failure, not an empty board."""
         handle = self.handle(company)
         if not handle:
+            held = str(company.get(self._columns[0]) or company.get("slug") or "")
+            http.failed(self._label(held), f"handle {held!r} names no board")
             return []
         rows = await self._pull(handle, self._label(handle), loc_re,
                                 None if validate else config.BOARD_MAX_ROWS, employer)

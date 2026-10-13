@@ -6,8 +6,9 @@
 #     renders no posting (60 listed live, 63 pulled, 2026-09-28).
 
 # The CXS API URL first (the tenant appears twice), then any board
-# URL; the site slot after an optional locale, never an API or
-# asset segment.
+# URL; the site slot after an optional locale (bare "/en/" too:
+# haemonetics was probed as site "en" and "es", 2026-10-12), never an
+# API or asset segment.
 [[detect]]
 host = "myworkdayjobs.com"
 re = [
@@ -18,7 +19,7 @@ transform = ["lower", "int", "keep"]
 [[detect]]
 host = "myworkdayjobs.com"
 re = [
-    '(?i)https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com(?:/[a-z]{2}-[A-Z]{2})?/([A-Za-z0-9_-]+)'
+    '(?i)https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com(?:/[a-z]{2}(?:-[A-Z]{2})?(?=/))?/([A-Za-z0-9_-]+)'
 ]
 transform = ["lower", "int", "keep"]
 blocklist = ["wday", "cxs", "api", "static", "assets", "login"]

@@ -357,7 +357,8 @@ class JsScanProbePool:
         try:
             await page.wait_for_load_state("networkidle", timeout=6000)
         except PlaywrightError as e:
-            _log.debug("js scan %s: networkidle wait: %s", url, e)
+            # First line only: the rest is a multi-line Playwright call log.
+            _log.debug("js scan %s: networkidle wait: %s", url, str(e).partition("\n")[0])
         try:
             cur = page.url
             html = await page.content()
