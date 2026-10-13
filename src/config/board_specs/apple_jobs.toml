@@ -1,0 +1,75 @@
+# One employer's own site; the handle is the location the search is
+# narrowed to, as the site's URLs spell it ("north-carolina-state978").
+#
+# Notes:
+#     The search page renders its results server-side as JSON handed to
+#     JSON.parse as a string, 20 a page; a role open in several places is
+#     listed once per place. jobs.apple.com serves no robots.txt
+#     (2026-10). Added 2026-10-13.
+
+[[detect]]
+host = "jobs.apple.com"
+re = ['''(?i)jobs\.apple\.com/[a-z-]+/search\?[^\s"'<>#]*?\blocation=([a-z0-9-]+)''']
+
+[canary]
+name = "Apple"
+handle = "north-carolina-state978"
+min_jobs = 20
+
+[job_ref]
+re = '(?i)^https?://jobs\.apple\.com/[a-z-]+/details/(\d+)'
+parts = ["positionId"]
+
+[listing]
+url = "https://jobs.apple.com/en-us/search"
+params = { location = "{slug}", page = "$page" }
+pager = { kind = "page", size = 20, start = 1, total = "loaderData.search.totalRecords" }
+
+[listing.decoder]
+kind = "json_in_html"
+regex = '__staticRouterHydrationData\s*=\s*JSON\.parse\('
+entries = "loaderData.search.searchResults"
+
+[listing.fields]
+id = { format = "apple_{positionId}" }
+title = "postingTitle"
+url = { format = "https://jobs.apple.com/en-us/details/{positionId}/{transformedPostingTitle}" }
+location = { first = [
+    { join = ["locations[0].city", "locations[0].stateProvince"], sep = ", " },
+    "locations[0].name"
+] }
+posted_at = "postDateInGMT"
+description = "jobSummary"
+department = "team.teamName"
+
+# A listed location is the one place the search matched, bare ("Cary",
+# "Maiden"); the posting's page names each of its places with a state.
+[rescue]
+when = "always"
+unknown = "^[^,]*$"
+cap = 100
+cache_days = 30
+why = "the listing names a bare place, the posting page its state, 2026-10"
+
+[detail]
+url = "https://jobs.apple.com/en-us/details/{positionId}"
+location = "if_unknown"
+record = "loaderData.jobDetails.jobsData"
+
+[detail.decoder]
+kind = "json_in_html"
+regex = '__staticRouterHydrationData\s*=\s*JSON\.parse\('
+
+[detail.fields]
+location = { join = [{ each = "locations", do = { join = ["city", "stateProvince"], sep = ", " } }], sep = "; " }
+description = { join = [
+    "jobSummary",
+    "description",
+    "minimumQualifications",
+    "preferredQualifications"
+], sep = "\n", transform = "html_text" }
+
+# A removed posting's page answers 200, its embedded record a 404.
+[closure]
+via = "page"
+page_closed = 'jobDetails\\":\{\\"status\\":404'

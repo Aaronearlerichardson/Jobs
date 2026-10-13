@@ -520,6 +520,7 @@
               "one_line",
               "origin",
               "place",
+              "prefix",
               "rstrip_slash",
               "snippet",
               "stable_id",

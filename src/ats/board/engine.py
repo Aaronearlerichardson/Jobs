@@ -987,7 +987,7 @@ class Board:
 
     async def _locate(self, url: str | None, report: bool = False,
                       company: BoardCoords | None = None
-                      ) -> tuple[str, dict[str, JSON] | None, dict[str, StrReader], dict[str, str]]:
+                      ) -> tuple[str, decode.Entry | None, dict[str, StrReader], dict[str, str]]:
         """(location, record, field readers, job_ref parts) for the posting
         `url` names: the location its detail gives ("" on a miss) and the
         record read, None when the location came from the cache, where a
@@ -1126,26 +1126,26 @@ class Board:
         req = listing.model_copy(update={"url": listing.probe_url or listing.url})
         _parts, _s, payload, err = await self._page(req, handle, page_vals(self._pager, 0, 1),
                                                     timeout=config.PROBE_TIMEOUT)
-        entries: list[dict[str, JSON]] = [] if err else decode.entries(payload, listing.decoder)
+        entries: list[decode.Entry] = [] if err else decode.entries(payload, listing.decoder)
         return str(fields.value(spec, entries[0]) or "").strip() if entries else ""
 
     # --- one posting -------------------------------------------------------
 
-    async def _listing_entries(self, handle: str) -> list[dict[str, JSON]] | None:
+    async def _listing_entries(self, handle: str) -> list[decode.Entry] | None:
         """The raw first-page listing entries, memoized for
         config.BOARD_MEMO_S so a board with many stale rows is read once
         per pass, however many callers ask at once. None when the listing
         is unreadable or empty."""
         listing = self._listings[0]
 
-        async def read() -> list[dict[str, JSON]] | None:
+        async def read() -> list[decode.Entry] | None:
             _parts, _s, payload, err = await self._page(
                 listing, handle, page_vals(self._pager, 0, page_size(self._pager)))
             return None if err else decode.entries(payload, listing.decoder) or None
         return await _MEMO().do((self.name, handle), read, ttl=config.BOARD_MEMO_S)
 
     async def _member(self, ref: dict[str, str], job_id: str | None = None
-                      ) -> dict[str, JSON] | None:
+                      ) -> decode.Entry | None:
         """The listing entry for the posting `ref` names: by the posting id
         its URL carries, else by the row id `job_id` (a platform whose
         posting URLs are all the board's own), the rows mapped off the
@@ -1154,7 +1154,8 @@ class Board:
         entries = await self._listing_entries(handle) or []
         if ref.get("jid"):
             want = ref["jid"].lower()
-            return next((e for e in entries if str(e.get("id", "")).lower() == want), None)
+            return next((e for e in entries
+                         if isinstance(e, dict) and str(e.get("id", "")).lower() == want), None)
         parts, want = self._parts(handle), (job_id or "").lower()
         return await asyncio.to_thread(
             lambda: next((e for e in entries
@@ -1201,7 +1202,7 @@ class Board:
 
     async def _posting(self, url: str | None, report: bool = False,
                        company: BoardCoords | None = None
-                       ) -> tuple[dict[str, JSON] | None, dict[str, StrReader], dict[str, str]]:
+                       ) -> tuple[decode.Entry | None, dict[str, StrReader], dict[str, str]]:
         """(record, its field readers, the posting's `job_ref` parts) for
         the posting `url` names (with `company`), read live: the detail
         endpoint, or the listing entry where the platform has none. A
@@ -1256,7 +1257,7 @@ class Board:
                 job["description"] = job["description"][:config.MAX_DESC_CHARS]
         return job
 
-    def _apply(self, job: EngineRow | FetchedJob, rec: dict[str, JSON], fs: dict[str, StrReader],
+    def _apply(self, job: EngineRow | FetchedJob, rec: decode.Entry, fs: dict[str, StrReader],
                ctx: dict[str, str]) -> None:
         """Fill `job` in place from its posting's record: the body when it
         has none; the location as `detail.location` allows ("always",

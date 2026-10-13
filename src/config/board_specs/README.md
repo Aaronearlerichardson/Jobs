@@ -61,12 +61,14 @@ last.
 | 40 | `polymer` | lead | polymer.co | — | — | — | — |
 | 41 | `gusto` | lead | gusto.com | — | — | — | — |
 | 42 | `amazon` | fetchable | amazon.jobs | json · offset pager | detail | eager | Amazon |
-| 43 | `joincom` | fetchable | join.com | json_in_html · page pager | detail | — | Mazars |
-| 44 | `personio` | fetchable | jobs.personio. | xml | detail | — | CLARK |
-| 45 | `manatal` | fetchable | careers-page.com | json · page pager | detail | — | Manatal |
-| 46 | `comeet` | fetchable | comeet.com | json_in_html | listing | — | CHEQ |
-| 47 | `zohorecruit` | fetchable | zohorecruit.com | json_in_html · page pager | detail | — | PSC Biotech |
-| 48 | `paycor` | fetchable | recruitingbypaycor.com | atom | listing | — | Almac Group |
+| 43 | `apple_jobs` | fetchable | jobs.apple.com | json_in_html · page pager | page | — | Apple |
+| 44 | `google_careers` | fetchable | google.com | json_in_html · page pager | page | — | Google |
+| 45 | `joincom` | fetchable | join.com | json_in_html · page pager | detail | — | Mazars |
+| 46 | `personio` | fetchable | jobs.personio. | xml | detail | — | CLARK |
+| 47 | `manatal` | fetchable | careers-page.com | json · page pager | detail | — | Manatal |
+| 48 | `comeet` | fetchable | comeet.com | json_in_html | listing | — | CHEQ |
+| 49 | `zohorecruit` | fetchable | zohorecruit.com | json_in_html · page pager | detail | — | PSC Biotech |
+| 50 | `paycor` | fetchable | recruitingbypaycor.com | atom | listing | — | Almac Group |
 
 ## Notes and workarounds
 
@@ -245,6 +247,22 @@ One employer; the handle is the region the search is narrowed to.
 **Notes.** Spelled as the server spells it (case-sensitive) so a pull stays small. Added 2026-10-07 with a fixture trimmed from a live region search; closure reads a pulled requisition as a zero-hit 200.
 
 - `closure`: a pulled requisition answers 200 with no jobs, 2026-10
+
+### `apple_jobs`
+
+One employer's own site; the handle is the location the search is
+narrowed to, as the site's URLs spell it ("north-carolina-state978").
+
+**Notes.** The search page renders its results server-side as JSON handed to JSON.parse as a string, 20 a page; a role open in several places is listed once per place. jobs.apple.com serves no robots.txt (2026-10). Added 2026-10-13.
+
+- `rescue`: the listing names a bare place, the posting page its state, 2026-10
+
+### `google_careers`
+
+One employer's own site; the handle is the location the search is
+narrowed to, as the site spells it ("North Carolina, USA").
+
+**Notes.** The results page embeds its jobs as positional arrays (AF_initDataCallback ds:1: the jobs, then the total and the page size). robots.txt disallows the results' paging (?page=), so a pull reads the first page, newest first, and a longer board is a capped snapshot: an unlisted posting closes only when its own page says so. Added 2026-10-13.
 
 ### `joincom`
 

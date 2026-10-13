@@ -52,6 +52,8 @@ order = [
     "polymer",
     "gusto",
     "amazon",
+    "apple_jobs",
+    "google_careers",
     "joincom",
     "personio",
     "manatal",

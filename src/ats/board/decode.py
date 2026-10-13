@@ -21,7 +21,7 @@ from .spec import (AtomDecoder, Decoder, Detail, HtmlDecoder, JsonInHtmlDecoder,
 def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | XmlDecoder | HtmlDecoder, text: str,
            parts: dict[str, str], url: str, area: LocationRE | None = None,
            hop: bool = True) -> tuple[JSON, str | None]:
-    """A non-JSON response body (to `url`) as (data, hop): data None when it
+    r"""A non-JSON response body (to `url`) as (data, hop): data None when it
     holds none; hop the openings page to read in its place, when the
     careers-page reader (`custom.read_page`, given `area` and `hop`) names
     one. Raises ValueError when embedded JSON will not parse.
@@ -38,6 +38,12 @@ def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | XmlDecoder | H
     [{'id': '7'}]
     >>> decode(dec, '<p>none</p>', {}, "https://x.test")[0] is None
     True
+
+    JSON a script hands to JSON.parse as a string is decoded once more:
+
+    >>> dec = JsonInHtmlDecoder(kind="json_in_html", regex=r"JSON\.parse\(")
+    >>> decode(dec, '<script>d = JSON.parse("{\\"n\\": 2}")</script>', {}, "https://x.test")[0]
+    {'n': 2}
     """
     if dec.kind == "json_in_html":
         if dec.element is not None:
@@ -45,7 +51,8 @@ def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | XmlDecoder | H
             raw = el.get(dec.attribute) if el is not None else None
             return (json.loads(raw) if raw else None), None
         m = re.search(dec.regex, text) if dec.regex else None
-        return (json.JSONDecoder().raw_decode(text, m.end())[0] if m else None), None
+        found = json.JSONDecoder().raw_decode(text, m.end())[0] if m else None
+        return (json.loads(found) if isinstance(found, str) else found), None
     if dec.kind == "jsonld":
         found = jsonld.postings(text, url)
         if found or not dec.cells:
@@ -81,12 +88,22 @@ async def adecode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | XmlDeco
     return await asyncio.to_thread(decode, dec, text, parts, url, area, hop)
 
 
-def entries(payload: JSON, dec: Decoder) -> list[dict[str, JSON]]:
-    """The postings (dicts) in a payload decoded by `dec`: the first of its
-    entry paths holding a list; a wrong shape is []."""
+#: One listing posting: a dict, or a positional array (google_careers).
+type Entry = dict[str, JSON] | list[JSON]
+
+
+def entries(payload: JSON, dec: Decoder) -> list[Entry]:
+    """The postings in a payload decoded by `dec`: the first of its entry
+    paths holding a list, each a dict or a positional array; a wrong shape
+    is [].
+
+    >>> dec = JsonInHtmlDecoder(kind="json_in_html", regex="x", entries=("[0]",))
+    >>> entries([[["7", "Eng"], {"id": 8}, "junk"], None, 2], dec)
+    [['7', 'Eng'], {'id': 8}]
+    """
     for p in dec.entries:
         if isinstance(found := fields.path(payload, p), list):
-            return [e for e in found if isinstance(e, dict)]
+            return [e for e in found if isinstance(e, (dict, list))]
     return []
 
 

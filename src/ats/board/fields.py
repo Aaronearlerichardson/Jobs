@@ -205,6 +205,9 @@ _ARGUED: dict[str, Callable[[JSON, str], str | int | None]] = {
     # The last n characters lowercased, each run of anything but letters
     # and digits one "-", none at either end.
     "url_key": lambda v, n: re.sub(r"[^a-z0-9]+", "-", str(v).lower())[-int(n):].strip("-"),
+    # The value after a fixed text: a platform's id namespace on an id the
+    # entry reads where no "format" template can (a positional array).
+    "prefix": lambda v, text: f"{text}{v}",
 }
 
 TRANSFORMS: dict[str, Transform] = {
@@ -262,13 +265,17 @@ def merge_locations(primary: JSON, extras: list[JSON] | None) -> str:
 
 def path(obj: JSON, p: str) -> JSON:
     """The value at dotted path `p`; a "[]" step maps over a list, "[n]"
-    takes its nth item.
+    takes its nth item, and a step with no key ("[0]", "[]") applies to
+    the value itself, for a payload of positional arrays.
 
     >>> d = {"a": {"b": 1}, "offices": [{"name": "X"}, {"name": "Y"}, {}]}
     >>> path(d, "a.b"), path(d, "offices[].name"), path(d, "offices[1].name")
     (1, ['X', 'Y', None], 'Y')
     >>> path(d, "a.c"), path(d, "offices[9].name"), path([1], "")
     (None, None, [1])
+    >>> row = ["7", "Engineer", [["Durham, NC, USA", "x"], ["Raleigh, NC, USA", "y"]]]
+    >>> path(row, "[1]"), path(row, "[2].[].[0]"), path(row, "[5]")
+    ('Engineer', ['Durham, NC, USA', 'Raleigh, NC, USA'], None)
     """
     return _getter(p)(obj)
 
@@ -305,7 +312,7 @@ def _getter(p: str) -> Callable[[JSON], JSON]:
         for key, index in steps:
             nxt: list[JSON] = []
             for c in cur:
-                v = c.get(key) if isinstance(c, dict) else None
+                v = c if key == "" else c.get(key) if isinstance(c, dict) else None
                 if index is None:
                     nxt.append(v)
                 elif isinstance(index, int):
@@ -397,6 +404,9 @@ def value(spec: JSON, entry: JSON, ctx: Mapping[str, JSON] | None = None,
     'Eng'
     >>> value({"format": "x_{slug}_{title}"}, e, {"slug": "acme"})
     'x_acme_Eng'
+    >>> pid = {"of": {"first": ["jid", "[0]"]}, "transform": "prefix:g_"}
+    >>> value(pid, ["17", "Eng"]), value(pid, {"jid": "17"}), value(pid, {})
+    ('g_17', 'g_17', None)
     >>> value({"const": "hint", "when": {"eq": ["isRemote", True]}}, e)
     'hint'
     >>> value({"const": "hint", "when": {"contains": ["offices[].name", "tokyo"]}}, e) is None
