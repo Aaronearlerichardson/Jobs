@@ -502,19 +502,15 @@ async def request(method: str, url: str, label: str | None = None, *,
     return r.status_code, r, None
 
 
-def _json_of(status: int | None, r: requests.Response | None, err: str | Exception | None,
-             label: str | None) -> tuple[int | None, JSON, str | Exception | None]:
-    """request_json's answer from request's: "empty response" and
-    "non-JSON response" are errors too."""
-    if err:
-        return status, None, err
-    reply = cast(requests.Response, r)      # there is one when there is no error
+def _json_of(reply: requests.Response) -> tuple[JSON, str | None]:
+    """`reply`'s decoded JSON, or (None, why not): "empty response" or
+    "non-JSON response"."""
     if not reply.content.strip():
-        return status, None, failed(label, "empty response")
+        return None, "empty response"
     try:
-        return status, reply.json(), None
+        return reply.json(), None
     except ValueError:
-        return status, None, failed(label, "non-JSON response")
+        return None, "non-JSON response"
 
 
 async def request_json(method: str, url: str, label: str | None = None, *,
@@ -532,9 +528,13 @@ async def json_reply(status: int | None, r: requests.Response | None,
                      err: str | Exception | None, label: str | None = None
                      ) -> tuple[int | None, JSON, str | Exception | None]:
     """`request_json`'s answer from `request`'s, for a caller that looks
-    at the response before decoding it."""
+    at the response before decoding it. Decoded off the loop, a failure
+    counted on it: the attempt's accounting is the loop's alone."""
     _account()
-    return await asyncio.to_thread(_json_of, status, r, err, label)
+    if err:
+        return status, None, err
+    payload, bad = await asyncio.to_thread(_json_of, cast(requests.Response, r))
+    return status, payload, failed(label, bad) if bad else None
 
 
 async def get_json(url: str, label: str | None, default: JSON = None, **kw: Unpack[SendKw]) -> JSON:

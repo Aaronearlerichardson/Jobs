@@ -157,13 +157,13 @@ def _current() -> Run:
 
 def per_run[T](make: Callable[[], T]) -> Callable[[], T]:
     """A piece of run state: the function returning this run's value,
-    `make()` at its first use in the run."""
+    `make()` at its first use in the run; threads racing that first use
+    all get the one value stored first."""
     def get() -> T:
         state = _current().state
         if get in state:
             return cast(T, state[get])
-        state[get] = made = make()
-        return made
+        return cast(T, state.setdefault(get, make()))
     return get
 
 

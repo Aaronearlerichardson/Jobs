@@ -101,13 +101,13 @@ def _prefilter(substrings: Sequence[str], words: Sequence[str]) -> tuple[str, li
 
 def _try_httpfs() -> bool:
     """Whether DuckDB's httpfs extension installs and loads here."""
-    import duckdb
-    con = duckdb.connect()
+    import bareduckdb
+    con = bareduckdb.connect()
     try:
         con.install_extension("httpfs")
         con.load_extension("httpfs")
         return True
-    except duckdb.Error:
+    except RuntimeError:            # bareduckdb's every engine error
         return False
     finally:
         con.close()
@@ -151,17 +151,16 @@ async def _read(rel: str, sql: str, args: Sequence[str] = ()) -> list[Row] | Non
     if remote and not await asyncio.to_thread(_HTTPFS):
         cached = await _cached(rel)
         src, remote = (str(cached) if cached else ""), False
-    import duckdb
     try:
         return await asyncio.to_thread(query, src, sql, args, remote) if src else None
-    except duckdb.Error as e:
+    except RuntimeError as e:      # the engine's errors (bareduckdb)
         print(f"    [!] board directory {rel}: {str(e).splitlines()[0][:100]}")
     if not remote:
         return None
     cached = await _cached(rel)         # the in-place read failed: try a download
     try:
         return await asyncio.to_thread(query, str(cached), sql, args, False) if cached else None
-    except duckdb.Error:
+    except RuntimeError:
         return None
 
 

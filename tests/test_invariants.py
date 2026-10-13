@@ -764,7 +764,7 @@ def test_the_environment_is_read_only_through_config_settings():
 #: (two operations run crawl code) and below web, so the harvester, which
 #: imports crawl and nothing above it, never loads the operation table.
 #: conftest is pytest's, for the doctests here; nothing imports it but tests.
-LAYERS = ("validation", "tags", "rows", "config", "runstate", "match", "net", "session_log",
+LAYERS = ("gil", "validation", "tags", "rows", "config", "runstate", "match", "net", "session_log",
           "store", "claude", "ats", "digest", "discovery", "ops", "crawl", "dispatch", "web",
           "conftest")
 
@@ -1189,8 +1189,8 @@ DEFERRED_IMPORT_ALLOW = {
     ("src/config/profile.py", "src.config"):
         "the package re-exports this module's names; callers mutate the package",
     ("src/digest/render.py", "winotify"): "optional, Windows-only",
-    ("src/discovery/board_directory.py", "duckdb"): "heavy; only the directory queries need it",
-    ("src/discovery/resolve/directory.py", "duckdb"): "heavy; only the directory queries need it",
+    ("src/discovery/board_directory.py", "bareduckdb"): "heavy; only the directory queries need it",
+    ("src/discovery/resolve/directory.py", "bareduckdb"): "heavy; only the directory queries need it",
     ("src/discovery/resolve/probes.py", "playwright.async_api"):
         "optional; _launch has already imported it off the loop",
     **{("src/net/ddg.py", mod): "optional: either ddgs or nothing is installed"

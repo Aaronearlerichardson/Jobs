@@ -239,9 +239,12 @@ class SessionLog:
         root = logging.getLogger()
         root.removeHandler(self._handler)
         root.setLevel(self._prev_root_level)
+        # GIL state at the end: an extension not declared free-threading safe
+        # (lxml before 7.0) switches it back on when imported, mid-run.
+        gil = "on" if getattr(sys, "_is_gil_enabled", lambda: True)() else "off"
         try:
             self._fh.write(f"\n# ended   : {datetime.now():%Y-%m-%d %H:%M:%S}"
-                           f"  ({time.monotonic() - self._t0:.0f}s)\n")
+                           f"  ({time.monotonic() - self._t0:.0f}s, GIL {gil})\n")
             self._fh.close()
         except ValueError:
             pass

@@ -22,7 +22,9 @@ types-html5lib>=1.1
 # driver (2026-09-11); <5 because that config is not an API and a major
 # bump could move it.
 nuitka>=4.2,<5
-zstandard>=0.22.0
+# Onefile compression. 3.14 has it in the standard library (compression.zstd),
+# which Nuitka prefers, and zstandard has no free-threaded (3.14t) Windows wheel.
+zstandard>=0.22.0; python_version < "3.14"
 # tools/scans.py wraps these three when named (`bandit`, `audit`, `deps`); the
 # other scans need nothing. Install by hand, not in CI:
 #   bandit  pip-audit  deptry

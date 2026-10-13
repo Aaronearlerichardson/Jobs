@@ -78,6 +78,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+import sysconfig
 import time
 from pathlib import Path
 
@@ -267,7 +268,7 @@ HARVEST_FORBID = ["flask", "werkzeug", "jinja2"]
 # HARVEST_LAZY is the opposite case: src/discovery really does import these,
 # behind guards a whole-board pull never takes. The import exists, so
 # "error" would fail every build; we just decline to follow it.
-HARVEST_LAZY = ["playwright", "ddgs", "fake_useragent", "primp", "duckdb"]
+HARVEST_LAZY = ["playwright", "ddgs", "fake_useragent", "primp", "bareduckdb"]
 
 # The union, for tools/entrydeps.py --check, which reports which skips are
 # doing real work.
@@ -317,9 +318,13 @@ def build_command(name: str | None = None) -> list[str]:
     # Details tab and from Task Manager, and -- the reason it is not just
     # cosmetic -- so {COMPANY}/{PRODUCT}/{VERSION} below resolve to a path
     # that changes whenever the payload does.
+    # A free-threaded (3.14t) build is its own product: the same commit's
+    # regular build would otherwise share, and re-extract over, its unpack
+    # folder below.
     v = version()
+    product = TARGETS[name][1].removesuffix(".exe") +         ("-nogil" if sysconfig.get_config_var("Py_GIL_DISABLED") else "")
     cmd += ["--company-name=JobCrawler",
-            f"--product-name={TARGETS[name][1].removesuffix('.exe')}",
+            f"--product-name={product}",
             f"--file-version={v}", f"--product-version={v}",
             f"--file-description={DESCRIPTIONS[name]}"]
     # Unpack once per version instead of once per launch. The default spec
@@ -436,8 +441,10 @@ def main() -> int:
                       capture_output=True).returncode:
         subprocess.run([sys.executable, "-m", "pip", "install", "nuitka"],
                        check=True)
-    if subprocess.run([sys.executable, "-m", "pip", "show", "zstandard"],
-                      capture_output=True).returncode:
+    # Onefile compression; 3.14+ has it built in (compression.zstd), and
+    # zstandard has no free-threaded wheel to install there.
+    if sys.version_info < (3, 14) and subprocess.run(
+            [sys.executable, "-m", "pip", "show", "zstandard"], capture_output=True).returncode:
         subprocess.run([sys.executable, "-m", "pip", "install", "zstandard"],
                        check=True)
     rc = subprocess.run(cmd, cwd=ROOT).returncode

@@ -42,6 +42,7 @@ if isinstance(sys.stdout, io.TextIOWrapper):  # Windows consoles default to cp12
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from src import runstate
+from src.gil import relaunch_without_gil
 from src import store
 from src.crawl.page_capture import page_url, parse_page
 from src.ops.ingest import ingest_external_jobs
@@ -318,4 +319,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    relaunch_without_gil()
     main()

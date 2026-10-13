@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from src import config, runstate
+from src.gil import relaunch_without_gil
 from src.config import RuntimeTrack
 from src.dispatch import registry
 
@@ -352,4 +353,5 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    relaunch_without_gil()
     main()

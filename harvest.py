@@ -333,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    from src.gil import relaunch_without_gil
+    relaunch_without_gil()
     try:
         sys.exit(main())
     except SystemExit:

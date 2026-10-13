@@ -35,7 +35,9 @@ jobs:
       # others, which is the whole point of testing a range.
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13", "3.14"]
+        # 3.14t: the free-threaded build, so a race between to_thread
+        # workers fails here rather than in a harvest.
+        python: ["3.12", "3.13", "3.14", "3.14t"]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +50,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r envs/requirements-dev.txt
+
+      - name: The GIL stays off (free-threaded build)
+        # An extension not declared free-threading safe turns it back on at
+        # import, with only a warning, and the race tests then pass vacuously.
+        if: endsWith(matrix.python, 't')
+        run: |
+          python -c "
+          import sys, bareduckdb, pyarrow, lxml.etree
+          import src.web.server, src.crawl.harvest, src.discovery.board_directory
+          assert not sys._is_gil_enabled(), 'an import turned the GIL back on'
+          print('GIL off after importing the app')
+          "
 
       - name: Confirm the run is profile-example + API-free
         # profile.toml is gitignored, so a clean checkout has none, the

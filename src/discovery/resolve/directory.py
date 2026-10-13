@@ -83,13 +83,13 @@ def query(src: str, sql: str, args: Sequence[str], remote: bool) -> list[Row]:
     is `src`, then `args`); every column the directory selects is text.
     A remote read installs httpfs first (a no-op once installed): a fresh
     ~/.duckdb has none, and the load alone failed (2026-10-12)."""
-    import duckdb
-    con = duckdb.connect()
+    import bareduckdb
+    con = bareduckdb.connect()
     try:
         if remote:
             con.install_extension("httpfs")
             con.load_extension("httpfs")
-        return con.execute(sql, [src, *args]).fetchall()
+        return [tuple(r) for r in con.execute(sql, [src, *args]).fetchall()]
     finally:
         con.close()
 

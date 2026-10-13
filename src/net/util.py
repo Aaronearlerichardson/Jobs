@@ -68,11 +68,15 @@ def json_cache_get(path: Path, ttl: float) -> JSON:
 
 def json_cache_put(path: Path, value: object) -> None:
     """Best-effort JSON write to `path`; a cache failure never fails the
-    caller."""
+    caller. Written beside it and renamed in, so a concurrent
+    json_cache_get sees the old file or the new one, never half of one."""
+    tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(value), encoding="utf-8")
+        tmp.write_text(json.dumps(value), encoding="utf-8")
+        os.replace(tmp, path)
     except (OSError, TypeError, ValueError) as e:
+        tmp.unlink(missing_ok=True)
         _log.warning("cache write %s failed: %s", path, e)
 
 

@@ -2,7 +2,9 @@ requests>=2.31.0
 # The transport under net.http (requests stays as its model layer). No
 # aiodns: it does not run on Windows' default Proactor event loop.
 aiohttp>=3.11
-lxml>=5.0.0
+# 7.0 declares free-threading support (locks inside), so a 3.14t build keeps
+# its GIL off; 6.x turned it back on at import.
+lxml>=7.0.0b1
 # Board specs' HTML selectors are CSS, compiled to XPath (:has needs 1.2).
 cssselect>=1.2
 # The fallback HTML parser, for a page lxml cannot parse (net.util.parse_markup).
@@ -29,8 +31,12 @@ typing_extensions>=4.13
 # DDG text search, no API key.
 ddgs>=5.0.0
 
-# Board-directory import (discover.py --import-boards): reads remote Parquet.
-duckdb>=1.4
+# Board directory (discover.py --import-boards, the name lookup): reads remote
+# Parquet. bareduckdb, not duckdb: DuckDB's own binding has no free-threaded
+# (3.14t) wheel (duckdb/duckdb-python discussion #40); this one binds the
+# same engine through its C API and ships one. It returns rows through pyarrow.
+bareduckdb>=0.12.155
+pyarrow>=26
 
 # Optional - only needed for `discover.py --capture-session` and friends.
 # After install, also run: `playwright install chromium`

@@ -25,6 +25,7 @@ from collections.abc import Callable
 from typing import Any
 
 from src import config, runstate
+from src.gil import relaunch_without_gil
 from src.dispatch import registry
 
 
@@ -159,4 +160,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    relaunch_without_gil()
     main()

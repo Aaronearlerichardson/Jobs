@@ -8,7 +8,8 @@ read and the mission scorer are faked; the store is the in-memory one.
 import csv
 import json
 
-import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import src.store as store
@@ -23,14 +24,10 @@ _JOB = "https://boards.greenhouse.io/{slug}/jobs/{n}"
 
 
 def _parquet(path, rows, columns):
-    """Write `rows` (tuples) as a parquet file with the named VARCHAR columns."""
+    """Write `rows` (tuples) as a parquet file with the named string columns."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect()
-    cols = ", ".join(f"{c} VARCHAR" for c in columns)
-    con.execute(f"CREATE TABLE t ({cols})")
-    con.executemany(f"INSERT INTO t VALUES ({', '.join('?' for _ in columns)})", rows)
-    con.execute(f"COPY t TO '{path.as_posix()}' (FORMAT parquet)")
-    con.close()
+    pq.write_table(pa.table({c: pa.array([r[i] for r in rows], pa.string())
+                             for i, c in enumerate(columns)}), path)
 
 
 @pytest.fixture

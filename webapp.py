@@ -15,6 +15,8 @@ if __name__ == "__main__":
     try:
         # Imported inside the guard: a bad profile.toml or env var raises
         # while config loads, and must reach the "Press Enter" hold below.
+        from src.gil import relaunch_without_gil
+        relaunch_without_gil()
         from src.web.server import main
         main()
     except SystemExit as e:
