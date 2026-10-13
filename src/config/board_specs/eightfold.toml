@@ -14,7 +14,8 @@ blocklist = [
     "app.eightfold.ai",
     "apply.eightfold.ai",
     "docs.eightfold.ai",
-    "support.eightfold.ai"
+    "support.eightfold.ai",
+    "vs-errors.eightfold.ai"
 ]
 
 [canary]

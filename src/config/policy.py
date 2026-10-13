@@ -48,7 +48,10 @@ FETCH_TIMEOUT = (5.0, 60.0)
 # blocking us: its requests are skipped unasked for REFUSAL_TTL_S. The
 # 2026-10-07 backfill sent jobs.thermofisher.com 10,210 403s in a row after
 # its WAF tripped; no other host that week went past 10 (Workday's pulled
-# postings 403 one by one, between 200s).
+# postings 403 one by one, between 200s). A WAF's refusal is not always
+# 403: on 2026-10-12 arcadis.eightfold.ai switched from 200s to 1,127
+# 405s and careers.unifiservice.com to 428 406s, inside one minute each.
+REFUSAL_STATUSES = (403, 405, 406, 429)
 REFUSAL_TRIPS = 20
 REFUSAL_TTL_S = 600.0
 

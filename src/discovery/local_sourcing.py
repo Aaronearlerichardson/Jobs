@@ -737,9 +737,11 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
                                           or config.is_multi_division(c["name"])):
                 # Recovery: an on-mission tier on an inactive, unscored row
                 # means its mission call failed. Dead boards stay off
-                # (prune_dead_boards: the endpoint 404s), and so do rows in
-                # the review queue (reviving them would skip it).
+                # (prune_dead_boards' note, or the harvest's board-dead miss:
+                # 2026-10-12 revived 30 boards buried an hour before), and so
+                # do rows in the review queue (reviving them would skip it).
                 if (not (c.get("notes") or "").startswith("deactivated: dead")
+                        and store.miss_family(c.get("miss_reason")) != "board-dead"
                         and c["review"] != "pending"):
                     update["active"] = 1
                     revived = True

@@ -98,8 +98,8 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
                                       min_len: int = 200, t: RuntimeTrack | None = None,
                                       retry_days: int = 3) -> int:
     """One-shot: fill in full JD text for stored jobs missing it (any
-    company-linked row whose description is shorter than min_len chars —
-    the default matches src.claude.fit.MIN_DESC_CHARS), via each company's
+    company-linked row in some track whose description is shorter than
+    min_len chars — the default matches src.claude.fit.MIN_DESC_CHARS), via each company's
     own ATS board: its URL first, the board pulled at most once per company
     for the rows that leave no body. Safe to re-run: a row that failed within the last
     `retry_days` days is skipped (its desc_checked_at stamp), so reruns
@@ -127,10 +127,16 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
         one board pull and, when the board doesn't cover them, hit one
         host's detail pages, which is exactly the traffic the fetchers'
         own per-source pacing is written to bound.
+
+        Untracked rows are left out: a harvested row triage dropped at a
+        free gate never needs a body, and one still pending gets its body
+        from triage's capped hydration if it survives. The 2026-10-12 run
+        selected 47,465 rows, all but a handful title/geo/mission drops,
+        and its detail GETs got Arcadis (405) and Unifi (406) to block it.
     """
     t = _t(t)
     async with track_writer(t) as db:
-        rows = await db.run(stale_body_rows, "company_id IS NOT NULL",
+        rows = await db.run(stale_body_rows, "company_id IS NOT NULL AND track IS NOT NULL",
                             columns="job_id, title, url, company_id",
                             min_len=min_len, retry_days=retry_days,
                             limit=limit,

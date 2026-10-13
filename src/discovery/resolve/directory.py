@@ -80,11 +80,14 @@ def cache_path(rel: str) -> Path:
 
 def query(src: str, sql: str, args: Sequence[str], remote: bool) -> list[Row]:
     """The rows of `sql` over the parquet file or URL `src` (`?` in `sql`
-    is `src`, then `args`); every column the directory selects is text."""
+    is `src`, then `args`); every column the directory selects is text.
+    A remote read installs httpfs first (a no-op once installed): a fresh
+    ~/.duckdb has none, and the load alone failed (2026-10-12)."""
     import duckdb
     con = duckdb.connect()
     try:
         if remote:
+            con.install_extension("httpfs")
             con.load_extension("httpfs")
         return con.execute(sql, [src, *args]).fetchall()
     finally:

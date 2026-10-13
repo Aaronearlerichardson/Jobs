@@ -36,8 +36,8 @@ from urllib3.util.ssl_ import create_urllib3_context
 from yarl import URL
 
 from src import config, runstate
-from src.config import (FETCH_TIMEOUT, PLAIN_USER_AGENT, REFUSAL_TRIPS, REFUSAL_TTL_S,
-                        USER_AGENT)
+from src.config import (FETCH_TIMEOUT, PLAIN_USER_AGENT, REFUSAL_STATUSES, REFUSAL_TRIPS,
+                        REFUSAL_TTL_S, USER_AGENT)
 from src.net.robots import RobotsCache, RobotsDisallowed
 from src.net.util import JSON, host_of, origin_key
 
@@ -392,7 +392,7 @@ async def send(method: str, url: str, *, polite: bool = True,
         quietly skip them. `[policy] respect_robots = false` turns the
         check off (not the pooling).
 
-        A host that answers REFUSAL_TRIPS 403/429s in a row is skipped,
+        A host that answers REFUSAL_TRIPS REFUSAL_STATUSES in a row is skipped,
         HostRefusing raised unsent, for REFUSAL_TTL_S (`_REFUSING`).
     """
     method = method.upper()
@@ -417,7 +417,7 @@ async def send(method: str, url: str, *, polite: bool = True,
         raise
     _log.debug("%s %s -> %s in %.2fs", method, url, r.status_code,
                r.elapsed.total_seconds())
-    if r.status_code in (403, 429):
+    if r.status_code in REFUSAL_STATUSES:
         refusing.trip(url)
     elif r.status_code < 400:
         refusing.clear(url)
@@ -821,13 +821,13 @@ class HostBreaker:
         return hit is not None and hit[1] >= self.trips
 
 
-#: This run's blocking hosts (`send`): REFUSAL_TRIPS 403/429s in a row.
+#: This run's blocking hosts (`send`): REFUSAL_TRIPS REFUSAL_STATUSES in a row.
 _REFUSING = runstate.per_run(lambda: HostBreaker(ttl=REFUSAL_TTL_S, trips=REFUSAL_TRIPS))
 
 
 def refused(url: str) -> bool:
     """Whether `url`'s host answered this run's last request to it with a
-    403 or 429 (`send`): a site that blocks the crawler, not a dead one."""
+    REFUSAL_STATUSES answer (`send`): a site that blocks the crawler, not a dead one."""
     return _REFUSING().refused(url)
 
 

@@ -166,7 +166,7 @@ async def diagnose_no_board(name: str, careers_url: str = "") -> str:
     - "domain-unreachable": not one candidate URL answered at all (DNS/SSL/
       timeout on every guess) -- likely defunct or acquired.
     - "site-blocked": none answered with a page, but a candidate's host
-      refused the crawler (403/429, http.refused): a bot wall on a live
+      refused the crawler (http.refused): a bot wall on a live
       site, whose board `discover.py --add-board ... --capture` can still
       register.
     - "wrong-domain": every page that DID answer was reached only through a
