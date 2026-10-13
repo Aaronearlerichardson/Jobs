@@ -1,12 +1,12 @@
 """The three passes over the roster's boards.
 
-    runner.py   the daily crawl: narrow, scoped, scores what survives
-    harvest.py  the background whole-board pull: everything, unscored
+    runner.py   a crawl of one track: the harvest scoped to it, then the
+                sources off the roster
+    harvest.py  the whole-board pull: everything stored, then triaged
     triage.py   what the harvester stored, gated cheapest-first
     page_capture.py  jobs parsed out of pages you captured by hand
 
-The crawl is the fast path and the harvest is the thorough one; triage is
-what makes the thorough one affordable.
+Triage is what makes the whole-board pull affordable.
 """
 
 from __future__ import annotations

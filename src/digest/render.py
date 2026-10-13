@@ -497,7 +497,8 @@ def send_ranked_digest(
 
 def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
              pipeline: list[JobRow] | None = None,
-             followups: list[JobRow] | None = None) -> int:
+             followups: list[JobRow] | None = None,
+             watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None) -> int:
     """Tell you what surfaced into track `t`'s ranking since `since` (an
     ISO time, compared with each row's `triaged_at`): the count, as an email
     when the track sets `email` and a desktop toast when it sets `notify`.
@@ -505,6 +506,7 @@ def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
 
     Rows that repeat a role you applied to (store.prior_lookup) and rows
     under `digest_min_fit` do not count, so a quiet pass says nothing.
+    `watch_hits` ride along in the email.
 
     >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), digest_min_fit=0.4)
     >>> rows = [{"job_id": "a", "triaged_at": "2026-10-05T12:00:01", "resume_fit_score": 0.8},
@@ -520,8 +522,8 @@ def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
     if not fresh:
         return 0
     how = []
-    if t.email and send_ranked_digest(ranked, t, pipeline=pipeline, new_since=since,
-                                      followups=followups, by="triaged_at"):
+    if t.email and send_ranked_digest(ranked, t, watch_hits=watch_hits, pipeline=pipeline,
+                                      new_since=since, followups=followups, by="triaged_at"):
         how.append("emailed")
     best = max(fresh, key=lambda j: j.get("resume_fit_score") or 0.0)
     lead = (f"{(best.get('resume_fit_score') or 0):.2f} {best.get('company_name')}: "

@@ -49,9 +49,8 @@ import sys
 import time
 import traceback
 from collections.abc import Awaitable, Callable
-from contextlib import closing
 from datetime import datetime
-from typing import Any, TextIO
+from typing import TextIO
 
 if isinstance(sys.stdout, io.TextIOWrapper):  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -261,17 +260,8 @@ def main(argv: list[str] | None = None) -> int:
     min_age = args.min_age_hours
 
     if args.list:
-        from src import store
-        with closing(store.connect(args.db)) as conn:
-            plan_stats: dict[str, Any] = {}
-            boards = harvest.plan(conn, only=only, names=args.names,
-                                  min_age_hours=min_age, limit=args.limit,
-                                  stats=plan_stats)
-        for c in boards:
-            print(f"  {c['name']}  ({c['ats']}, ~{c.get('total_job_count') or 0}"
-                  f" jobs, last harvested {c.get('last_harvested_at') or 'never'})")
-        print(f"  {len(boards)} board(s)"
-              + harvest.deferred_note(plan_stats))
+        harvest.list_plan(args.db, only=only, names=args.names,
+                          min_age_hours=min_age, limit=args.limit)
         return 0
 
     lock = acquire_lock()

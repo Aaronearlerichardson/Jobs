@@ -1,15 +1,12 @@
-"""Tracks are configuration, not code: [tracks.*] parsing, engine defaults,
-keyword focus, and source assembly through the one crawl pipeline."""
-
-from datetime import datetime, timedelta
+"""Tracks are configuration, not code: [tracks.*] parsing, engine defaults
+and keyword focus."""
 
 import pytest
 from pydantic import ValidationError
 
-import src.store as store
 import src.ops.maintenance as ops
-import src.crawl.runner as runner
 from src import tags
+from src.match.filters import core_anchor
 from src.config.profile_schema import Track, parse
 from tests.test_triage import _PLAIN_ENG_BODY
 
@@ -37,7 +34,7 @@ class TestTrackConfig:
     def test_methodology_keys_are_parsed(self, local_track):
         assert all(hasattr(local_track, k) for k in
                    ("keyword_mode", "sources", "store_tag", "require_core_anchor",
-                    "geo_gate", "verify_top", "verify_floor", "cost_guard",
+                    "geo_gate", "verify_top", "verify_floor",
                     "email", "exclude_gate", "tech_title_regex",
                     "dormant_after", "dormant_days"))
 
@@ -143,13 +140,13 @@ class TestKeywordFocus:
 
     def test_extend_preserves_base_tiers(self, cfg, local_track, pristine_keywords):
         base = list(cfg.CORE_KEYWORDS)
-        runner.apply_keyword_focus(cfg, local_track)
+        cfg.apply_keyword_focus(cfg, local_track)
         assert cfg.CORE_KEYWORDS[:len(base)] == base
         assert cfg.ACCEPT_REMOTE is False
 
     def test_replace_swaps_tiers_and_enables_remote(self, cfg, sweep_track,
                                                     pristine_keywords):
-        runner.apply_keyword_focus(cfg, sweep_track)
+        cfg.apply_keyword_focus(cfg, sweep_track)
         kw = cfg.KEYWORDS_BY_TRACK.get(sweep_track.id)
         track_core = list(kw.core) if kw else []
         assert cfg.ACCEPT_REMOTE is True
@@ -158,16 +155,16 @@ class TestKeywordFocus:
 
     def test_list_identity_survives(self, cfg, local_track, pristine_keywords):
         before = id(cfg.CORE_KEYWORDS)
-        runner.apply_keyword_focus(cfg, local_track)
+        cfg.apply_keyword_focus(cfg, local_track)
         assert id(cfg.CORE_KEYWORDS) == before, \
             "rebinding breaks filters.py's import-time reference"
 
     def test_core_anchor_reads_the_live_list(self, cfg, local_track,
                                              pristine_keywords):
-        runner.apply_keyword_focus(cfg, local_track)
+        cfg.apply_keyword_focus(cfg, local_track)
         anchor = cfg.CORE_KEYWORDS[0]
-        assert runner.core_anchor(f"Senior {anchor} Engineer") == anchor
-        assert runner.core_anchor("Bakery Assistant", "we sell bread") is None
+        assert core_anchor(f"Senior {anchor} Engineer") == anchor
+        assert core_anchor("Bakery Assistant", "we sell bread") is None
 
 
 class TestWidenAndRestore:
@@ -216,53 +213,3 @@ class TestWidenAndRestore:
         cfg.restore_keywords(saved, cfg)
         assert cfg.ACCEPT_REMOTE is False
         assert {n: list(getattr(cfg, n)) for n in tiers} == tiers
-
-
-class TestSourceAssembly:
-    async def test_location_scoped_sources_carry_company_rows(self, cfg, local_track):
-        # Empty store (CI) yields no sources; the SHAPE is what's asserted.
-        specs = await runner.build_sources(cfg, local_track)
-        assert all(s["company"] is not None for s in specs)
-
-    async def test_sweep_sources_carry_no_company_row(self, cfg, sweep_track):
-        specs = await runner.build_sources(cfg, sweep_track)
-        assert all(s["company"] is None for s in specs)
-
-    async def test_priority_companies_come_first_and_are_starred(self, cfg, sweep_track):
-        prio = getattr(cfg, "DISCOVERY_PRIORITY_COMPANIES", [])
-        if not prio:
-            return                                  # none configured: nothing to order
-        specs = await runner.build_sources(cfg, sweep_track)
-        assert [s for s in specs[:len(prio)] if s["platform"].endswith("*")]
-
-    async def test_dormant_companies_drop_out_of_the_source_list(self, cfg,
-                                                           local_track,
-                                                           tmp_path):
-        """The point of dormancy: build_sources must read the crawlable rows,
-        not every active one, or the 181 never-productive companies keep
-        costing a fetch each run."""
-        db_path = tmp_path / "sources.db"
-        conn = store.connect(db_path)
-        store.upsert_company(conn, {"name": "Awake", "ats": "greenhouse",
-                                    "slug": "awake"})
-        cid = store.upsert_company(conn, {"name": "Asleep", "ats": "greenhouse",
-                                          "slug": "asleep"})
-        conn.execute("UPDATE companies SET crawl_state='dormant', "
-                     "next_crawl_at=? WHERE id=?",
-                     ((datetime.now() + timedelta(days=7)).isoformat(), cid))
-        conn.commit()
-        conn.close()
-        t = local_track.model_copy(update={"db_path": db_path, "store_tag": None})
-        names = {s["name"] for s in await runner.build_sources(cfg, t)}
-        assert "Awake" in names and "Asleep" not in names
-
-        conn = store.connect(db_path)
-        store.reactivate_company(conn, cid)
-        conn.close()
-        names = {s["name"] for s in await runner.build_sources(cfg, t)}
-        assert "Asleep" in names
-
-    async def test_websearch_toggle_removes_sources(self, cfg, sweep_track):
-        with_ws = await runner.build_sources(cfg, sweep_track)
-        without = await runner.build_sources(cfg, sweep_track, include_websearch=False)
-        assert len(without) <= len(with_ws)

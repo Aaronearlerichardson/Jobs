@@ -1,35 +1,24 @@
 """ONE crawl pipeline for every track.
 
-Historically each track shipped its own runner module whose methodology
-differences — keyword handling, source families, gates, scoring budget,
-digest/email — were code. They are now CONFIGURATION: every knob lives in
-your profile's [tracks.<id>] table (parsed by
-config._build_ui_tracks, engine-derived defaults) and this module runs the
-same pipeline for any track:
+A crawl of track `t` is the harvest pipeline (src/crawl/harvest.py `run`:
+plan, pull whole boards, triage, verify, closed-URL probe, digest) scoped to
+`t`, then the source families that are not on the company roster. Every knob
+lives in the profile's [tracks.<id>] table (config.tracks, engine-derived
+defaults):
 
-    1. keyword focus     keyword_mode "extend"/"replace" + accept_remote
-    2. sources           store companies (location-scoped boards or a
-                         lightweight ATS sweep), priority companies,
-                         aggregator feeds, web search — each toggleable
+    1. roster boards     harvest.run, tag-scoped to `store_tag`, reporting `t`
+    2. sources           priority companies, aggregator feeds, USAJOBS, Getro,
+                         web search -- each toggleable
     3. gates             require_core_anchor, engine title gate, engine
                          excludes, geo_gate (or remote-stamping when off)
-    4. scoring           resume-fit on new postings, cost_guard budget,
-                         self-heal of newly-described rows, verify_top
-    5. persist + digest  company-linked rows upsert with fit columns; sweep
-                         rows upsert without them; ranked digest and/or match digest;
+    4. scoring           resume-fit on the surfaced matches, capped at
+                         triage.SCORE_CAP
+    5. persist + digest  matches upsert with fit columns; matches digest;
                          optional email
 
-Those phases are `run_track` and the functions above it -- `_gate_sources`
-(over `_gate_company_board` / `_gate_sweep_source`), `_score_and_persist`,
-`_print_funnel`, `_report_ranked`, `_report_matches`. They were five
-comment banners inside one 365-line function, the longest in the repo;
-what kept them from being functions was a dozen shared locals, which the
-`Collected` tuple now names once.
-
-The legacy entry points delegate here unchanged, as does the web UI's
-single "crawl" op. The ENGINE value still selects the code-level bits that
-are not data — the technical-title regex, the exclude gate, digest
-rendering — but never the methodology.
+The ENGINE value still selects the code-level bits that are not data -- the
+technical-title regex, the exclude gate, digest rendering -- but never the
+methodology.
 """
 
 from __future__ import annotations
@@ -37,17 +26,14 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from types import ModuleType
 from typing import NamedTuple, TypedDict
 
 from src import config
 from src import digest
-from src.digest.render import score_text
 from src import store
-from src.ats.board import company as company_fetch
 from src.ats.feeds.discourse import fetch_discourse
 from src.ats.feeds.getro import board_host, fetch_getro_all
 from src.ats.feeds.hnhiring import fetch_hnhiring
@@ -56,24 +42,19 @@ from src.ats.feeds.remotive import fetch_remotive
 from src.ats.feeds.rssfeed import fetch_rss
 from src.ats.feeds.usajobs import fetch_usajobs
 from src.ats.feeds.websearch import fetch_websearch
-from src.ats.registry import iter_store_sources, sweep
+from src.ats.registry import sweep
 from src.claude.fit import score_resume_fit
 from src.claude.resume import resume_text
 from src.config import RuntimeTrack
-from src.config.profile_schema import TrackKeywords
-from src.crawl import health
+from src.crawl import harvest, triage
 from src.discovery.apply import attribute_employers
 from src.match import gates
-from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
-from src.match.locality import (NC_RE, geo_label, geo_mode, remote_signal_for,
-                                us_eligible)
+from src.match.filters import core_anchor, is_relevant
+from src.match.locality import geo_mode, remote_signal_for
 from src.net.http import Snapshot
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
-from src.ops import maintenance as ops
-from src.ops.repair import bury_404_board
-from src.ops import scoring
-from src.rows import CompanyRow, FetchedJob, RankedJob, is_watched
+from src.rows import FetchedJob
 
 #: Re-exported, not defined here: it moved to src/config/tracks.py, beside
 #: the two tables it reads. Keeping the name importable from the runner is
@@ -83,78 +64,38 @@ from src.rows import CompanyRow, FetchedJob, RankedJob, is_watched
 track_for_engine = config.track_for_engine
 
 
-def apply_keyword_focus(cfg: ModuleType, t: RuntimeTrack) -> None:
-    """Point the shared keyword filter at this track's focus. Mutates the
-    live list objects in place so filters.is_relevant (which imported them
-    at load time) sees the change without a re-import. "extend" adds the
-    track's [keywords.<id>] terms to the global tiers (deduped); "replace"
-    swaps them in wholesale (and rebuilds the flat INCLUDE view, matching
-    the legacy replace semantics). Empty track lists never blank a tier."""
-    kw = getattr(cfg, "KEYWORDS_BY_TRACK", {}).get(t.id) or TrackKeywords()
-    core, dom, skill = list(kw.core), list(kw.domain), list(kw.skill)
-    if t.keyword_mode == "replace":
-        if core:
-            cfg.CORE_KEYWORDS[:] = core
-        if dom:
-            cfg.DOMAIN_KEYWORDS[:] = dom
-        if skill:
-            cfg.SKILL_KEYWORDS[:] = skill
-        cfg.INCLUDE_KEYWORDS[:] = (cfg.CORE_KEYWORDS + cfg.DOMAIN_KEYWORDS
-                                   + cfg.SKILL_KEYWORDS)
-    else:
-        for dst, add in ((cfg.CORE_KEYWORDS, core),
-                         (cfg.DOMAIN_KEYWORDS, dom),
-                         (cfg.SKILL_KEYWORDS, skill)):
-            have = {k.lower() for k in dst}
-            dst.extend(k for k in add if k.lower() not in have)
-    setattr(cfg, "ACCEPT_REMOTE", t.accept_remote)
-
-
-@contextmanager
-def keyword_focus(t: RuntimeTrack) -> Generator[None]:
-    """apply_keyword_focus for the duration of a block, then put the shared
-    lists back (config.keyword_snapshot / restore_keywords)."""
-    saved = config.keyword_snapshot()
-    apply_keyword_focus(config, t)
-    try:
-        yield
-    finally:
-        config.restore_keywords(saved)
-
-
-def core_anchor(title: str, description: str = "") -> str | None:
-    """The require_core_anchor gate: the CORE keyword that anchors this
-    posting, or None. Short single-token acronyms (eeg, ecg, rf...) match
-    on word boundaries — "ecog" fires inside "recognized" — while longer
-    terms stay substring so "subcortical" still matches "cortical". Reads
-    the LIVE config lists, so after apply_keyword_focus this is exactly the
-    track's own CORE keyword vocabulary."""
-    return first_hit(config.CORE_KEYWORDS, f"{title} {description}".lower(),
-                     SHORT_KEYWORD)
-
-
 type SourceThunk = Callable[[], Awaitable[list[FetchedJob] | None]]
 
 
 class SourceSpec(TypedDict):
-    """One source of a pass: `thunk()` fetches it; `company` is its store row
-    (None for a sweep source)."""
+    """One source of a crawl: `thunk()` fetches it."""
     name: str
     platform: str
     thunk: SourceThunk
-    company: CompanyRow | None
 
 
 async def build_sources(cfg: ModuleType, t: RuntimeTrack,
                         include_websearch: bool | None = None) -> list[SourceSpec]:
-    """Assemble the track's source specs from its `sources` config table.
-    Returns a list of dicts {name, platform, thunk, company}: `thunk()` is
-    the source's fetch coroutine; `company` is
-    the store row for location-scoped store boards (their jobs sync/upsert
-    against that company) and None for sweep sources (priority companies,
-    lightweight ATS sweep, aggregators, USAJOBS, Getro boards, web search — persisted by a plain
-    upsert_job). Priority companies come first so cross-source duplicates
-    resolve deterministically."""
+    """The track's non-roster source specs ({name, platform, thunk}) from
+    its `sources` config table: priority companies, aggregator feeds,
+    USAJOBS, Getro boards, web search. `thunk()` is the source's fetch
+    coroutine; every one is persisted by a plain upsert_job. Priority
+    companies come first so cross-source duplicates resolve
+    deterministically. The roster is harvest.run's.
+
+    >>> import types
+    >>> from pathlib import Path
+    >>> from src.config.profile_schema import TrackSources
+    >>> cfg = types.SimpleNamespace(
+    ...     DISCOVERY_PRIORITY_COMPANIES=[("Acme", "greenhouse", "acme")],
+    ...     WEBSEARCH_QUERIES=[("WS", "neural engineer jobs", 5)])
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), sources=TrackSources(
+    ...     priority_companies=True, websearch=True))
+    >>> [(s["name"], s["platform"]) for s in asyncio.run(build_sources(cfg, t))]
+    [('Acme', 'greenhouse*'), ('WS', 'websearch')]
+    >>> [s["name"] for s in asyncio.run(build_sources(cfg, t, include_websearch=False))]
+    ['Acme']
+    """
     src = t.sources
     use_ws = src.websearch if include_websearch is None else include_websearch
     specs: list[SourceSpec] = []
@@ -162,13 +103,12 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
 
     # A thunk may carry what it closes over as a defaulted parameter.
     def add(name: str, platform: str, thunk: SourceThunk,
-            company: CompanyRow | None = None, key: tuple[str, str] | None = None) -> None:
+            key: tuple[str, str] | None = None) -> None:
         k = key or (platform, name.lower())
         if k in used:
             return
         used.add(k)
-        specs.append({"name": name, "platform": platform,
-                      "thunk": thunk, "company": company})
+        specs.append({"name": name, "platform": platform, "thunk": thunk})
 
     # 1) Priority targets ([discovery] priority_companies), starred.
     if src.priority_companies:
@@ -178,35 +118,6 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
                 print(f"  [!] priority company {name}: unknown ATS {ats!r}")
                 continue
             add(name, ats + "*", thunk, key=(ats, str(slug)))
-
-    # 2) Company store (this track's own DB, optionally tag-scoped).
-    if src.store:
-        rows: list[CompanyRow]
-        try:
-            async with store.Writer(t.db_path) as db:
-                # Not every active row: dormant companies (never-productive,
-                # or high-volume off-mission boards) only come round again on
-                # their weekly slot — see store.record_crawl_outcome.
-                rows = await db.run(store.crawlable_companies, tag=t.store_tag)
-        except Exception as e:
-            print(f"  [!] company store unavailable ({e})")
-            rows = []
-        if src.location_scoped:
-            # Full per-company board fetch through the locality filter —
-            # whole-board (no filter) for watched/sweep-tagged companies and
-            # for core-mission ones at the track's remote_mission_floor,
-            # whose out-of-area rows the geo gate handles downstream.
-            floor = t.remote_mission_floor
-            for c in rows:
-                add(c["name"], c.get("ats") or "?",
-                    (lambda cc=c: company_fetch.fetch_company(
-                        cc, None if ops.whole_board(cc, floor) else NC_RE, employer=cc["name"])),
-                    company=c, key=("store", (c["name"] or "").lower()))
-        else:
-            # Location-agnostic lightweight ATS sweep (JSON-API boards only;
-            # the heavyweight onsite ATSes are only worth fetching scoped).
-            for ats, name, slug, thunk in iter_store_sources(rows):
-                add(name, ats, thunk, key=(ats, slug))
 
     # 3) Forums + aggregator feeds (remote-native boards). Like the ATS
     # registry, the crawl injects the keyword gate here; the fetchers are
@@ -295,126 +206,11 @@ def _diversify(matches: list[FetchedJob], n: int) -> list[FetchedJob]:
     return picked
 
 
-def _cost_guard_trips(t: RuntimeTrack, n_to_score: int, confirm_cost: bool) -> bool:
-    """True (and prints the budget banner) when scoring n_to_score postings
-    would blow the track's cost_guard without an explicit confirmation."""
-    guard = t.cost_guard
-    if not guard or n_to_score <= guard or confirm_cost:
-        return False
-    # Rough per-posting cost: ~700 input tokens (cached system prompt) +
-    # ~120 output, at a blended $4 per million tokens. Order-of-magnitude
-    # only -- for deciding whether to stop and ask.
-    est_tokens = n_to_score * 820
-    est_usd = est_tokens / 1_000_000 * 4.0
-    bar = "=" * 70
-    print(f"\n{bar}")
-    print(f"  [!] BUDGET GUARD: {n_to_score} posting(s) would be scored via "
-          f"the Claude API (> {guard}).")
-    print(f"      Rough estimate: ~{est_tokens:,} tokens, ~${est_usd:.2f} "
-          f"(order-of-magnitude, not a quote).")
-    print("      Re-run with confirm-cost to proceed. Scoring skipped this run.")
-    print(f"{bar}")
-    return True
-
 class Collected(NamedTuple):
-    """What one pass over the fetched sources produced.
-
-    The crawl's five phases used to be five comment banners inside one
-    365-line function, sharing a dozen locals. This is the state the first
-    phase hands the rest; naming it is what let the others become
-    functions.
-    """
-    to_score: list[tuple[CompanyRow, FetchedJob]]     # (company, job) -- fresh company-linked rows to score
+    """What one pass over the fetched sources produced."""
     matches: list[FetchedJob]      # sweep rows surfaced (fetcher dict shape)
-    watch_hits: list[tuple[CompanyRow, FetchedJob, bool]]   # (company, job, in_pipeline) at watched companies
     funnel: list[tuple[str, int, int, int, int, str]]   # per-source summary rows, in source order
-    n_closed: int
-    n_reopened: int
-    n_seen: int
-    new_ids: set[str]                  # sweep match ids the store did not hold when gated: the "(NEW)" ones
-
-
-async def _gate_company_board(
-        db: store.Writer, t: RuntimeTrack, c: CompanyRow, jobs: list[FetchedJob], commit: bool,
-        snapshot: Snapshot | None = None,
-) -> tuple[list[FetchedJob], list[FetchedJob], list[tuple[CompanyRow, FetchedJob, bool]], int, int]:
-    """One store company's board through the gates, on `db` (the crawl's
-    store.Writer).
-
-    Returns (kept, fresh, watch_hits, n_reopened, n_closed). `fresh` is the
-    subset neither a crawl nor triage has handled (store.crawl_seen) -- a
-    row the harvester stored and triage has not judged counts as fresh: it
-    was fetched, never gated.
-
-    `snapshot` is the fetch's net.http.snapshot_info() (see fetch_all): an
-    incomplete fetch closes nothing, and neither does a capped one --
-    store.sync_job_statuses's `capped` never closes a board-native row, on
-    any miss, because a page-capped pull is an unstable window of the
-    board rather than the board itself. The rows are gated either way.
-    """
-    n_reopened = n_closed = 0
-    snapshot = snapshot or {}
-    if jobs and c.get("id") and commit and not snapshot.get("incomplete"):
-        n_reopened, n_closed = await db.run(
-            store.sync_job_statuses, c["id"], jobs, track=t.track,
-            capped=snapshot.get("capped", False))
-    # Reuse bodies the background harvester already fetched, so the gates
-    # and the scorer below do not pay a detail GET for a posting whose
-    # description is sitting in the store.
-    if jobs and c.get("id"):
-        stored = await db.run(store.descriptions_for_company, c["id"])
-        for j in jobs:
-            if not j.get("description") and j["id"] in stored:
-                j["description"] = stored[j["id"]]
-
-    kept: list[FetchedJob] = []
-    for j in jobs:
-        if t.require_core_anchor and not core_anchor(
-                j.get("title", ""), j.get("description", "")):
-            continue
-        if not await ops.keep_job(c, j, t):
-            continue
-        kept.append(j)
-    fresh, watch_hits = await db.run(_fresh_and_watched, t, c, jobs, kept, commit)
-    return kept, fresh, watch_hits, n_reopened, n_closed
-
-
-def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow, jobs: list[FetchedJob],
-                       kept: list[FetchedJob], commit: bool
-                       ) -> tuple[list[FetchedJob], list[tuple[CompanyRow, FetchedJob, bool]]]:
-    """(fresh, watch_hits) for _gate_company_board: the `kept` rows neither
-    a crawl nor triage has handled, and the watch section's hits among
-    `jobs`."""
-    fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
-    watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
-    if is_watched(c):
-        # Watch section: EVERY new technical, non-excluded posting at a
-        # watched company in the US (us_eligible; 2026-09-29: 20 of 29 hits
-        # were NVIDIA seats in Israel, India and Europe) -- out-of-scope
-        # ones stored unscored so they aren't re-flagged next run.
-        fresh_ids = {f["id"] for f in fresh}
-        for j in jobs:
-            if (store.crawl_seen(conn, j["id"]) and j["id"] not in fresh_ids) \
-                    or not us_eligible(j.get("location") or "") \
-                    or not gates.is_technical_role(j.get("title", ""), t) \
-                    or (t.exclude_gate and gates.exclude_reason(
-                        j.get("title", ""), j.get("description", ""),
-                        allow_defense=True, track_id=t.id)):
-                continue
-            in_pipeline = j["id"] in fresh_ids
-            watch_hits.append((c, j, in_pipeline))
-            if not in_pipeline and commit:
-                store.upsert_job(conn, {
-                    "job_id": j["id"], "company_id": c["id"],
-                    "company_name": c["name"], "title": j.get("title"),
-                    "url": j.get("url"), "location": j.get("location"),
-                    "track": t.track,
-                    "geo_mode": geo_mode(j.get("location", ""),
-                                         j.get("description", "")),
-                    "posted_at": j.get("posted_at"),
-                    "description": (j.get("description") or "")
-                                   [:config.MAX_DESC_CHARS]})
-    return fresh, watch_hits
+    new_ids: set[str]                  # match ids the store did not hold when gated: the "(NEW)" ones
 
 
 def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[FetchedJob],
@@ -423,11 +219,23 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[Fet
     excludes), remote signal stamped (or geo-gated when configured),
     deduped across sources via `seen_ids` (mutated). `new_ids` (mutated)
     gets the surfaced ids the store did not hold yet: they are read here,
-    before the run writes any of them (tests/test_harvest.py::
-    test_sample_matches_label_a_job_new_only_if_the_store_lacked_it).
+    before the run writes any of them, so the sample label "(NEW)" is the
+    store's answer at gating time.
 
     Returns (surfaced_jobs, anchor_n, tech_n, surfaced_n). The jobs are
     stamped in place with the display/persist fields the digest reads.
+
+    >>> from pathlib import Path
+    >>> conn = store.connect(":memory:")
+    >>> _ = store.upsert_job(conn, {"job_id": "feed_old", "title": "Old Role"})
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), require_core_anchor=False,
+    ...                  exclude_gate=False, geo_gate=False, tech_title_regex="role")
+    >>> feed = [{"id": f"feed_{n}", "title": f"{n.title()} Role", "location": "Remote"}
+    ...         for n in ("old", "new")]
+    >>> new_ids = set()
+    >>> out, *_ = _gate_sweep_source(conn, t, feed, set(), new_ids)
+    >>> [j["id"] for j in out], sorted(new_ids)
+    (['feed_old', 'feed_new'], ['feed_new'])
     """
     out: list[FetchedJob] = []
     anchor_here = tech_here = surfaced = 0
@@ -467,8 +275,8 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[Fet
 
 
 async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[SourceSpec],
-                        fetched: list[tuple[list[FetchedJob], BaseException | None, Snapshot | None]],
-                        commit: bool) -> Collected:
+                        fetched: list[tuple[list[FetchedJob], BaseException | None, Snapshot | None]]
+                        ) -> Collected:
     """Every fetched source through its gates, in SOURCE order, on `db`
     (the crawl's store.Writer).
 
@@ -476,114 +284,40 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[SourceSpe
     be deterministic: the first source to surface a posting keeps it, and
     build_sources puts priority companies first on purpose.
     """
-    to_score: list[tuple[CompanyRow, FetchedJob]] = []
     matches: list[FetchedJob] = []
-    watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
     funnel: list[tuple[str, int, int, int, int, str]] = []
     seen_ids: set[str] = set()
     new_ids: set[str] = set()
-    n_closed = n_reopened = n_seen = 0
-    tally = health.Tally("crawl")
 
-    for spec, (jobs, err, snapshot) in zip(specs, fetched):
-        c = spec["company"]
-        if c is not None and c["ats"]:     # a boardless row is no platform's outcome
-            tally.note_jobs(c["ats"], jobs, err, snapshot)
+    for spec, (jobs, err, _) in zip(specs, fetched):
         label = f"{spec['name']} ({spec['platform']})"
-        if c is not None and c.get("id") and commit:
-            # Judged on what the BOARD returned, before any of our gating:
-            # a company that keeps serving jobs is alive even when none of
-            # them survive the filters.
-            await db.run(store.record_crawl_outcome, c["id"], len(jobs or []), err,
-                         dormant_after=t.dormant_after,
-                         dormant_days=t.dormant_days)
-            # A fetcher reports a 404 and returns [] rather than raising, so
-            # the error is usually the snapshot's, not `err`. `c` is the
-            # pre-crawl row: a streak already on it is the earlier empty.
-            if not jobs and (c.get("empty_streak") or 0) >= 1:
-                await db.run(bury_404_board, c, str(err) if err is not None
-                             else (snapshot or {}).get("last_error"))
         if err is not None:
             funnel.append((label, 0, 0, 0, 0, "ERR"))
             continue
-
-        if c is not None:
-            kept, fresh, watched, n_re, n_cl = await _gate_company_board(
-                db, t, c, jobs, commit, snapshot)
-            n_reopened += n_re
-            n_closed += n_cl
-            n_seen += len(kept) - len(fresh)
-            to_score += [(c, j) for j in fresh]
-            watch_hits += watched
-            funnel.append((label, len(jobs), len(kept), len(fresh),
-                           len(fresh), ""))
-        else:
-            surfaced_jobs, anchor_n, tech_n, surfaced_n = await db.run(
-                _gate_sweep_source, t, jobs, seen_ids, new_ids)
-            matches += surfaced_jobs
-            funnel.append((label, len(jobs), anchor_n, tech_n, surfaced_n,
-                           "priority" if spec["platform"].endswith("*") else ""))
-
-    if commit:
-        for line in await db.run(health.record, tally):
-            print(f"  [!] {line}")
+        surfaced_jobs, anchor_n, tech_n, surfaced_n = await db.run(
+            _gate_sweep_source, t, jobs, seen_ids, new_ids)
+        matches += surfaced_jobs
+        funnel.append((label, len(jobs), anchor_n, tech_n, surfaced_n,
+                       "priority" if spec["platform"].endswith("*") else ""))
 
     # Board-sourced jobs (Getro) name their employer: link each to its
     # roster row, queue employers the roster lacks for review, and drop the
     # copies an active roster company's own crawl already stored.
     if any(j.get("_employer") for j in matches):
-        matches = await db.run(attribute_employers, matches, commit=commit)
+        matches = await db.run(attribute_employers, matches, commit=True)
 
-    return Collected(to_score, matches, watch_hits, funnel,
-                     n_closed, n_reopened, n_seen, new_ids)
+    return Collected(matches, funnel, new_ids)
 
 
-async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, resume: str | None,
-                             *, fit: bool, commit: bool, guard_tripped: bool,
-                             max_workers: int) -> int:
-    """Score what the gates kept and write it. Returns the number scored.
-
-    Two populations with two shapes: company-linked rows go through
-    ops.score_job (which builds the full store row), sweep rows are
-    scored IN PLACE so the fit columns ride along to the upsert below.
-    """
-    scored = 0
-    if got.to_score and fit and not guard_tripped:
-        print(f"\n  scoring {len(got.to_score)} new job(s) against resume "
-              f"({got.n_seen} already scored)...")
-        async for row in fan_out(got.to_score,
-                                 lambda cj: ops.score_job(cj[0], cj[1], t.track),
-                                 "scoring", max_workers):
-            # Kept separate from the scoring failure fan_out reports: a
-            # store write that fails is not a scoring problem.
-            try:
-                if commit:
-                    await db.run(store.upsert_job, row)
-                scored += 1
-            except Exception as e:
-                print(f"    [!] store error: {e}")
-    elif got.to_score:
-        # Scoring skipped (fit off, or budget guard) — store the fresh rows
-        # UNSCORED so they aren't re-flagged as new next run; the self-heal
-        # pass scores NULL-score rows once a later run has budget again.
-        why = "budget guard" if guard_tripped else "fit scoring off"
-        print(f"\n  storing {len(got.to_score)} new job(s) unscored ({why})...")
-        for c, j in got.to_score:
-            if not commit:
-                break
-            await db.run(store.upsert_job, {
-                "job_id": j["id"], "company_id": c["id"],
-                "company_name": c["name"], "title": j.get("title"),
-                "url": j.get("url"), "location": j.get("location"),
-                "track": t.track,
-                "geo_mode": geo_mode(j.get("location", ""),
-                                     j.get("description", "")) or "onsite",
-                "posted_at": j.get("posted_at"),
-                "description": (j.get("description") or "")
-                               [:config.MAX_DESC_CHARS]})
-
-    if fit and got.matches and resume and not guard_tripped:
-        print(f"  scoring {len(got.matches)} match(es) against resume...")
+async def _score_and_persist(db: store.Writer, t: RuntimeTrack, matches: list[FetchedJob],
+                             resume: str | None, *, fit: bool, max_workers: int) -> None:
+    """Score the surfaced matches IN PLACE (the first triage.SCORE_CAP; the
+    rest are stored unscored) and write them, fit columns riding along."""
+    if fit and matches and resume:
+        to_fit = matches[:triage.SCORE_CAP]
+        print(f"  scoring {len(to_fit)} match(es) against resume"
+              + (f" ({len(matches) - len(to_fit)} over the {triage.SCORE_CAP} cap stay unscored)"
+                 if len(matches) > len(to_fit) else "") + "...")
 
         async def _one(j: FetchedJob) -> None:
             res = await score_resume_fit(j["title"], j.get("description", ""),
@@ -592,38 +326,33 @@ async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, 
 
         # `ex.map` re-raised the first failure, so one unscorable posting
         # abandoned the scoring of every other match in the sweep.
-        async for _ in fan_out(got.matches, _one, "match scoring", max_workers):
+        async for _ in fan_out(to_fit, _one, "match scoring", max_workers):
             pass
-        got.matches.sort(key=lambda j: (j.get("resume_fit_score") is not None,
-                                        j.get("resume_fit_score") or 0.0),
-                         reverse=True)
+        matches.sort(key=lambda j: (j.get("resume_fit_score") is not None,
+                                    j.get("resume_fit_score") or 0.0),
+                     reverse=True)
 
-    if commit:
-        # Sweep rows: the fetched dict's id/company become job_id/company_name.
-        # The fit columns ride along when --fit scored the job in place
-        # (j.update(FitResult.as_columns())) and are None otherwise, which
-        # upsert_job's COALESCE reads as "keep the stored score" -- a
-        # --fit --commit run once computed scores, printed them in the
-        # digest, then dropped every one on this write.
-        for job in got.matches:
-            await db.run(store.upsert_job, {
-                "job_id": job["id"], "company_id": job.get("company_id"),
-                "company_name": job.get("company"), "title": job.get("title"),
-                "url": job.get("url"), "location": job.get("location"),
-                "track": t.track,
-                "remote_eligible": job.get("remote_eligible"),
-                "remote_signal": job.get("remote_signal"),
-                "anchor_signal": job.get("anchor_signal"),
-                "posted_at": job.get("posted_at"),
-                "description": (job.get("description") or "")
-                               [:config.MAX_DESC_CHARS],
-                "resume_fit_score": job.get("resume_fit_score"),
-                "fit_reason": job.get("fit_reason"), "fit_gates": job.get("fit_gates"),
-                "fit_model": job.get("fit_model"), "fit_domain": job.get("fit_domain"),
-                "fit_function": job.get("fit_function"), "fit_stack": job.get("fit_stack"),
-                "fit_seniority": job.get("fit_seniority"),
-            })
-    return scored
+    # The fit columns are None unless scored, which upsert_job's COALESCE
+    # reads as "keep the stored score" -- a --fit run once computed scores,
+    # printed them in the digest, then dropped every one on this write.
+    for job in matches:
+        await db.run(store.upsert_job, {
+            "job_id": job["id"], "company_id": job.get("company_id"),
+            "company_name": job.get("company"), "title": job.get("title"),
+            "url": job.get("url"), "location": job.get("location"),
+            "track": t.track,
+            "remote_eligible": job.get("remote_eligible"),
+            "remote_signal": job.get("remote_signal"),
+            "anchor_signal": job.get("anchor_signal"),
+            "posted_at": job.get("posted_at"),
+            "description": (job.get("description") or "")
+                           [:config.MAX_DESC_CHARS],
+            "resume_fit_score": job.get("resume_fit_score"),
+            "fit_reason": job.get("fit_reason"), "fit_gates": job.get("fit_gates"),
+            "fit_model": job.get("fit_model"), "fit_domain": job.get("fit_domain"),
+            "fit_function": job.get("fit_function"), "fit_stack": job.get("fit_stack"),
+            "fit_seniority": job.get("fit_seniority"),
+        })
 
 
 def _print_funnel(funnel: list[tuple[str, int, int, int, int, str]], bar: str) -> None:
@@ -636,57 +365,11 @@ def _print_funnel(funnel: list[tuple[str, int, int, int, int, str]], bar: str) -
         print(f"  {label:<46} {n_f:>5} {g1:>5} {kept_n:>5} {new_n:>5}{tail}")
 
 
-async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scored: int, *,
-                         send: bool, top_n: int, bar: str) -> list[RankedJob]:
-    """Write (and maybe email) the ranked digest for a company-linked crawl,
-    print the watch section and the top N, and return the ranked list.
-
-    Notes:
-        The ranking and the digest file are maintenance.write_digest, the
-        writer every digest-writing op shares, so this crawl's watch hits
-        and triage funnel cannot drift from theirs; only the email, the
-        printed watch section and the richer top-N live here.
-    """
-    ranked, pipeline, followups, digest_path = await db.run(
-        ops.write_digest, t, watch_hits=got.watch_hits)
-    if send:
-        if await asyncio.to_thread(digest.send_ranked_digest, ranked, t,
-                                   watch_hits=got.watch_hits, pipeline=pipeline,
-                                   followups=followups):
-            await asyncio.to_thread(digest.toast, t,
-                                    len(digest.new_ranked_rows(ranked, t)),
-                                    digest_path)
-    else:
-        print(f"  (email suppressed — enable [tracks.{t.id}].email "
-              f"or pass --send)")
-    if got.watch_hits:
-        print(f"\n  {bar}\n  WATCHED COMPANIES - NEW POSTINGS THIS RUN\n  {bar}")
-        for c, j, in_pipeline in got.watch_hits:
-            note = ("scored" if in_pipeline
-                    else "listed only (outside local scope)")
-            print(f"  [WATCH] {c['name']}: {(j.get('title') or '')[:56]}")
-            print(f"          [{j.get('location') or '?'}]  ({note})")
-            print(f"          {j.get('url')}")
-    print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY RESUME FIT\n  {bar}")
-    for rj in ranked[:top_n]:
-        print(f"  fit={score_text(rj.get('resume_fit_score'))} [{geo_label(rj)}] "
-              f"[{digest.age_tag(rj)}] {(rj['title'] or '')[:48]}")
-        print(f"        {rj['company_name']} "
-              f"({rj.get('mission_tier') or '?'})  -  "
-              f"{rj.get('fit_reason', '')}")
-        print(f"        {rj['url']}")
-    print(f"\n  {len(ranked)} open job(s) in ranking; {scored} newly "
-          f"scored, {got.n_closed} marked closed, {got.n_reopened} reopened "
-          f"this run.")
-    return ranked
-
-
 async def _report_matches(matches: list[FetchedJob], t: RuntimeTrack, *, new_ids: set[str],
                           send: bool, samples: int, bar: str) -> None:
     """The sweep side: a diversified sample for a precision eyeball (each
     marked "(NEW)" when its id is in `new_ids`, else "(seen)"; see
-    tests/test_harvest.py::test_sample_matches_label_a_job_new_only_if_the_store_lacked_it),
-    then the matches digest."""
+    _gate_sweep_source's doctest), then the matches digest."""
     n = max(0, samples)
     print(f"\n{bar}\n  {min(n, len(matches))} SAMPLE MATCHES "
           f"(precision sanity-check)\n{bar}")
@@ -716,55 +399,48 @@ async def _report_matches(matches: list[FetchedJob], t: RuntimeTrack, *, new_ids
 
 async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
                     send: bool | None = None, verify: bool | None = None,
-                    websearch: bool | None = None, confirm_cost: bool = False,
-                    max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[RankedJob] | list[FetchedJob]:
-    """Run one crawl of track `t` (a config.UI_TRACKS entry).
+                    websearch: bool | None = None, refresh: bool = False,
+                    max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[FetchedJob]:
+    """Run one crawl of track `t` (a config.UI_TRACKS entry); returns the
+    surfaced non-roster matches.
 
-    Every methodology switch reads the track config; the keyword args only
-    OVERRIDE it for this run (None = use the config): `send` overrides
-    t.email, `verify` (bool) overrides t.verify_top (True -> top_n,
-    False -> skip), `websearch` overrides sources.websearch. `fit=False`
-    skips resume scoring; `commit=False` is the legacy sweep preview (no
-    DB writes). Returns the ranked list (company-linked crawls) or the
-    surfaced match list.
-
-    The five phases are the five functions above, in order. They were five
-    comment banners inside this function when it ran to 365 lines -- the
-    longest in the repo -- and what kept them from being functions was a
-    dozen shared locals, now named once in `Collected`.
+    The roster is harvest.run scoped to `t` (boards carrying its store_tag,
+    `t` reported); the other source families follow. Every switch reads the
+    track config; the keyword args only OVERRIDE it for this run (None =
+    use the config): `send` overrides t.email, `verify` (bool) overrides
+    t.verify_top (True -> top_n, False -> skip), `websearch` overrides
+    sources.websearch. `refresh` pulls every board, not only the ones not
+    pulled in the last few hours. `fit=False` skips resume scoring;
+    `commit=False` prints the boards the crawl would pull and stops.
     """
-    engine = t.engine
     send = t.email if send is None else send
-    verify_n = (t.verify_top if verify is None
-                else (top_n if verify else 0))
+    if not commit:
+        if t.sources.store:
+            harvest.list_plan(t.db_path, min_age_hours=0 if refresh else None,
+                              tag=t.store_tag)
+        return []
+    if t.sources.store:
+        n = t.verify_top if verify is None else (top_n if verify else 0)
+        await harvest.run(db_path=t.db_path, tag=t.store_tag,
+                          report=[t.model_copy(update={"email": send, "verify_top": n})],
+                          min_age_hours=0 if refresh else None, fit=fit,
+                          top_n=top_n, max_workers=max_workers)
 
     resume = await asyncio.to_thread(resume_text) if fit else None
     if fit and not resume:
-        print("  [!] No resume text — fit scores will be null. "
+        print("  [!] No resume text -- fit scores will be null. "
               "Set config.RESUME_PATH.")
 
-    with keyword_focus(t):
+    with config.keyword_focus(t):
         specs = await build_sources(config, t, include_websearch=websearch)
         sources = [(s["name"], s["platform"], s["thunk"]) for s in specs]
+        if not sources:
+            return []
         async with store.Writer(t.db_path) as db:
-
             bar = "=" * 70
-            gates_desc: list[str] = []
-            if t.require_core_anchor:
-                gates_desc.append("core-anchor")
-            gates_desc.append("technical-title")
-            gates_desc.append("geo" if t.geo_gate else "remote-stamped")
-            print(f"\n{bar}\n  [{t.label.upper()}] crawl - "
-                  f"{datetime.now():%Y-%m-%d %H:%M}")
-            print(f"  engine={engine} keywords={t.keyword_mode} "
-                  f"sources={sum(1 for _, v in t.sources if v)} families "
-                  f"({len(sources)} feeds) gates={'+'.join(gates_desc)}")
-            mode = "COMMIT (DB writes)" if commit else "PREVIEW (no DB writes)"
-            print(f"  Mode: {mode}" + (" + EMAIL" if send else "") + f"\n{bar}\n")
-            if not sources:
-                print("  [!] No sources — check [tracks.*].sources and the company "
-                      "store (discover.py --local / --import-companies).")
-
+            print(f"\n{bar}\n  [{t.label.upper()}] other sources - "
+                  f"{datetime.now():%Y-%m-%d %H:%M}\n  engine={t.engine} "
+                  f"keywords={t.keyword_mode} ({len(sources)} feeds)\n{bar}\n")
             done_count = [0]
 
             def _progress(name: str, platform: str, jobs: list[FetchedJob],
@@ -775,33 +451,12 @@ async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
                       f"{status}")
 
             fetched = await fetch_all(sources, on_done=_progress)
-
-            got = await _gate_sources(db, t, specs, fetched, commit)
-
-            n_would_score = (len(got.to_score) + len(got.matches)) if fit else 0
-            guard_tripped = fit and _cost_guard_trips(t, n_would_score, confirm_cost)
-            scored = await _score_and_persist(db, t, got, resume, fit=fit, commit=commit,
-                                              guard_tripped=guard_tripped,
-                                              max_workers=max_workers)
-
-            linked = t.sources.store and t.sources.location_scoped
-            if resume and commit and linked and not guard_tripped:
-                scored += await scoring.self_heal_unscored(
-                    db, resume, track=t.track, max_workers=max_workers)
-            if verify_n and resume and commit and not guard_tripped:
-                await scoring.verify_top(top_n=verify_n,
-                                         max_workers=max(2, max_workers // 2),
-                                         db=db, t=t)
-
+            got = await _gate_sources(db, t, specs, fetched)
+            await _score_and_persist(db, t, got.matches, resume, fit=fit,
+                                     max_workers=max_workers)
             _print_funnel(got.funnel, bar)
-
-            ranked: list[RankedJob] | None = None
-            if linked:
-                ranked = await _report_ranked(db, t, got, scored, send=send,
-                                              top_n=top_n, bar=bar)
-            if got.matches or not linked:
-                await _report_matches(got.matches, t, new_ids=got.new_ids, send=send,
-                                      samples=samples, bar=bar)
-
+            if got.matches or not t.sources.store:
+                await _report_matches(got.matches, t, new_ids=got.new_ids,
+                                      send=send, samples=samples, bar=bar)
             print("")
-    return ranked if ranked is not None else got.matches
+    return got.matches

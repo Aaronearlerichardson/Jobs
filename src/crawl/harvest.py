@@ -1,14 +1,11 @@
 """Background whole-board harvester: fetch EVERY board, store everything,
 score nothing.
 
-The daily crawl (src/crawl/runner.py) is deliberately narrow: it fetches only
-the companies due for a crawl (active, not parked dormant), scoped to your
-locality unless the board is watched, sweep-tagged or above the mission
-floor, and it pays for description hydration only on rows that survive the
-gates. That keeps a crawl to minutes, at the price of never seeing most of
-what the roster's boards actually list.
+A crawl of one track (src/crawl/runner.py) is this same pipeline scoped to
+that track: `run`'s `tag` narrows the boards pulled, and `report` the tracks
+verified, digested and announced. Triage still judges every roster track.
 
-This module is the other half: a slow, thorough pass that runs in the
+Unscoped, it is a slow, thorough pass that runs in the
 background (Task Scheduler at log-on, repeating every few hours) and
 
   * takes every company with a fetchable board (store.harvestable_companies:
@@ -26,13 +23,8 @@ background (Task Scheduler at log-on, repeating every few hours) and
 
 Triage is where the Claude spend is: one mission call per never-scored
 company and one fit call per posting that clears four free gates. A row
-triage surfaces carries its track labels and score exactly as a crawled
-row would; a row it drops records the gate that dropped it, and the crawl
-leaves it dropped. The crawl still adopts anything triage has not reached
-yet: a row with neither a track label nor a verdict is "fresh" to it
-(store.crawl_seen), so it is gated and scored like a posting seen for the
-first time, only without the network round-trips (the runner reuses the
-stored description).
+triage surfaces carries its track labels and score; a row it drops
+records the gate that dropped it.
 
 Concurrency: several processes write the one SQLite file (the web UI, the
 scheduled crawl, this). store.connect runs WAL with a busy timeout, and
@@ -59,7 +51,8 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -69,17 +62,20 @@ from typing_extensions import TypedDict
 from src import config
 from src import digest
 from src import store
+from src import tags
 from src.ats.board import company as company_fetch
 from src.ats.coords import slug_named
 from src.claude.api import api_disabled, have_api_key, report_cache_stats
+from src.claude.resume import resume_text
+from src.config import RuntimeTrack
 from src.crawl import health, triage
 from src.crawl.hydrate import MISS_BACKOFF_S, BoardStats, hydrate_rows
 from src.crawl.triage import DEFAULT_WORKERS
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
-from src.ops.maintenance import rewrite_digest
+from src.ops.maintenance import new_watch_hits, rewrite_digest
 from src.ops.repair import bury_404_board
-from src.ops.scoring import verify_top
+from src.ops.scoring import self_heal_unscored, verify_top
 from src.ops.status import check_closed_jobs
 from src.rows import CompanyRow, FetchedJob, JobIn
 
@@ -99,10 +95,6 @@ class PlanStats(TypedDict, total=False):
     offmission_skipped: int
     offmission_stopped: int
     min_age_hours: float
-
-
-class _ScoreKw(TypedDict, total=False, closed=True):
-    score_cap: int
 
 
 # --------------------------------------------------------------------------- #
@@ -130,11 +122,11 @@ def deferred_note(stats: PlanStats) -> str:
 def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
          names: Iterable[str] | None = None, min_age_hours: float | None = None,
          limit: int | None = None, now: datetime | None = None,
-         stats: PlanStats | None = None) -> list[CompanyRow]:
+         stats: PlanStats | None = None, tag: str | None = None) -> list[CompanyRow]:
     """The boards this run will pull, in run order.
 
     `only` restricts to a set of ATS names, `names` to company names
-    (case-insensitive); boards harvested within `min_age_hours` are skipped
+    (case-insensitive), `tag` to the companies carrying that store tag; boards harvested within `min_age_hours` are skipped
     unless named explicitly. Least recently ATTEMPTED first
     (harvest_attempted_at, which pull stamps as each board starts; never
     attempted first), then largest, then by name: each host walks its boards
@@ -226,6 +218,13 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
     >>> "Parked" in [c["name"] for c in plan(conn, min_age_hours=0, now=now)]
     True
 
+    A `tag` keeps only the boards carrying it:
+
+    >>> _ = store.upsert_company(conn, {"name": "Tagged", "ats": "lever",
+    ...                                 "slug": "tg", "tags": "sweep"})
+    >>> [c["name"] for c in plan(conn, tag="sweep", now=now)]
+    ['Tagged']
+
     A pass that fits k boards takes the k stalest, the next pass the next
     k, so every board is attempted within ceil(n/k) passes:
 
@@ -277,6 +276,8 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
     for c in store.harvestable_companies(conn):
         if only and c.get("ats") not in only:
             continue
+        if tag and not tags.has(c.get("tags"), tag):
+            continue
         if want:
             if (c.get("name") or "").lower() not in want:
                 continue
@@ -302,6 +303,21 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
         stats["offmission_stopped"] = offmission_stopped
         stats["min_age_hours"] = min_age_hours
     return rows[:limit] if limit else rows
+
+
+def list_plan(db_path: str | Path | None, only: Collection[str] | None = None,
+              names: Iterable[str] | None = None, min_age_hours: float | None = None,
+              limit: int | None = None, tag: str | None = None) -> None:
+    """Print the boards `plan` would pull from the store at `db_path`, one
+    line each, and fetch nothing (harvest.py --list; a previewed crawl)."""
+    stats: PlanStats = {}
+    with closing(store.connect(db_path)) as conn:
+        boards = plan(conn, only=only, names=names, min_age_hours=min_age_hours,
+                      limit=limit, stats=stats, tag=tag)
+    for c in boards:
+        print(f"  {c['name']}  ({c['ats']}, ~{c.get('total_job_count') or 0}"
+              f" jobs, last harvested {c.get('last_harvested_at') or 'never'})")
+    print(f"  {len(boards)} board(s)" + deferred_note(stats))
 
 
 # --------------------------------------------------------------------------- #
@@ -461,12 +477,19 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
               limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
               hydrate: bool = False, max_hours: float | None = None,
               board_fn: Callable[..., Awaitable[BoardStats]] = harvest_board,
-              triage: bool = True, score_cap: int | None = None
-              ) -> dict[str, float | Mapping[str, object]]:
+              triage: bool = True, score_cap: int | None = None, *,
+              tag: str | None = None, report: Sequence[RuntimeTrack] | None = None,
+              fit: bool = True, top_n: int = 5) -> dict[str, float | Mapping[str, object]]:
     """Harvest every planned board (`pull`), then triage what was stored
-    and rewrite every roster track's digest (`_triage`), in that order.
-    Returns the summary dict (also printed); the triage summary rides in it
-    under "triage".
+    and report (`_triage`), in that order. Returns the summary dict (also
+    printed); the triage summary rides in it under "triage".
+
+    A scoped run (a crawl of one track) sets `tag` (pull only the boards
+    carrying it) and `report` (the tracks verified, self-healed, digested
+    and announced, each by its own verify_top and email; default every
+    roster track). Triage still judges every roster track, scoring
+    `report`'s rows first. `fit=False` scores nothing; `top_n` is how
+    many of each digest are printed.
 
     `triage=False` skips the gate/hydrate/score pass (the rows wait for
     the next one, or for `run_scraper.py --triage`); `score_cap` bounds
@@ -476,20 +499,22 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
     the pass has unwound.
     """
     db_path = db_path or config.STORE_DB_PATH
+    since = datetime.now().isoformat()
     async with store.Writer(db_path) as db:
         merged = await db.run(store.dedup_companies)
     if merged:
         print(f"  merged {merged} duplicate company row(s) that shared a board")
     summary = await pull(db_path, only=only, names=names,
                          min_age_hours=min_age_hours, limit=limit,
-                         hydrate=hydrate, max_hours=max_hours, board_fn=board_fn)
+                         hydrate=hydrate, max_hours=max_hours, board_fn=board_fn, tag=tag)
     async with store.Writer(db_path) as db:
         flagged = await db.run(store.flag_duplicate_jobs)
     if flagged:
         print(f"  {flagged} cross-board duplicate flag(s) changed")
     out: dict[str, float | Mapping[str, object]] = {**summary}
     if triage:
-        out["triage"] = await _triage(db_path, max_workers, score_cap)
+        out["triage"] = await _triage(db_path, max_workers, score_cap, since,
+                                      report=report, fit=fit, top_n=top_n)
     return out
 
 
@@ -498,7 +523,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
                limit: int | None = None, hydrate: bool = False,
                max_hours: float | None = None,
                board_fn: Callable[..., Awaitable[BoardStats]] = harvest_board,
-               stall_s: float = 900.0) -> dict[str, float]:
+               stall_s: float = 900.0, tag: str | None = None) -> dict[str, float]:
     """The pull: plan (`plan`), then every board fetched and stored, one
     task per host (Board.origin; per platform while a row's origin is
     unsettled) walking its boards in plan order and every host at once;
@@ -533,7 +558,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
         plan_stats: PlanStats = {}
         boards = await db.run(plan, only=only, names=names,
                               min_age_hours=min_age_hours, limit=limit,
-                              stats=plan_stats)
+                              stats=plan_stats, tag=tag)
         if not names:
             try:
                 summary["retired"] = len(await db.run(store.retire_stopped))
@@ -670,21 +695,24 @@ def _report(c: CompanyRow, s: BoardStats, summary: dict[str, float]) -> None:
     _log.debug("board %s stats %s", c.get("name"), s)
 
 
-async def _triage(db_path: str | Path, max_workers: int,
-                  score_cap: int | None) -> Mapping[str, object]:
+async def _triage(db_path: str | Path, max_workers: int, score_cap: int | None, since: str, *,
+                  report: Sequence[RuntimeTrack] | None, fit: bool, top_n: int
+                  ) -> Mapping[str, object]:
     """The pass's second half; returns triage.run's summary.
 
     The gate/hydrate/score pass over everything pending in the store --
     this pass's rows and any earlier pass left waiting on a body or over
-    the scoring cap -- then, on that same `db_path`: each roster track's
-    deep verify (ops.verify_top, within its verify_top), one closed-URL
-    probe (ops.check_closed_jobs: CLOSED_PROBE_LIMIT open rows no board
-    has vouched for in CLOSED_PROBE_STALE_DAYS), each roster track's
-    digest, an announcement of what surfaced since the pass began (an
-    email and/or a toast, per each track's `email` and `notify`), and the
-    Claude spend footer for the pass's calls.
-    With no API key, or the breaker already tripped, the verify step is
-    one printed line instead.
+    the scoring cap -- then, on that same `db_path`, for the `report`
+    tracks (default: every roster track): the self-heal of unscored rows
+    (ops.self_heal_unscored, limited to `score_cap` -- triage.SCORE_CAP
+    when None -- minus what triage scored), deep verify (ops.verify_top, within each track's verify_top),
+    one closed-URL probe (ops.check_closed_jobs: CLOSED_PROBE_LIMIT open
+    rows no board has vouched for in CLOSED_PROBE_STALE_DAYS), each
+    track's digest (watch hits first seen since `since` included), an
+    announcement of what surfaced since then (an email and/or a toast, per
+    each track's `email` and `notify`), and the Claude spend
+    footer. With fit scoring off, no API key, or the breaker already
+    tripped, verify and self-heal are one printed line instead.
 
     Notes:
         The steps after triage use `db_path`, not maintenance.track_writer(t): that opens
@@ -693,29 +721,37 @@ async def _triage(db_path: str | Path, max_workers: int,
         every roster track from the one `db_path` too. The verify guard
         sits here so a dead API prints one line, not one per track.
     """
-    since = datetime.now().isoformat()
-    kw: _ScoreKw = {"score_cap": score_cap} if score_cap is not None else {}
-    result = await triage.run(db_path=db_path, max_workers=max_workers, **kw)
+    cap = triage.SCORE_CAP if score_cap is None else score_cap
+    tracks = list(report) if report is not None else triage.roster_tracks()
+    result = await triage.run(db_path=db_path, max_workers=max_workers,
+                              score_cap=cap, fit=fit,
+                              prefer={t.track for t in tracks} if report is not None else ())
     async with store.Writer(db_path) as db:
-        tracks = triage.roster_tracks()
         down = api_disabled()
-        if not have_api_key() or down:
-            print(f"\n  [!] verify skipped for {len(tracks)} roster track(s): "
-                  f"{down or 'no ANTHROPIC_API_KEY configured'}")
+        why = ("fit scoring off" if not fit else
+               down or (None if have_api_key() else "no ANTHROPIC_API_KEY configured"))
+        if why:
+            print(f"\n  [!] verify skipped for {len(tracks)} report track(s): {why}")
         else:
+            scored = result.get("scored", 0)
+            room = cap - (int(scored) if isinstance(scored, (int, float)) else 0)
+            resume = await asyncio.to_thread(resume_text)
             for t in tracks:
+                if resume and room > 0:
+                    room -= await self_heal_unscored(db, resume, track=t.track,
+                                                     max_workers=max_workers, limit=room)
                 if t.verify_top:
-                    await verify_top(top_n=t.verify_top,
-                                     max_workers=max(2, max_workers // 2),
+                    await verify_top(top_n=t.verify_top, max_workers=max(2, max_workers // 2),
                                      db=db, t=t)
         await check_closed_jobs(limit=CLOSED_PROBE_LIMIT,
                                 stale_days=CLOSED_PROBE_STALE_DAYS, db=db)
         pipeline, followups = await db.run(
             lambda conn: (store.get_pipeline(conn), store.followups_due(conn)))
         for t in tracks:
-            ranked = await db.run(rewrite_digest, t, top_n=5,
+            hits = await db.run(new_watch_hits, t, since)
+            ranked = await db.run(rewrite_digest, t, top_n=top_n, watch_hits=hits,
                                   heading=f"\n  [{t.track}] digest rewritten:")
             await asyncio.to_thread(digest.announce, ranked, t, since,
-                                    pipeline=pipeline, followups=followups)
+                                    pipeline=pipeline, followups=followups, watch_hits=hits)
     report_cache_stats()
     return result

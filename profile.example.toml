@@ -190,7 +190,6 @@ default = true
 # verify_floor = 0.25          # the same pass also deep-verifies local/remote
 #                              # rows screened at or above this, within the
 #                              # verify_top budget
-# cost_guard = 0               # max postings scored per run w/o confirm (0 = off)
 # email = false                # email the digest after each crawl
 # digest_min_fit = 0.4         # emailed digest carries only rows first seen
 #                              # this run scoring at least this fit; the
@@ -226,7 +225,7 @@ min_fit_default = 0.5
 willing_to_move_default = true
 remote_requires_watch = false
 # sweep-engine defaults: keyword_mode="replace", require_core_anchor=true,
-# geo_gate=false, store_tag="sweep", cost_guard=300,
+# geo_gate=false, store_tag="sweep",
 # sources = { store=true, priority_companies=true, aggregators=true, websearch=true, location_scoped=false }
 
 [policy]

@@ -192,7 +192,6 @@ class Methodology(_Table):
         lambda v: None if v is False else v)] = 0.85
     verify_top: Count = 15
     verify_floor: Unit = 0.25
-    cost_guard: Count = 0
     email: bool = False
     digest_min_fit: Unit = 0.4
     notify: bool = False
@@ -229,7 +228,7 @@ ENGINE_DEFAULTS = {
         sources=TrackSources(priority_companies=True, aggregators=True,
                              websearch=True, location_scoped=False),
         store_tag=tags.SWEEP, require_core_anchor=True, geo_gate=False,
-        verify_top=0, cost_guard=300, exclude_gate=False),
+        verify_top=0, exclude_gate=False),
 }
 
 #: Retired engine name -> current one, so an older profile keeps working.

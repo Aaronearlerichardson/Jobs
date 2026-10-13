@@ -1,5 +1,5 @@
-"""The ATS sweep: which store rows the lightweight sweep pulls, how, and
-the seed tag a newly found board gets.
+"""The sweep's fetch for one named board (the crawl's priority companies),
+and the seed tag a newly found board gets.
 
 Every crawl path iterates STORE company rows: the companies table is the
 single roster (manage it with discover.py, --add-board, or
@@ -11,8 +11,7 @@ whole), LOCAL for the boards only worth querying per region.
 tests/test_board_specs.py pins the rule.
 
 A capture-only company (``src.store.CAPTURE_ATS``) has no fetchable board
-and store.crawlable_companies never hands one to a crawl path; like any
-ATS no spec fetches, iter_store_sources skips it.
+and store.crawlable_companies never hands one to a crawl path.
 
 Notes:
     The config.py seed lists retired 2026-07. Paylocity and UltiPro seeded
@@ -24,11 +23,11 @@ Notes:
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable
 
 from src import tags
 from src.match.filters import is_relevant
-from src.rows import CompanyRow, FetchedJob
+from src.rows import FetchedJob
 from .board import board_for
 
 
@@ -49,16 +48,3 @@ def sweep(ats: str, name: str,
     instead). None for a platform no spec fetches."""
     board = board_for(ats)
     return (lambda: board.jobs(handle, name, gate=is_relevant)) if board else None
-
-
-def iter_store_sources(companies: Iterable[CompanyRow]) -> Iterator[
-        tuple[str, str, str, Callable[[], Awaitable[list[FetchedJob]]]]]:
-    """Yield (ats, name, handle, thunk) for the store rows on a platform
-    the lightweight sweep pulls whole (its spec's `sweep`) that name a
-    board."""
-    for c in companies:
-        board = board_for(c.get("ats"))
-        handle = board.handle(c) if board and board.spec.sweep else None
-        thunk = sweep(board.name, c["name"], handle) if board and handle else None
-        if board and handle and thunk:
-            yield board.name, c["name"], handle, thunk

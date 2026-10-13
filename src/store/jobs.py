@@ -186,10 +186,10 @@ def crawl_seen(conn: sqlite3.Connection, job_id: str) -> bool:
     True
 
     Notes:
-        Until 2026-10-13 only the track label counted: the crawl re-gated
-        954 triage drops with ops.keep_job and fit-scored 950 of them. A
-        track added later is not offered rows triage judged before it
-        existed.
+        Until 2026-10-13 only the track label counted: the crawl adopted
+        954 triage drops (its own gates or the watch section) and
+        fit-scored 950 of them. A track added later is not offered rows
+        triage judged before it existed.
     """
     row = conn.execute("SELECT track, triage_status FROM jobs WHERE job_id=?",
                        (job_id,)).fetchone()

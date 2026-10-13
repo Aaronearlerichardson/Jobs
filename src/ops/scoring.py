@@ -123,13 +123,14 @@ def _unscored_due(fit_reason: str | None, desc_len: int, now: datetime | None = 
 
 
 async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: str | None,
-                             max_workers: int = 6) -> int:
+                             max_workers: int = 6, limit: int | None = None) -> int:
     """Self-heal: the fresh-only crawl loop never revisits an already-stored
     job, so a row that was ingested bodyless (unscorable -> NULL score) would
     stay out of the ranking forever even once its description is recovered.
     Score any NULL-score row that now carries a real body (hydrated by
     backfill_board_descriptions, or by an earlier run), on `db` (a
-    store.Writer, or a connection: track_writer). Returns #scored.
+    store.Writer, or a connection: track_writer). Returns #scored. `limit`
+    caps the rows sent to the scorer in this call.
 
     A row the scorer STILL can't score is no longer left exactly as found:
     it is stamped with an _unscored_marker (cause from fit.unscored_cause)
@@ -177,6 +178,8 @@ async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: 
         due = [r for r in pending if _unscored_due(
             r.get("fit_reason"), len((r.get("description") or "").strip()), now)]
         held = len(pending) - len(due)
+        if limit is not None:
+            due = due[:max(0, limit)]
         if not due:
             print(f"  self-heal: {held} previously-unscorable job(s) not yet "
                   f"due for retry.")

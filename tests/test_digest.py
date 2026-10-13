@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from src import config
-from src.crawl import runner
 import src.digest.render as digest
 import src.match.locality as locality
 from src.ops import maintenance as ops
@@ -445,10 +444,8 @@ class TestGolden:
 
 
 class TestEveryDigestWriterCarriesTheTriageFunnel:
-    """maintenance.write_digest is the one writer behind rewrite_digest
-    (status sync, deep verify, the harvest pass) and the crawl's
-    runner._report_ranked; the triage section used to ride only in the
-    crawl's own copy."""
+    """maintenance.rewrite_digest is the one digest writer (status sync,
+    deep verify, the harvest pass and the crawl)."""
 
     @staticmethod
     def _text(report_dir, t):
@@ -474,26 +471,3 @@ class TestEveryDigestWriterCarriesTheTriageFunnel:
                                              report_dir):
         assert ops.rewrite_digest(db, local_track) == []
         assert "Harvest triage" not in self._text(report_dir, local_track)
-
-    async def test_the_crawl_report_goes_through_the_same_writer(
-            self, db, company, add_job, local_track, report_dir):
-        job_id = add_job("gh_acme_1", fit=0.9, track=local_track.track)
-        add_job("gh_acme_2", fit=0.4, track=local_track.track)
-        store.record_triage(db, job_id, "ok", "local-tech=ok")
-        watch_hits = [({"name": "Acme"},
-                       {"title": "Watched Role", "url": "https://acme.io/w",
-                        "location": "Durham, NC"}, False)]
-        got = runner.Collected(to_score=[], matches=[], watch_hits=watch_hits,
-                               funnel=[], n_closed=0, n_reopened=0, n_seen=0,
-                               new_ids=set())
-
-        async with store.Writer(db) as w:
-            ranked = await runner._report_ranked(w, local_track, got, scored=0,
-                                                 send=False, top_n=15, bar="=" * 10)
-
-        assert ([j["job_id"] for j in ranked]
-                == [j["job_id"] for j in ops._ranked(db, local_track)])
-        assert len(ranked) == 2
-        text = self._text(report_dir, local_track)
-        assert "Harvest triage, last 7 days" in text
-        assert "Watched Role" in text

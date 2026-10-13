@@ -3,7 +3,7 @@ shares (`token_pattern` / `token_in`).
 
 The keyword lists (CORE/DOMAIN/SKILL/INCLUDE/EXCLUDE_*) are bound from
 config at import time as the SAME list objects config holds, and
-src.crawl.runner.apply_keyword_focus mutates those lists in place, so a
+src.config.apply_keyword_focus mutates those lists in place, so a
 track's focus is visible here without a reload (tests/test_tracks.py pins
 that).
 
@@ -181,6 +181,17 @@ def first_hit(terms: Iterable[str], text: str,
         if low in text and (bounded is None or bounded.search(text) is not None):
             return term
     return None
+
+
+def core_anchor(title: str, description: str = "") -> str | None:
+    """The require_core_anchor gate: the CORE keyword that anchors this
+    posting, or None. Short single-token acronyms (eeg, ecg, rf...) match
+    on word boundaries -- "ecog" fires inside "recognized" -- while longer
+    terms stay substring so "subcortical" still matches "cortical". Reads
+    the LIVE config lists, so under config.keyword_focus this is exactly
+    the track's own CORE vocabulary."""
+    return first_hit(config.CORE_KEYWORDS, f"{title} {description}".lower(),
+                     SHORT_KEYWORD)
 
 
 # --------------------------------------------------------------------- #

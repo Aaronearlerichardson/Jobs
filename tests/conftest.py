@@ -250,7 +250,7 @@ def _keyword_state(cfg):
 def pristine_keywords(cfg):
     """Snapshot/restore config's shared keyword and exclude lists.
 
-    `runner.apply_keyword_focus` mutates the keyword lists IN PLACE (that's
+    `config.apply_keyword_focus` mutates the keyword lists IN PLACE (that's
     the contract filters.py depends on) and `cfg.widen_keywords` empties the
     exclude lists too, so any test that does either would leak into the
     next one without this.

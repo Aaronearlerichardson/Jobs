@@ -1,6 +1,5 @@
 """What the store-maintenance ops share (src/ops/__init__.py lists the
-ops), and the crawl's per-company gate and score, which the runner, triage
-and the manual add all use.
+ops), and the per-company gate and score the manual add uses.
 
 These grew up inside the local track's module but were never
 local-specific: every helper takes the track config `t` (None = the default
@@ -13,7 +12,6 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, overload
 
 from src import config
@@ -29,7 +27,7 @@ from src.match.filters import is_relevant
 from src.match.locality import (NC_RE, geo_label, geo_mode, is_nc, location_unknown,
                                 remote_signal, us_eligible)
 from src.net.http import fetch_failed
-from src.rows import CompanyRow, FetchedJob, JobIn, JobRow, RankedJob, is_watched
+from src.rows import CompanyRow, FetchedJob, JobIn, RankedJob, is_watched
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -157,6 +155,7 @@ def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None,
     `with_description` is for deep verify, which falls back on the stored
     body when the live page cannot be fetched.
 
+    >>> from pathlib import Path
     >>> conn = store.connect(":memory:")
     >>> _ = store.upsert_job(conn, {"job_id": "j1", "title": "T", "track": "local-tech",
     ...                             "location": "Durham, NC", "description": "the body", "resume_fit_score": 0.5})
@@ -175,36 +174,67 @@ def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None,
         with_description=with_description)
 
 
-def write_digest(conn: sqlite3.Connection, t: RuntimeTrack,
-                  watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] | None = None
-                  ) -> tuple[list[RankedJob], list[JobRow], list[JobRow], Path]:
-    """Rank the track's open jobs and rewrite its digest file, harvest
-    triage funnel included. Returns (ranked, pipeline, followups,
-    digest_path).
+def new_watch_hits(conn: sqlite3.Connection, t: RuntimeTrack, since: str
+                   ) -> list[tuple[CompanyRow, FetchedJob, bool]]:
+    """The digest's watch section: open postings at watched companies first
+    seen since `since` (an ISO time) that clear the title gate, the track's
+    exclude gate and `us_eligible`, as (company, job, in_ranking) -- the flag
+    says the row carries `t`'s label.
 
-    The one digest writer behind rewrite_digest and the crawl's
-    runner._report_ranked, so their rankings and sections cannot drift.
+    >>> from pathlib import Path
+    >>> conn = store.connect(":memory:")
+    >>> cid = store.upsert_company(conn, {"name": "Acme", "ats": "lever",
+    ...                                   "slug": "a", "watch": 1})
+    >>> for jid, loc in [("a", "Durham, NC"), ("b", "Tel Aviv, Israel")]:
+    ...     _ = store.upsert_job(conn, {"job_id": jid, "company_id": cid,
+    ...                                 "company_name": "Acme", "title": "Engineer",
+    ...                                 "location": loc})
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), track="t", exclude_gate=False,
+    ...                  tech_title_regex="engineer")
+    >>> [(c["name"], j["location"], seen) for c, j, seen in
+    ...  new_watch_hits(conn, t, "2000-01-01")]
+    [('Acme', 'Durham, NC', False)]
+    >>> new_watch_hits(conn, t, "2999-01-01")
+    []
     """
-    ranked = _ranked(conn, t)
-    pipeline = store.get_pipeline(conn)
-    followups = store.followups_due(conn)
-    path = digest.write_ranked_digest(
-        ranked, t, watch_hits=watch_hits, pipeline=pipeline,
-        followups=followups, triage=store.triage_counts(conn, days=7))
-    return ranked, pipeline, followups, path
+    hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
+    for r in conn.execute(
+            "SELECT j.job_id, j.title, j.url, j.location, j.description, j.track, "
+            "j.company_id FROM open_jobs j JOIN companies_effective c "
+            "ON c.id = j.company_id WHERE c.watch = 1 AND j.first_seen >= ? "
+            "ORDER BY j.company_name, j.first_seen", (since,)):
+        title, desc = r["title"] or "", r["description"] or ""
+        if (not us_eligible(r["location"] or "")
+                or not gates.is_technical_role(title, t)
+                or (t.exclude_gate and gates.exclude_reason(
+                    title, desc, allow_defense=True, track_id=t.id))):
+            continue
+        company = store.get_company(conn, r["company_id"])
+        if company is None:
+            continue
+        hits.append((company, {"id": r["job_id"], "title": title, "url": r["url"] or "",
+                               "location": r["location"] or ""},
+                     t.track in store.track_set(r["track"])))
+    return hits
 
 
 def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
-                   heading: str | Callable[[int], str] = "") -> list[RankedJob]:
-    """Rewrite the track's ranked digest from the store as it stands now,
-    and print `heading` (a callable is given the ranked count) and the top
-    `top_n` of it. Returns the ranked list.
+                   heading: str | Callable[[int], str] = "",
+                   watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] | None = None
+                   ) -> list[RankedJob]:
+    """Rewrite the track's ranked digest from the store as it stands now
+    (harvest triage funnel and `watch_hits` included), and print `heading`
+    (a callable is given the ranked count) and the top `top_n` of it.
+    Returns the ranked list.
 
     The tail of every op that changes what the ranking contains -- the
     status sync and the standalone deep verify both ended with their own
     copy, and the copies had already drifted apart in what they printed.
     """
-    ranked = write_digest(conn, t)[0]
+    ranked = _ranked(conn, t)
+    digest.write_ranked_digest(
+        ranked, t, watch_hits=watch_hits, pipeline=store.get_pipeline(conn),
+        followups=store.followups_due(conn), triage=store.triage_counts(conn, days=7))
     if callable(heading):
         heading = heading(len(ranked))
     if heading:

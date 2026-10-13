@@ -23,7 +23,7 @@ reads:
 Everything is re-exported here, so `import config; config.X` is the whole
 API and callers never name a submodule. Read mutable settings
 (ACCEPT_REMOTE, STORE_DB_PATH, the keyword lists) through the package
-attribute at use time — src/crawl/runner.py and src/dispatch/background.py reassign them
+attribute at use time — keyword_focus and src/dispatch/background.py reassign them
 while a track runs, and a from-bound copy goes stale.
 """
 
@@ -110,4 +110,5 @@ from .tables import NON_US_PLACES, REGISTRIES  # noqa: F401
 from .tracks import (  # noqa: F401
     _build_ui_tracks,
     UI_TRACKS, DEFAULT_TRACK, track_for_engine, RuntimeTrack,
+    apply_keyword_focus, keyword_focus,
 )

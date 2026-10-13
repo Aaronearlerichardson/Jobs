@@ -13,13 +13,9 @@ from conftest import (answer, company_row as _company, fake_response, make_board
 
 from src import config, runstate, store
 from src.claude import api as claude_api
-from src.match import gates
 from src.crawl import harvest
 from src.net import http, parallel
-from src.crawl import runner
 from src.match.names import SLUG_NAME_SOURCE
-from src.ops import maintenance as ops
-from src.ops import scoring
 from src.store.companies import HARVEST_DEAD_AFTER_DAYS
 
 
@@ -499,23 +495,6 @@ async def test_harvest_board_buries_a_definitive_404_at_once(tmp_path, monkeypat
         (f"board-dead:{ats}", 0) if dead else ("fetch-error:harvest", 1))
 
 
-@pytest.mark.parametrize("ats, dead", [("greenhouse", True),
-                                       ("workday", False)])
-async def test_crawl_buries_a_second_definitive_404(db, local_track, ats, dead):
-    c = _company(db, "Acme", ats=ats)
-    snap = {"fetch_errors": 1, "incomplete": True, "capped": False,
-            "capped_total": None, "last_error": "Acme: HTTP 404"}
-    async with store.Writer(db) as w:
-        for _ in range(2):
-            spec = {"company": store.get_company(db, c["id"]), "name": "Acme",
-                    "platform": ats}
-            await runner._gate_sources(w, local_track, [spec], [([], None, snap)],
-                                       commit=True)
-    row = store.get_company(db, c["id"])
-    assert (row["miss_reason"], row["active"]) == (
-        ("board-dead:greenhouse", 0) if dead else (None, 1))
-
-
 async def test_one_board_never_inherits_another_board_fetch_errors(tmp_path,
                                                                    monkeypatch):
     """The count is per task, and a host's task runs one board at a time."""
@@ -850,121 +829,6 @@ async def test_harvest_summary_line_is_bare_when_nothing_is_flagged(
     assert line.strip() == "0 board(s) still named after their own slug/tenant"
 
 
-# ── the crawl gets the same completeness guard ──────────────────────────────
-
-@pytest.mark.parametrize("snapshot, closed", [
-    (None, 1),                      # complete: an absent row closes at once
-    ({"incomplete": True}, 0),      # a page failed: nothing closes
-    ({"capped": True}, 0),          # capped: never closes (see store.jobs)
-])
-async def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
-                                                              snapshot, closed):
-    """The crawl reads fetch_all's per-source snapshot and gives
-    store.sync_job_statuses the same guard the harvester does."""
-    c = _company(db, "Acme")
-    store.upsert_job(db, {"job_id": "gh_acme_old", "company_id": c["id"],
-                          "title": "Still open", "track": local_track.track})
-    async with store.Writer(db) as w:
-        *_, n_reopened, n_closed = await runner._gate_company_board(
-            w, local_track, c, [_job(1)], commit=True, snapshot=snapshot)
-    assert (n_reopened, n_closed) == (0, closed)
-    assert db.execute("SELECT status FROM jobs WHERE job_id='gh_acme_old'"
-                      ).fetchone()["status"] == ("closed" if closed else "open")
-
-
-def test_the_watch_section_lists_us_postings_only(db, local_track):
-    """A watched company's new postings are listed wherever in the US they
-    sit; a seat abroad is neither listed nor stored (2026-09-29: 20 of 29
-    hits were NVIDIA seats in Israel, India and Europe)."""
-    c = _company(db, "Acme", watch=1)
-    jobs = [{**_job(1), "title": "Data Engineer", "location": "US, CA, Santa Clara"},
-            {**_job(2), "title": "Data Engineer", "location": "Israel, Yokneam"}]
-    _, hits = runner._fresh_and_watched(db, local_track, c, jobs, [], commit=True)
-    assert [j["location"] for _, j, _ in hits] == ["US, CA, Santa Clara"]
-    assert store.job_exists(db, "gh_acme_1") and not store.job_exists(db, "gh_acme_2")
-
-
-# ── the crawl adopts harvested rows ─────────────────────────────────────────
-
-async def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
-    """The end-to-end contract: a harvested row (no track) is scored by the
-    next crawl, and the crawl reuses the stored description instead of
-    re-hydrating."""
-    db = tmp_path / "s.db"
-    conn = store.connect(db)
-    c = _company(conn, "Acme", mission_score=0.9, tags="local")
-    store.upsert_job(conn, {"job_id": "gh_acme_1", "company_id": c["id"],
-                            "company_name": "Acme", "title": "Data Engineer",
-                            "url": "https://x.test/j/1",
-                            "location": "Durham, NC",
-                            "description": "python sql pipelines " * 30,
-                            "harvested_at": "2026-09-10T00:00:00"})
-    board = [{"id": "gh_acme_1", "title": "Data Engineer",
-              "url": "https://x.test/j/1", "location": "Durham, NC",
-              "description": "", "ats": "greenhouse"}]
-    t = next(iter(config.UI_TRACKS.values()))
-    t = t.model_copy(update={
-        "db_path": db, "email": False, "verify_top": 0, "require_core_anchor": False,
-        "exclude_gate": False, "geo_gate": False, "cost_guard": 0})
-    monkeypatch.setattr(runner, "build_sources", answer(
-        lambda cfg, tt, include_websearch=None: [
-            {"name": "Acme", "platform": "greenhouse", "company": c,
-             "thunk": answer(board)}]))
-    monkeypatch.setattr(runner, "resume_text", lambda: "resume text")
-    hydrated = []                # jobs that reached the network path bodiless
-
-    async def fake_hydrate(j):
-        if not j.get("description"):
-            hydrated.append(j)
-        return j
-    monkeypatch.setattr(ops.company_fetch, "hydrate_description", fake_hydrate)
-    monkeypatch.setattr(gates, "is_technical_role",
-                        lambda title, tt: True)
-
-    class R:
-        score = 0.7
-
-        def as_columns(self):
-            return {"resume_fit_score": 0.7, "fit_reason": "ok"}
-    monkeypatch.setattr(ops, "score_resume_fit", answer(R()))
-    monkeypatch.setattr(scoring, "self_heal_unscored", answer(0))
-    await runner.run_track(t, fit=True, commit=True, send=False, verify=False,
-                           websearch=False)
-    conn = store.connect(db)
-    row = conn.execute("SELECT * FROM jobs WHERE job_id='gh_acme_1'").fetchone()
-    assert row["resume_fit_score"] == 0.7
-    assert t.track in store.track_set(row["track"])
-    assert not hydrated, "stored description should have been reused"
-
-
-async def test_sample_matches_label_a_job_new_only_if_the_store_lacked_it(
-        tmp_path, monkeypatch, capsys, sweep_track, pristine_keywords):
-    """The label is the store's answer when the job was gated: the crawl has
-    written every match by the time the samples print, so asking then would
-    call each one "(seen)"."""
-    db = tmp_path / "s.db"
-    store.upsert_job(store.connect(db), {"job_id": "feed_old", "title": "Old Role"})
-    t = sweep_track.model_copy(update={
-        "db_path": db, "email": False, "verify_top": 0, "require_core_anchor": False,
-        "exclude_gate": False, "geo_gate": False, "cost_guard": 0,
-        "sources": sweep_track.sources.model_copy(update={"store": False})})
-    feed = [{"id": f"feed_{n}", "title": f"{n.title()} Role", "company": n.title(),
-             "url": f"https://x.test/{n}", "location": "Remote"} for n in ("old", "new")]
-    monkeypatch.setattr(runner, "build_sources", answer([
-        {"name": "Feed", "platform": "feed", "company": None, "thunk": answer(feed)}]))
-    monkeypatch.setattr(gates, "is_technical_role", lambda title, tt: True)
-
-    await runner.run_track(t, fit=False, commit=True, send=False, verify=False,
-                           websearch=False)
-
-    out = capsys.readouterr().out
-
-    def label(title):
-        block = out.split(title)[1].split("url     :")[0]
-        return "NEW" if "(NEW)" in block else "seen" if "(seen)" in block else None
-    assert (label("Old Role"), label("New Role")) == ("seen", "NEW")
-
-
 # ── the pass runs verify + the closed-URL probe, before the digest ──────────
 
 class TestHarvestPassRunsVerifyAndClosedProbe:
@@ -998,15 +862,20 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
     def _kinds(self, order):
         return [o[0] if isinstance(o, tuple) else o for o in order]
 
+    @pytest.mark.parametrize("scoped", [False, True])
     async def test_order_is_triage_then_verify_then_closed_then_digest(
-            self, tmp_path, monkeypatch):
+            self, tmp_path, monkeypatch, scoped):
+        """Scoped (a crawl of one track: `tag` + `report`), only the reported
+        track is verified (plan's doctest pins the tag's narrowing)."""
         db, order = self._wire(monkeypatch, tmp_path)
         monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
-        await harvest.run(db_path=db, max_workers=2, board_fn=make_board_fn())
+        mine = track_with(track="scoped-track", verify_top=3)
+        await harvest.run(db_path=db, max_workers=2, board_fn=make_board_fn(),
+                          **({"tag": "sweep", "report": [mine]} if scoped else {}))
         assert self._kinds(order) == ["triage", "verify", "closed", "digest"]
         verify_kw = next(o[1] for o in order if isinstance(o, tuple)
                          and o[0] == "verify")
-        assert verify_kw["t"].track == "local-tech"
+        assert verify_kw["t"].track == ("scoped-track" if scoped else "local-tech")
         closed_kw = next(o[1] for o in order if isinstance(o, tuple)
                          and o[0] == "closed")
         assert (closed_kw["limit"], closed_kw["stale_days"]) == (

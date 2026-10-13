@@ -194,8 +194,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="Email the digest even if the track config says not to")
     ap.add_argument("--no-websearch", action="store_true",
                     help="Skip the web-search sources this run")
-    ap.add_argument("--confirm-cost", action="store_true",
-                    help="Allow scoring past the track's cost_guard threshold")
+    ap.add_argument("--refresh", action="store_true",
+                    help="Crawl: pull every board, not only the ones not "
+                         "pulled in the last few hours")
     ap.add_argument("--samples", type=int, default=5,
                     help="Sample matches printed for sweep tracks (default 5)")
     ap.add_argument("--top", type=int, default=15, help="Top-N for digests")
@@ -341,7 +342,7 @@ def main(argv: list[str] | None = None) -> None:
         params = {"no_fit": args.no_fit, "preview": args.preview,
                   "send": args.send, "no_verify": args.no_verify,
                   "no_websearch": args.no_websearch,
-                  "confirm_cost": args.confirm_cost, "workers": args.workers,
+                  "refresh": args.refresh, "workers": args.workers,
                   "top": args.top, "samples": args.samples}
 
         async def crawl() -> None:

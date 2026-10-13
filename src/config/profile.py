@@ -76,7 +76,7 @@ CORE_KEYWORDS   = list(PROFILE.keywords.core)
 DOMAIN_KEYWORDS = list(PROFILE.keywords.domain)
 SKILL_KEYWORDS  = list(PROFILE.keywords.skill)
 # Flat view of the three tiers (discover.py --from-keywords, tools/expand.py
-# and the source checkers read it). src/crawl/runner.py rebuilds it IN PLACE
+# and the source checkers read it). config.apply_keyword_focus rebuilds it IN PLACE
 # when a track swaps its keyword focus, so hold the list, not a copy.
 INCLUDE_KEYWORDS = CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS
 
@@ -103,7 +103,7 @@ def keyword_snapshot(cfg: ModuleType | None = None) -> tuple[list[str] | bool, .
     Two things rewrite them IN PLACE -- that is the contract
     src/match/filters.py depends on, having bound the list objects at
     import -- so anything that runs either has to put them back:
-    `src.crawl.runner.apply_keyword_focus` (the four keyword lists and
+    `apply_keyword_focus` (the four keyword lists and
     ACCEPT_REMOTE) and `widen_keywords` (those, plus the EXCLUDE_* lists).
     Four places did, each with its own copy of the same five-line save and
     five-line restore: the crawl's triage pass, the web UI's operation
@@ -172,11 +172,11 @@ EXCLUDE_BOILERPLATE_PHRASES = list(PROFILE.exclude.boilerplate_phrases)
 
 # Per-track keyword/exclude overrides — [keywords.<track>] / [exclude.<track>]
 # tables. Tracks read their own model (e.g. KEYWORDS_BY_TRACK.get("local"))
-# instead of hardcoding their vocabulary; see src/crawl/runner.py.
+# instead of hardcoding their vocabulary; see config.apply_keyword_focus.
 KEYWORDS_BY_TRACK: dict[str, TrackKeywords] = dict(PROFILE.keywords.tracks)
 EXCLUDE_BY_TRACK: dict[str, TrackExclude] = dict(PROFILE.exclude.tracks)
 
-# Mutated at runtime: src/crawl/runner.py sets it to the crawling track's
+# Mutated at runtime: config.apply_keyword_focus sets it to the crawling track's
 # `accept_remote` and src/dispatch/background.py restores it between operations. Read it
 # through the package (`config.ACCEPT_REMOTE`), never from-import it.
 ACCEPT_REMOTE    = PROFILE.locations.accept_remote

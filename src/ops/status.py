@@ -78,7 +78,7 @@ def _sync_skip_note(skipped: dict[str, int]) -> str:
 
 async def sync_status_all(top_n: int = 15, t: RuntimeTrack | None = None) -> tuple[int, int]:
     """Status-only reconciliation: re-fetch every active company's board
-    (same scoping as the crawl — locality unless whole-board), reconcile
+    (locality-scoped unless whole-board), reconcile
     open/closed via sync_job_statuses, and rewrite today's digest from the
     corrected ranking. NO scoring, no Claude API — the cheap recovery pass
     for when statuses have drifted without paying for a full crawl.

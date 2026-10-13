@@ -40,7 +40,6 @@ Crawl-methodology keys, every one overridable in the track's own table:
                       deep-verifies: local/remote triage_status='fit' rows
                       the screen scored at or above this that the top-N slice
                       alone never reaches (see ops.verify_top)
-  cost_guard          max postings scored per run without confirm (0 = off)
   email               email the digest after a crawl (CLI --send overrides)
   digest_min_fit      minimum resume fit a NEW row needs to make the
                       emailed digest (the written digest is unfiltered)
@@ -57,14 +56,16 @@ Crawl-methodology keys, every one overridable in the track's own table:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType
 
 from pydantic import ConfigDict, model_validator
 
 from .paths import DATA_DIR
-from .profile import PROFILE, PROFILE_PATH
-from .profile_schema import ENGINE_ALIASES, Track, parse
+from .profile import PROFILE, PROFILE_PATH, _self, keyword_snapshot, restore_keywords
+from .profile_schema import ENGINE_ALIASES, Track, TrackKeywords, parse
 
 
 class RuntimeTrack(Track):
@@ -157,3 +158,47 @@ def track_for_engine(engine: str) -> RuntimeTrack:
         raise SystemExit(f"no [tracks.*] entry with engine={engine!r} "
                          f"in {PROFILE_PATH}")
     return next((t for t in cands if t.default), cands[0])
+
+
+def apply_keyword_focus(cfg: ModuleType, t: RuntimeTrack) -> None:
+    """Point the shared keyword filter at this track's focus. Mutates the
+    live list objects in place so filters.is_relevant (which imported them
+    at load time) sees the change without a re-import. "extend" adds the
+    track's [keywords.<id>] terms to the global tiers (deduped); "replace"
+    swaps them in wholesale (and rebuilds the flat INCLUDE view, matching
+    the legacy replace semantics). Empty track lists never blank a tier."""
+    kw = getattr(cfg, "KEYWORDS_BY_TRACK", {}).get(t.id) or TrackKeywords()
+    core, dom, skill = list(kw.core), list(kw.domain), list(kw.skill)
+    if t.keyword_mode == "replace":
+        if core:
+            cfg.CORE_KEYWORDS[:] = core
+        if dom:
+            cfg.DOMAIN_KEYWORDS[:] = dom
+        if skill:
+            cfg.SKILL_KEYWORDS[:] = skill
+        cfg.INCLUDE_KEYWORDS[:] = (cfg.CORE_KEYWORDS + cfg.DOMAIN_KEYWORDS
+                                   + cfg.SKILL_KEYWORDS)
+    else:
+        for dst, add in ((cfg.CORE_KEYWORDS, core),
+                         (cfg.DOMAIN_KEYWORDS, dom),
+                         (cfg.SKILL_KEYWORDS, skill)):
+            have = {k.lower() for k in dst}
+            dst.extend(k for k in add if k.lower() not in have)
+    setattr(cfg, "ACCEPT_REMOTE", t.accept_remote)
+
+
+@contextmanager
+def keyword_focus(t: RuntimeTrack) -> Generator[None]:
+    """apply_keyword_focus for the duration of a block, then put the shared
+    lists back (keyword_snapshot / restore_keywords).
+
+    Notes:
+        Lives here, not beside keyword_snapshot in profile.py, because it
+        takes a RuntimeTrack and this module imports profile.
+    """
+    saved = keyword_snapshot()
+    apply_keyword_focus(_self(), t)
+    try:
+        yield
+    finally:
+        restore_keywords(saved)

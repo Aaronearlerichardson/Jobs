@@ -153,7 +153,7 @@ class Crawl(TopN):
     send: Force = None
     verify: Veto = Field(None, validation_alias="no_verify")
     websearch: Veto = Field(None, validation_alias="no_websearch")
-    confirm_cost: bool = False
+    refresh: bool = False
     max_workers: int = Field(6, validation_alias="workers")
     samples: int | None = _omit()
 

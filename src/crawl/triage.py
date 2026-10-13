@@ -21,7 +21,7 @@ Gates, per configured track, in order:
                a conglomerate's corporate score says nothing about the
                division that is hiring.
   2. title     the track's technical-title regex (src.match.gates), title only.
-  3. anchor    the track's require_core_anchor (runner.core_anchor) -- on
+  3. anchor    the track's require_core_anchor (filters.core_anchor) -- on
                the title plus whatever body is stored; a bodiless row
                whose title does not anchor is deferred, not dropped.
   4. geo       the track's geo_gate, judged on the location FIELD: local
@@ -63,7 +63,7 @@ track record ("local-tech=geo;remote-neural=title") is kept in
 triage_detail so a false drop is debuggable; triage_status carries the
 one row verdict the funnel counts.
 
-Keyword focus (runner.keyword_focus) mutates config's shared lists,
+Keyword focus (config.keyword_focus) mutates config's shared lists,
 so the gate phases run one company and one track at a time (off the loop,
 asyncio.to_thread), with the lists restored afterwards. Only hydration and
 scoring run concurrently, and neither reads those lists.
@@ -81,7 +81,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -97,11 +97,10 @@ from src.ats.board.closure import probe_job_open
 from src.ats.board.company import board_origin, needs_detail
 from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, FitResult, score_resume_fit
-from src.config import RuntimeTrack
+from src.config import RuntimeTrack, keyword_focus
 from src.crawl.hydrate import MISS_BACKOFF_S, BoardStats, hydrate_rows
-from src.crawl.runner import core_anchor, keyword_focus
 from src.match import gates
-from src.match.filters import is_relevant
+from src.match.filters import core_anchor, is_relevant
 from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
                                 remote_signal, remote_signal_for, us_eligible)
 from src.net.parallel import fan_out
@@ -133,8 +132,7 @@ DEFER = "defer"
 
 # Claude fit calls per pass. The first pass over a fresh harvest can leave
 # thousands of survivors; the rest wait (their bodies are stored, so the
-# next pass costs no GETs to reach them). Same order of magnitude as the
-# sweep engine's cost_guard.
+# next pass costs no GETs to reach them). A crawl's budget too.
 SCORE_CAP = 300
 # A detail fetch (body, or a location-only lookup) that
 # failed this recently is not retried (the backfill ops' convention); the
@@ -692,10 +690,28 @@ def _print_waiting(rows: list[tuple[CompanyRow, JobRow]], reasons: dict[str, str
         print(f"    ... and {extra} more")
 
 
+def score_order(prefer: Collection[str]) -> Callable[[tuple[CompanyRow, JobRow, list[str], str]], tuple[bool, float, bool]]:
+    """Sort key for the scoring queue: rows that surfaced into a `prefer`red
+    track label first, then best mission, then in-field titles.
+
+    >>> key = score_order({"a"})
+    >>> rows = [({"mission_score": 0.9}, {"title": "Zzz"}, ["b"], ""),
+    ...         ({"mission_score": 0.2}, {"title": "Zzz"}, ["a"], "")]
+    >>> [r[2] for r in sorted(rows, key=key)]
+    [['a'], ['b']]
+    >>> [r[2] for r in sorted(rows, key=score_order(()))]
+    [['b'], ['a']]
+    """
+    return lambda x: (not set(x[2]) & set(prefer),
+                      -(x[0].get("mission_score") or 0.0),
+                      not is_relevant(x[1].get("title") or ""))
+
+
 async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], summary: dict[str, float], score_cap: int, fit: bool,
-                 max_workers: int) -> tuple[dict[str, FitResult], set[str]]:
-    """Phase 4: the only paid step, best companies first, under the cap;
-    within a mission tie, titles that read in-field (`is_relevant`) first.
+                 max_workers: int, prefer: Collection[str] = ()) -> tuple[dict[str, FitResult], set[str]]:
+    """Phase 4: the only paid step, under the cap: `prefer`red tracks'
+    rows first (a scoped crawl's), then best companies; within a mission
+    tie, titles that read in-field (`is_relevant`) first.
 
     Returns (scores, over_cap). Rows over the cap stay pending -- their
     bodies are stored now, so the next pass reaches them for free. A row
@@ -707,9 +723,7 @@ async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], su
         restore) in arrival order: the cap went on A-named companies,
         twenty-odd BCBA postings among them, while 1357 rows waited.
     """
-    order = sorted(final.values(),
-                   key=lambda x: (-(x[0].get("mission_score") or 0.0),
-                                  not is_relevant(x[1].get("title") or "")))
+    order = sorted(final.values(), key=score_order(prefer))
     to_score: list[tuple[CompanyRow, JobRow, list[str], str]] = order[:score_cap] if fit else []
     over_cap: set[str] = {x[1]["job_id"] for x in order[score_cap:]} if fit else set()
     scores: dict[str, FitResult] = {}
@@ -741,7 +755,7 @@ def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str,
     """Phase 5: every verdict, inside the caller's one batch.
 
     A survivor the scorer could not reach (no key, breaker tripped) is
-    still stamped into its tracks unscored: the crawl's self-heal scores
+    still stamped into its tracks unscored: ops.self_heal_unscored scores
     NULL-score tracked rows that have a body.
 
     The one place that sees every verdict, so it is also the one that logs
@@ -825,7 +839,8 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
               hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[BoardStats]] = hydrate_company,
               probe_fn: ProbeFn = probe_job_open,
               now: datetime | None = None, requeue: bool = False,
-              requeue_apply: bool = False) -> Mapping[str, object]:
+              requeue_apply: bool = False,
+              prefer: Collection[str] = ()) -> Mapping[str, object]:
     """Triage every pending row in the store. Returns the summary dict
     (also printed): harvested/pending N, then a count per gate, hydrated,
     scored, surfaced, and how many rows are left pending.
@@ -839,9 +854,12 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
       5. _write_verdicts one batch, every verdict
 
     `limit` caps the rows read this pass; `score_cap` the Claude fit calls;
-    `fit=False` stamps survivors unscored (the crawl's self-heal scores
-    them later); `hydrate=False` leaves undetailed survivors pending.
-    `mission_scorer` / `hydrate_fn` / `probe_fn` (coroutine functions) exist for tests.
+    `fit=False` stamps survivors unscored (a later pass's self-heal scores
+    them); `hydrate=False` leaves undetailed survivors pending.
+    `prefer` (track labels) puts the rows that surfaced into those tracks
+    first in the scoring queue, so the cap goes to a scoped run's own
+    tracks. `mission_scorer` / `hydrate_fn` / `probe_fn` (coroutine
+    functions) exist for tests.
 
     `requeue=True` skips all five phases and instead runs `requeue_rows`
     (report-only unless `requeue_apply=True` too) -- see its docstring for
@@ -887,7 +905,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
                                      hydrate_fn, cutoff, decided, probe_fn)
         final = await _body_gates(db, companies, survivors, tracks, mission_scorer,
                                   decided, summary, waiting, cutoff)
-        scores, over_cap = await _score(final, summary, score_cap, fit, max_workers)
+        scores, over_cap = await _score(final, summary, score_cap, fit, max_workers, prefer)
         await db.batch(_write_verdicts, decided, final, scores, over_cap, tracks,
                        summary, stamp)
 
