@@ -11,8 +11,8 @@ defaults):
                          web search -- each toggleable
     3. gates             require_core_anchor, engine title gate, engine
                          excludes, geo_gate (or remote-stamping when off)
-    4. scoring           resume-fit on the surfaced matches, capped at
-                         triage.SCORE_CAP
+    4. scoring           resume-fit on the surfaced matches, within what is
+                         left of the run's one triage.SCORE_CAP budget
     5. persist + digest  matches upsert with fit columns; matches digest;
                          optional email
 
@@ -310,13 +310,15 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[SourceSpe
 
 
 async def _score_and_persist(db: store.Writer, t: RuntimeTrack, matches: list[FetchedJob],
-                             resume: str | None, *, fit: bool, max_workers: int) -> None:
-    """Score the surfaced matches IN PLACE (the first triage.SCORE_CAP; the
-    rest are stored unscored) and write them, fit columns riding along."""
+                             resume: str | None, *, fit: bool, max_workers: int,
+                             budget: int) -> None:
+    """Score the surfaced matches IN PLACE (the first `budget` fit calls,
+    what the run's harvest.run left; the rest are stored unscored) and
+    write them, fit columns riding along."""
     if fit and matches and resume:
-        to_fit = matches[:triage.SCORE_CAP]
+        to_fit = matches[:max(0, budget)]
         print(f"  scoring {len(to_fit)} match(es) against resume"
-              + (f" ({len(matches) - len(to_fit)} over the {triage.SCORE_CAP} cap stay unscored)"
+              + (f" ({len(matches) - len(to_fit)} over the budget stay unscored)"
                  if len(matches) > len(to_fit) else "") + "...")
 
         async def _one(j: FetchedJob) -> None:
@@ -419,12 +421,16 @@ async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
             harvest.list_plan(t.db_path, min_age_hours=0 if refresh else None,
                               tag=t.store_tag)
         return []
+    budget = triage.SCORE_CAP
     if t.sources.store:
         n = t.verify_top if verify is None else (top_n if verify else 0)
-        await harvest.run(db_path=t.db_path, tag=t.store_tag,
-                          report=[t.model_copy(update={"email": send, "verify_top": n})],
-                          min_age_hours=0 if refresh else None, fit=fit,
-                          top_n=top_n, max_workers=max_workers)
+        summary = await harvest.run(
+            db_path=t.db_path, scope=t.model_copy(update={"email": send, "verify_top": n}),
+            min_age_hours=0 if refresh else None, fit=fit,
+            top_n=top_n, max_workers=max_workers)
+        left = summary.get("score_left")
+        if isinstance(left, (int, float)):
+            budget = int(left)
 
     resume = await asyncio.to_thread(resume_text) if fit else None
     if fit and not resume:
@@ -453,7 +459,7 @@ async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
             fetched = await fetch_all(sources, on_done=_progress)
             got = await _gate_sources(db, t, specs, fetched)
             await _score_and_persist(db, t, got.matches, resume, fit=fit,
-                                     max_workers=max_workers)
+                                     max_workers=max_workers, budget=budget)
             _print_funnel(got.funnel, bar)
             if got.matches or not t.sources.store:
                 await _report_matches(got.matches, t, new_ids=got.new_ids,

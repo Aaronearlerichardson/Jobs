@@ -101,14 +101,12 @@ def test_upsert_never_blanks_a_description():
     assert conn.execute("SELECT description FROM jobs").fetchone()[0] == "body"
 
 
-def test_harvested_row_is_unseen_by_crawl_until_tracked():
+def test_harvest_stamp_survives_a_tracked_upsert():
     conn = store.connect(":memory:")
     store.upsert_job(conn, {"job_id": "h", "title": "T",
                             "harvested_at": "2026-09-10T00:00:00"})
-    assert store.job_exists(conn, "h") and not store.crawl_seen(conn, "h")
     store.upsert_job(conn, {"job_id": "h", "title": "T", "track": "local",
                             "resume_fit_score": 0.5})
-    assert store.crawl_seen(conn, "h")
     row = conn.execute("SELECT harvested_at, track FROM jobs").fetchone()
     assert row["harvested_at"] == "2026-09-10T00:00:00"   # stamp survives
     assert row["track"] == "local"
@@ -865,13 +863,13 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
     @pytest.mark.parametrize("scoped", [False, True])
     async def test_order_is_triage_then_verify_then_closed_then_digest(
             self, tmp_path, monkeypatch, scoped):
-        """Scoped (a crawl of one track: `tag` + `report`), only the reported
-        track is verified (plan's doctest pins the tag's narrowing)."""
+        """Scoped (a crawl of one track: `scope`), only that track is
+        verified (plan's doctest pins the tag's narrowing)."""
         db, order = self._wire(monkeypatch, tmp_path)
         monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
         mine = track_with(track="scoped-track", verify_top=3)
         await harvest.run(db_path=db, max_workers=2, board_fn=make_board_fn(),
-                          **({"tag": "sweep", "report": [mine]} if scoped else {}))
+                          **({"scope": mine} if scoped else {}))
         assert self._kinds(order) == ["triage", "verify", "closed", "digest"]
         verify_kw = next(o[1] for o in order if isinstance(o, tuple)
                          and o[0] == "verify")
@@ -880,6 +878,20 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
                          and o[0] == "closed")
         assert (closed_kw["limit"], closed_kw["stale_days"]) == (
             harvest.CLOSED_PROBE_LIMIT, harvest.CLOSED_PROBE_STALE_DAYS)
+
+    async def test_score_cap_is_one_budget_of_calls(self, tmp_path, monkeypatch):
+        """Self-heal takes what triage's fit CALLS left (refused ones count),
+        and the summary hands the remainder to the caller."""
+        db, order = self._wire(monkeypatch, tmp_path)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(harvest, "resume_text", lambda: "resume")
+        monkeypatch.setattr("src.crawl.triage.run", answer(
+            {"pending": 0, "attempted": 7, "scored": 3}))
+        limits = []
+        monkeypatch.setattr(harvest, "self_heal_unscored", answer(
+            lambda *a, limit, **kw: limits.append(limit) or 2))
+        s = await harvest.run(db_path=db, board_fn=make_board_fn(), score_cap=10)
+        assert limits == [3] and s["score_left"] == 1
 
     @pytest.mark.parametrize("key, fatal, why", [
         ("YOUR_ANTHROPIC_API_KEY_HERE", None, "no ANTHROPIC_API_KEY"),

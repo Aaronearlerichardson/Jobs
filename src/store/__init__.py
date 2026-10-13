@@ -53,7 +53,7 @@ from .health import (  # noqa: F401
 )
 from .jobs import (  # noqa: F401
     TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, clear_triage, close_dead_board_jobs,
-    combined_score, crawl_seen, dedup_jobs, descriptions_for_company,
+    combined_score, dedup_jobs, descriptions_for_company,
     flag_duplicate_jobs, job_exists, join_tracks, mark_desc_checked, merge_jobs, open_in_track_clause,
     ranked_jobs, record_probe_outcome, record_triage, record_verified, remote_admitted,
     retire_stopped, same_posting, store_body, sync_job_statuses, touch_job, track_set,

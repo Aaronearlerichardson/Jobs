@@ -2,8 +2,9 @@
 score nothing.
 
 A crawl of one track (src/crawl/runner.py) is this same pipeline scoped to
-that track: `run`'s `tag` narrows the boards pulled, and `report` the tracks
-verified, digested and announced. Triage still judges every roster track.
+that track: `run`'s `scope` narrows the boards pulled to its store tag and
+the tracks verified, digested and announced to itself. Triage still judges
+every roster track.
 
 Unscoped, it is a slow, thorough pass that runs in the
 background (Task Scheduler at log-on, repeating every few hours) and
@@ -51,7 +52,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -478,23 +479,28 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
               hydrate: bool = False, max_hours: float | None = None,
               board_fn: Callable[..., Awaitable[BoardStats]] = harvest_board,
               triage: bool = True, score_cap: int | None = None, *,
-              tag: str | None = None, report: Sequence[RuntimeTrack] | None = None,
+              scope: RuntimeTrack | None = None,
               fit: bool = True, top_n: int = 5) -> dict[str, float | Mapping[str, object]]:
     """Harvest every planned board (`pull`), then triage what was stored
     and report (`_triage`), in that order. Returns the summary dict (also
     printed); the triage summary rides in it under "triage".
 
-    A scoped run (a crawl of one track) sets `tag` (pull only the boards
-    carrying it) and `report` (the tracks verified, self-healed, digested
-    and announced, each by its own verify_top and email; default every
-    roster track). Triage still judges every roster track, scoring
-    `report`'s rows first. `fit=False` scores nothing; `top_n` is how
-    many of each digest are printed.
+    A scoped run (a crawl of one track) sets `scope`: only the boards
+    carrying its `store_tag` are pulled, and only it is verified,
+    self-healed, digested and announced, by its own verify_top and email.
+    None (the default) pulls every board and reports every roster track.
+    Triage still judges every roster track, scoring `scope`'s rows first.
+    `fit=False` scores nothing; `top_n` is how many of each digest are
+    printed.
 
     `triage=False` skips the gate/hydrate/score pass (the rows wait for
-    the next one, or for `run_scraper.py --triage`); `score_cap` bounds
-    that pass's Claude fit calls (triage.SCORE_CAP when None);
-    `max_workers` bounds its concurrency. `board_fn` exists for tests (it
+    the next one, or for `run_scraper.py --triage`); `score_cap`
+    (triage.SCORE_CAP when None) is the run's one budget of fit-score
+    calls, refused ones included: triage takes what it needs, the
+    self-heal what is left, and the summary's "score_left" is what
+    remains for the caller (the crawl's non-roster sources). Mission
+    scoring and deep verify keep their own limits and draw nothing from it.
+    `max_workers` bounds the concurrency. `board_fn` exists for tests (it
     is harvest_board's signature). A cancel (Ctrl+C) is raised here once
     the pass has unwound.
     """
@@ -506,15 +512,16 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
         print(f"  merged {merged} duplicate company row(s) that shared a board")
     summary = await pull(db_path, only=only, names=names,
                          min_age_hours=min_age_hours, limit=limit,
-                         hydrate=hydrate, max_hours=max_hours, board_fn=board_fn, tag=tag)
+                         hydrate=hydrate, max_hours=max_hours, board_fn=board_fn,
+                         tag=scope.store_tag if scope else None)
     async with store.Writer(db_path) as db:
         flagged = await db.run(store.flag_duplicate_jobs)
     if flagged:
         print(f"  {flagged} cross-board duplicate flag(s) changed")
     out: dict[str, float | Mapping[str, object]] = {**summary}
     if triage:
-        out["triage"] = await _triage(db_path, max_workers, score_cap, since,
-                                      report=report, fit=fit, top_n=top_n)
+        out["triage"], out["score_left"] = await _triage(
+            db_path, max_workers, score_cap, since, scope=scope, fit=fit, top_n=top_n)
     return out
 
 
@@ -696,20 +703,22 @@ def _report(c: CompanyRow, s: BoardStats, summary: dict[str, float]) -> None:
 
 
 async def _triage(db_path: str | Path, max_workers: int, score_cap: int | None, since: str, *,
-                  report: Sequence[RuntimeTrack] | None, fit: bool, top_n: int
-                  ) -> Mapping[str, object]:
-    """The pass's second half; returns triage.run's summary.
+                  scope: RuntimeTrack | None, fit: bool, top_n: int
+                  ) -> tuple[Mapping[str, object], int]:
+    """The pass's second half; returns triage.run's summary and the fit
+    calls left of the run's budget (`run`'s `score_cap`).
 
     The gate/hydrate/score pass over everything pending in the store --
     this pass's rows and any earlier pass left waiting on a body or over
-    the scoring cap -- then, on that same `db_path`, for the `report`
-    tracks (default: every roster track): the self-heal of unscored rows
-    (ops.self_heal_unscored, limited to `score_cap` -- triage.SCORE_CAP
-    when None -- minus what triage scored), deep verify (ops.verify_top, within each track's verify_top),
+    the scoring cap -- then, on that same `db_path`, for `scope` (default:
+    every roster track): the self-heal of unscored rows
+    (ops.self_heal_unscored, limited to the budget triage left),
+    deep verify (ops.verify_top, within each track's verify_top; outside
+    the budget),
     one closed-URL probe (ops.check_closed_jobs: CLOSED_PROBE_LIMIT open
     rows no board has vouched for in CLOSED_PROBE_STALE_DAYS), each
-    track's digest (watch hits first seen since `since` included), an
-    announcement of what surfaced since then (an email and/or a toast, per
+    track's digest (the watch section covers config.WATCH_WINDOW_DAYS), an
+    announcement of what surfaced since `since`, watch hits included (an email and/or a toast, per
     each track's `email` and `notify`), and the Claude spend
     footer. With fit scoring off, no API key, or the breaker already
     tripped, verify and self-heal are one printed line instead.
@@ -722,10 +731,12 @@ async def _triage(db_path: str | Path, max_workers: int, score_cap: int | None, 
         sits here so a dead API prints one line, not one per track.
     """
     cap = triage.SCORE_CAP if score_cap is None else score_cap
-    tracks = list(report) if report is not None else triage.roster_tracks()
+    tracks = [scope] if scope else triage.roster_tracks()
     result = await triage.run(db_path=db_path, max_workers=max_workers,
                               score_cap=cap, fit=fit,
-                              prefer={t.track for t in tracks} if report is not None else ())
+                              prefer={scope.track} if scope else ())
+    attempted = result.get("attempted", 0)
+    left = cap - (int(attempted) if isinstance(attempted, (int, float)) else 0)
     async with store.Writer(db_path) as db:
         down = api_disabled()
         why = ("fit scoring off" if not fit else
@@ -733,13 +744,11 @@ async def _triage(db_path: str | Path, max_workers: int, score_cap: int | None, 
         if why:
             print(f"\n  [!] verify skipped for {len(tracks)} report track(s): {why}")
         else:
-            scored = result.get("scored", 0)
-            room = cap - (int(scored) if isinstance(scored, (int, float)) else 0)
             resume = await asyncio.to_thread(resume_text)
             for t in tracks:
-                if resume and room > 0:
-                    room -= await self_heal_unscored(db, resume, track=t.track,
-                                                     max_workers=max_workers, limit=room)
+                if resume and left > 0:
+                    left -= await self_heal_unscored(db, resume, track=t.track,
+                                                     max_workers=max_workers, limit=left)
                 if t.verify_top:
                     await verify_top(top_n=t.verify_top, max_workers=max(2, max_workers // 2),
                                      db=db, t=t)
@@ -747,11 +756,14 @@ async def _triage(db_path: str | Path, max_workers: int, score_cap: int | None, 
                                 stale_days=CLOSED_PROBE_STALE_DAYS, db=db)
         pipeline, followups = await db.run(
             lambda conn: (store.get_pipeline(conn), store.followups_due(conn)))
+        window = (datetime.now() - timedelta(days=config.WATCH_WINDOW_DAYS)).isoformat()
         for t in tracks:
-            hits = await db.run(new_watch_hits, t, since)
+            hits = await db.run(new_watch_hits, t, window)
+            fresh_hits = await db.run(new_watch_hits, t, since)
             ranked = await db.run(rewrite_digest, t, top_n=top_n, watch_hits=hits,
                                   heading=f"\n  [{t.track}] digest rewritten:")
             await asyncio.to_thread(digest.announce, ranked, t, since,
-                                    pipeline=pipeline, followups=followups, watch_hits=hits)
+                                    pipeline=pipeline, followups=followups,
+                                    watch_hits=hits, fresh_hits=fresh_hits)
     report_cache_stats()
-    return result
+    return result, left

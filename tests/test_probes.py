@@ -293,7 +293,7 @@ class TestSelfHealRetryMarker:
         monkeypatch.setattr(fit_module, "api_disabled", lambda: "HTTP 401")
         jid = add_job("j1", description="x" * 300, fit=None)
 
-        assert await scoring.self_heal_unscored(db, "resume", "local-tech") == 0
+        assert await scoring.self_heal_unscored(db, "resume", "local-tech") == 1
 
         row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
                               (jid,)).fetchone())
@@ -306,12 +306,22 @@ class TestSelfHealRetryMarker:
 
         n = await scoring.self_heal_unscored(db, "resume", "local-tech")
 
-        assert n == 0
+        assert n == 1, "a refused call still counts against the budget"
         assert len(calls) == 1
         row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
                               (jid,)).fetchone())
         assert row["resume_fit_score"] is None
         assert row["fit_reason"] == f"unscored:refused:300:{datetime.now().date()}"
+
+    async def test_limit_cuts_the_calls_refused_ones_included(
+            self, db, add_job, monkeypatch):
+        calls = self._stub_refusal(monkeypatch)
+        for i in range(3):
+            add_job(f"j{i}", description="x" * 300, fit=None)
+
+        n = await scoring.self_heal_unscored(db, "resume", "local-tech", limit=2)
+
+        assert n == len(calls) == 2
 
     async def test_a_fresh_refusal_marker_holds_off_the_next_pass(
             self, db, add_job, monkeypatch):

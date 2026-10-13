@@ -716,7 +716,9 @@ async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], su
     Returns (scores, over_cap). Rows over the cap stay pending -- their
     bodies are stored now, so the next pass reaches them for free. A row
     the scorer refuses for a body under fit.MIN_DESC_CHARS (its SKIP-SCORE
-    print) is counted in summary['skip_score'].
+    print) is counted in summary['skip_score']. `summary['attempted']` is
+    the fit calls made, refused ones included (`scored` counts only the
+    answered): what this step took of the run's one scoring budget.
 
     Notes:
         Mission alone left a roster with no mission scores (the 2026-10-12
@@ -727,6 +729,7 @@ async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], su
     to_score: list[tuple[CompanyRow, JobRow, list[str], str]] = order[:score_cap] if fit else []
     over_cap: set[str] = {x[1]["job_id"] for x in order[score_cap:]} if fit else set()
     scores: dict[str, FitResult] = {}
+    summary["attempted"] = len(to_score)
     if to_score:
         print(f"  scoring {len(to_score)} survivor(s) against the profile"
               + (f" ({len(over_cap)} over the {score_cap}/pass cap wait "
@@ -853,7 +856,8 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
       4. _score          the only paid step, capped per pass
       5. _write_verdicts one batch, every verdict
 
-    `limit` caps the rows read this pass; `score_cap` the Claude fit calls;
+    `limit` caps the rows read this pass; `score_cap` the Claude fit calls
+    (attempts, refused ones included);
     `fit=False` stamps survivors unscored (a later pass's self-heal scores
     them); `hydrate=False` leaves undetailed survivors pending.
     `prefer` (track labels) puts the rows that surfaced into those tracks
@@ -881,8 +885,8 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
         print(f"  {len(rows)} pending row(s), {len(tracks)} track(s): "
               f"{', '.join(t.id for t in tracks)}\n{bar}\n")
         summary: dict[str, float] = {"pending": len(rows), **{g: 0 for g in store.TRIAGE_GATES},
-                                 "hydrated": 0, "scored": 0, "surfaced": 0, "left": 0,
-                                 "skip_score": 0, "secs": 0.0}
+                                 "hydrated": 0, "scored": 0, "attempted": 0,
+                                 "surfaced": 0, "left": 0, "skip_score": 0, "secs": 0.0}
         if not rows or not tracks:
             print("  nothing to do")
             return summary

@@ -177,7 +177,8 @@ def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None,
 def new_watch_hits(conn: sqlite3.Connection, t: RuntimeTrack, since: str
                    ) -> list[tuple[CompanyRow, FetchedJob, bool]]:
     """The digest's watch section: open postings at watched companies first
-    seen since `since` (an ISO time) that clear the title gate, the track's
+    seen since `since` (an ISO time; callers pass the start of
+    config.WATCH_WINDOW_DAYS) that clear the title gate, the track's
     exclude gate and `us_eligible`, as (company, job, in_ranking) -- the flag
     says the row carries `t`'s label.
 
@@ -234,7 +235,7 @@ def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
     ranked = _ranked(conn, t)
     digest.write_ranked_digest(
         ranked, t, watch_hits=watch_hits, pipeline=store.get_pipeline(conn),
-        followups=store.followups_due(conn), triage=store.triage_counts(conn, days=7))
+        followups=store.followups_due(conn), triage=store.triage_counts(conn, days=config.WATCH_WINDOW_DAYS))
     if callable(heading):
         heading = heading(len(ranked))
     if heading:

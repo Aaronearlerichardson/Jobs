@@ -151,8 +151,6 @@ async def test_title_drop_costs_no_fetch_and_no_score(tmp_path, tracks, stubs,
     assert eng["triage_status"] == "ok"
     assert store.track_set(eng["track"]) == {LOCAL}
     assert eng["resume_fit_score"] == 0.7 and eng["description"]
-    # A drop is a verdict too: the crawl must not re-gate and score it.
-    assert store.crawl_seen(conn, "eng") and store.crawl_seen(conn, "nurse")
     assert (s["title"], s["surfaced"], s["hydrated"], s["scored"]) == (1, 1, 1, 1)
 
 
@@ -188,7 +186,6 @@ async def test_clinical_service_title_excluded_before_hydration(
     assert clin["triage_status"] == "exclude"
     assert clin["triage_detail"] == f"{LOCAL}=exclude"
     assert clin["track"] is None and clin["resume_fit_score"] is None
-    assert store.crawl_seen(conn, "rsrch") and store.crawl_seen(conn, "clin")
     assert s["exclude"] == 1
 
 
@@ -439,8 +436,16 @@ async def test_bodiless_survivor_stays_pending(tmp_path, tracks, stubs, local_ad
     assert stubs["hydrate"] == ["nobody"]
 
 
+@pytest.mark.parametrize("refused", [0, 1])
 async def test_score_cap_leaves_the_rest_for_the_next_pass(tmp_path, tracks, stubs,
-                                                           local_addr):
+                                                           local_addr, monkeypatch, refused):
+    """The cap bounds fit CALLS: a refused one still spends it, so the
+    next pass reaches the same number of rows either way."""
+    if refused:
+        async def refuse(title, description="", *, location="", max_tokens=300):
+            stubs["score"].append(title)
+            return FitResult(score=None, reason="unscored")
+        monkeypatch.setattr(triage, "score_resume_fit", refuse)
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
@@ -449,14 +454,15 @@ async def test_score_cap_leaves_the_rest_for_the_next_pass(tmp_path, tracks, stu
 
     s = await _run(db, tracks, stubs, score_cap=1)
 
-    assert len(stubs["score"]) == 1 and s["surfaced"] == 1 and s["left"] == 2
+    assert len(stubs["score"]) == s["attempted"] == s["surfaced"] == 1 and s["left"] == 2
+    assert s["scored"] == 1 - refused
     pending = store.triage_pending(conn)
     assert len(pending) == 2
     assert all(p["description"] for p in pending), "bodies are kept"
     # The next pass scores them without fetching anything.
     stubs["hydrate"].clear()
     s2 = await _run(db, tracks, stubs, score_cap=5)
-    assert not stubs["hydrate"] and s2["surfaced"] == 2
+    assert not stubs["hydrate"] and s2["attempted"] == s2["surfaced"] == 2
     assert not store.triage_pending(conn)
 
 
@@ -486,7 +492,7 @@ async def test_fit_off_stamps_survivors_unscored(tmp_path, tracks, stubs, local_
     row = _row(conn, "e")
     assert not stubs["score"]
     assert row["triage_status"] == "ok" and row["resume_fit_score"] is None
-    assert store.crawl_seen(conn, "e")     # self-heal scores it later
+    assert store.track_set(row["track"])     # self-heal scores it later
 
 
 async def test_hydration_spends_the_board_budget_on_relevant_titles_first(

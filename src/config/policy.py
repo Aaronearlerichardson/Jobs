@@ -127,6 +127,11 @@ WATCH_DIVISION_TITLES = tuple(s.strip().lower()
                               for s in _pol.watch_division_titles
                               if s.strip())
 
+# The rolling window, in days, that the digest's watch section and its
+# triage funnel both cover: watched-company rows first seen, and rows
+# triaged, within it.
+WATCH_WINDOW_DAYS = 7
+
 
 def is_multi_division(name: str | None) -> bool:
     """True if `name` is a known multi-division conglomerate (profile policy).

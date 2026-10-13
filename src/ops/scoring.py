@@ -129,8 +129,9 @@ async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: 
     stay out of the ranking forever even once its description is recovered.
     Score any NULL-score row that now carries a real body (hydrated by
     backfill_board_descriptions, or by an earlier run), on `db` (a
-    store.Writer, or a connection: track_writer). Returns #scored. `limit`
-    caps the rows sent to the scorer in this call.
+    store.Writer, or a connection: track_writer). Returns the fit calls made,
+    refused ones included. `limit` caps them: the due list is cut to it
+    before the scorer is called.
 
     A row the scorer STILL can't score is no longer left exactly as found:
     it is stamped with an _unscored_marker (cause from fit.unscored_cause)
@@ -187,7 +188,6 @@ async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: 
         print(f"  self-heal: scoring {len(due)} newly-described "
               f"job(s) that were previously unscorable"
               + (f" ({held} not yet due for retry)" if held else "") + "...")
-        scored = 0
         async for r, res in fan_out(due,
                                     lambda r: score_resume_fit(
                                         r["title"], r.get("description", ""),
@@ -195,7 +195,6 @@ async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: 
                                     "self-heal scoring", max_workers, with_item=True):
             if res.score is not None:
                 await db.run(store.update_job_scores, r["job_id"], res.as_columns())
-                scored += 1
                 continue
             cause = unscored_cause(res.reason)
             if cause is None:
@@ -208,7 +207,7 @@ async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: 
                       if cause == "refused"
                       else f"retry once the body grows past {MIN_DESC_CHARS} chars")
             print(f"    [{cause}] {(r.get('title') or '')[:50]} - {detail}")
-        return scored
+        return len(due)
 
 
 async def rescore_all(max_workers: int = 6, track: str | None = None,

@@ -212,6 +212,15 @@ class TestSendRankedDigest:
         assert "Watched Co" in plain
         assert "0 new job(s)" in plain
 
+    def test_announce_emails_a_fresh_watch_hit_without_a_ranked_row(self, track, sent):
+        hit = ({"name": "Watched Co"},
+               {"title": "Any Role", "url": "https://w.co/1", "location": "Anywhere"}, False)
+        t = track.model_copy(update={"email": True})
+        since = "2026-10-05T12:00:00"
+        assert digest.announce([], t, since, watch_hits=[hit]) == 0 and not sent
+        assert digest.announce([], t, since, watch_hits=[hit], fresh_hits=[hit]) == 1
+        assert "Watched Co" in sent[0][1]
+
     def test_pipeline_section_carries_only_fresh_closures(self, track, sent):
         pipeline = [
             {"disposition": "applied", "company_name": "Acme",

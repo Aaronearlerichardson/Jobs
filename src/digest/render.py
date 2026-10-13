@@ -498,7 +498,8 @@ def send_ranked_digest(
 def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
              pipeline: list[JobRow] | None = None,
              followups: list[JobRow] | None = None,
-             watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None) -> int:
+             watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None,
+             fresh_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None) -> int:
     """Tell you what surfaced into track `t`'s ranking since `since` (an
     ISO time, compared with each row's `triaged_at`): the count, as an email
     when the track sets `email` and a desktop toast when it sets `notify`.
@@ -506,7 +507,9 @@ def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
 
     Rows that repeat a role you applied to (store.prior_lookup) and rows
     under `digest_min_fit` do not count, so a quiet pass says nothing.
-    `watch_hits` ride along in the email.
+    `watch_hits` (the digest's rolling watch window) ride along in the
+    email; `fresh_hits`, the ones first seen since `since`, also count and
+    trigger a send on their own.
 
     >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), digest_min_fit=0.4)
     >>> rows = [{"job_id": "a", "triaged_at": "2026-10-05T12:00:01", "resume_fit_score": 0.8},
@@ -516,24 +519,41 @@ def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
     1
     >>> announce([], t, "2026-10-05T12:00:00")
     0
+
+    A watch hit first seen since `since` is news on its own; one only in the
+    window (`watch_hits` without `fresh_hits`) is not:
+
+    >>> hit = ({"name": "Acme"}, {"id": "w", "title": "Engineer", "url": "",
+    ...        "location": ""}, False)
+    >>> announce([], t, "2026-10-05T12:00:00", watch_hits=[hit])
+    0
+    >>> announce([], t, "2026-10-05T12:00:00", watch_hits=[hit], fresh_hits=[hit])
+      [T] 1 new match(es) since 2026-10-05T12:00:00 (set [tracks.t] email or notify to be told)
+    1
     """
     fresh = new_ranked_rows(ranked, t, since, "triaged_at",
                             prior=store.prior_lookup(pipeline or []))
-    if not fresh:
+    news = list(fresh_hits or [])
+    if not fresh and not news:
         return 0
     how = []
     if t.email and send_ranked_digest(ranked, t, watch_hits=watch_hits, pipeline=pipeline,
                                       new_since=since, followups=followups, by="triaged_at"):
         how.append("emailed")
-    best = max(fresh, key=lambda j: j.get("resume_fit_score") or 0.0)
-    lead = (f"{(best.get('resume_fit_score') or 0):.2f} {best.get('company_name')}: "
-            f"{(best.get('title') or '')[:60]}")
-    if toast(t, len(fresh), _ranked_digest_path(t), lead):
+    if fresh:
+        best = max(fresh, key=lambda j: j.get("resume_fit_score") or 0.0)
+        lead = (f"{(best.get('resume_fit_score') or 0):.2f} {best.get('company_name')}: "
+                f"{(best.get('title') or '')[:60]}")
+    else:
+        company, job, _ = news[0]
+        lead = f"{company.get('name')}: {(job.get('title') or '')[:60]}"
+    count = len(fresh) + len(news)
+    if toast(t, count, _ranked_digest_path(t), lead):
         how.append("toast")
-    print(f"  {_tag(t)} {len(fresh)} new match(es) since {since}"
+    print(f"  {_tag(t)} {count} new match(es) since {since}"
           + (f" ({', '.join(how)})" if how else
              f" (set [tracks.{t.id}] email or notify to be told)"))
-    return len(fresh)
+    return count
 
 
 def toast(t: RuntimeTrack, count: int, path: str | Path, lead: str = "Open today's digest") -> bool:
