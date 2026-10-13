@@ -1,5 +1,17 @@
+# The local env: free-threaded CPython 3.14 (3.14t), from conda-forge. The repo
+# itself supports 3.12 to 3.14, GIL or not (CI tests each); this is the build
+# the maintainer runs and compiles the exes with.
+#
+#   conda env create -f envs/environment.yml
+#
+# Stock Nuitka cannot compile for 3.14t yet (Nuitka/Nuitka#4060). Building the
+# exes here needs a Nuitka patched for it; once the env exists, run
+#   python tools/patched_nuitka.py
 name: jobs
+channels:
+  - conda-forge
 dependencies:
+  - python-freethreading=3.14
   - pip
   - pip:
     - -r requirements-dev.txt

@@ -57,7 +57,7 @@ jobs:
         if: endsWith(matrix.python, 't')
         run: |
           python -c "
-          import sys, bareduckdb, pyarrow, lxml.etree
+          import sys, bareduckdb, pyarrow, lxml.etree, ddgs, playwright.async_api
           import src.web.server, src.crawl.harvest, src.discovery.board_directory
           assert not sys._is_gil_enabled(), 'an import turned the GIL back on'
           print('GIL off after importing the app')

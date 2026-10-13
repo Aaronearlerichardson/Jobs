@@ -10,7 +10,9 @@ eager = true
 
 [[detect]]
 host = "avature.net"
-re = ['(?i)(https?://[a-z0-9.-]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/(?:SearchJobs|JobDetail|FolderDetail)\b']
+re = [
+    '(?i)(https?://[a-z0-9.-]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/(?:SearchJobs|JobDetail|FolderDetail)\b'
+]
 careers_url = "{slug}"
 
 [canary]
