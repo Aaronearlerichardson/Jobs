@@ -27,11 +27,12 @@ background (Task Scheduler at log-on, repeating every few hours) and
 Triage is where the Claude spend is: one mission call per never-scored
 company and one fit call per posting that clears four free gates. A row
 triage surfaces carries its track labels and score exactly as a crawled
-row would; a row it drops records the gate that dropped it. The crawl
-still adopts anything triage has not reached yet: a row without a track
-label is "fresh" to it (store.crawl_seen), so it is gated and scored like
-a posting seen for the first time, only without the network round-trips
-(the runner reuses the stored description).
+row would; a row it drops records the gate that dropped it, and the crawl
+leaves it dropped. The crawl still adopts anything triage has not reached
+yet: a row with neither a track label nor a verdict is "fresh" to it
+(store.crawl_seen), so it is gated and scored like a posting seen for the
+first time, only without the network round-trips (the runner reuses the
+stored description).
 
 Concurrency: several processes write the one SQLite file (the web UI, the
 scheduled crawl, this). store.connect runs WAL with a busy timeout, and

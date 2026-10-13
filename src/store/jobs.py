@@ -163,10 +163,10 @@ def job_exists(conn: sqlite3.Connection, job_id: str) -> bool:
 
 
 def crawl_seen(conn: sqlite3.Connection, job_id: str) -> bool:
-    """Has a CRAWL already handled this posting? True for a row that
-    carries a track label -- the crawl stamps one whether it scored the row
-    or stored it unscored under a budget guard. A row the harvester stored
-    (no track yet) reads as unseen, so the crawl still gates and scores it:
+    """Has a crawl or triage already handled this posting? True for a row
+    with a track label (the crawl stamps one, scored or not) or a triage
+    verdict. A harvested row triage has not judged reads as unseen, so the
+    crawl still gates and scores it:
 
     >>> from src.store.schema import connect
     >>> conn = connect(":memory:")
@@ -177,10 +177,23 @@ def crawl_seen(conn: sqlite3.Connection, job_id: str) -> bool:
     >>> _ = upsert_job(conn, {"job_id": "h1", "title": "T", "track": "local"})
     >>> crawl_seen(conn, "h1")
     True
+
+    A triage drop is seen too, so the crawl's own gates never overrule it:
+
+    >>> _ = upsert_job(conn, {"job_id": "h2", "title": "T"})
+    >>> record_triage(conn, "h2", "geo", "local=geo")
+    >>> crawl_seen(conn, "h2")
+    True
+
+    Notes:
+        Until 2026-10-13 only the track label counted: the crawl re-gated
+        954 triage drops with ops.keep_job and fit-scored 950 of them. A
+        track added later is not offered rows triage judged before it
+        existed.
     """
-    row = conn.execute("SELECT track FROM jobs WHERE job_id=?",
+    row = conn.execute("SELECT track, triage_status FROM jobs WHERE job_id=?",
                        (job_id,)).fetchone()
-    return bool(row and (row["track"] or "").strip())
+    return bool(row and ((row["track"] or "").strip() or row["triage_status"]))
 
 
 def descriptions_for_company(conn: sqlite3.Connection, company_id: int | None) -> dict[str, str]:

@@ -342,8 +342,9 @@ async def _gate_company_board(
     store.Writer).
 
     Returns (kept, fresh, watch_hits, n_reopened, n_closed). `fresh` is the
-    subset no crawl has handled yet -- a row the harvester stored (no
-    track, no score) counts as fresh: it was fetched, never gated.
+    subset neither a crawl nor triage has handled (store.crawl_seen) -- a
+    row the harvester stored and triage has not judged counts as fresh: it
+    was fetched, never gated.
 
     `snapshot` is the fetch's net.http.snapshot_info() (see fetch_all): an
     incomplete fetch closes nothing, and neither does a capped one --
@@ -381,8 +382,9 @@ async def _gate_company_board(
 def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow, jobs: list[FetchedJob],
                        kept: list[FetchedJob], commit: bool
                        ) -> tuple[list[FetchedJob], list[tuple[CompanyRow, FetchedJob, bool]]]:
-    """(fresh, watch_hits) for _gate_company_board: the `kept` rows no crawl
-    has handled, and the watch section's hits among `jobs`."""
+    """(fresh, watch_hits) for _gate_company_board: the `kept` rows neither
+    a crawl nor triage has handled, and the watch section's hits among
+    `jobs`."""
     fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
     watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
     if is_watched(c):

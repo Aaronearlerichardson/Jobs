@@ -151,7 +151,8 @@ async def test_title_drop_costs_no_fetch_and_no_score(tmp_path, tracks, stubs,
     assert eng["triage_status"] == "ok"
     assert store.track_set(eng["track"]) == {LOCAL}
     assert eng["resume_fit_score"] == 0.7 and eng["description"]
-    assert store.crawl_seen(conn, "eng") and not store.crawl_seen(conn, "nurse")
+    # A drop is a verdict too: the crawl must not re-gate and score it.
+    assert store.crawl_seen(conn, "eng") and store.crawl_seen(conn, "nurse")
     assert (s["title"], s["surfaced"], s["hydrated"], s["scored"]) == (1, 1, 1, 1)
 
 
@@ -187,7 +188,7 @@ async def test_clinical_service_title_excluded_before_hydration(
     assert clin["triage_status"] == "exclude"
     assert clin["triage_detail"] == f"{LOCAL}=exclude"
     assert clin["track"] is None and clin["resume_fit_score"] is None
-    assert store.crawl_seen(conn, "rsrch") and not store.crawl_seen(conn, "clin")
+    assert store.crawl_seen(conn, "rsrch") and store.crawl_seen(conn, "clin")
     assert s["exclude"] == 1
 
 
