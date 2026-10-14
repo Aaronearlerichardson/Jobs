@@ -32,7 +32,7 @@ have it invoke `harvest.py --once` on the schedule instead -- the
 scheduler can wake the machine; this script cannot. Each pass pulls every
 board with a fetchable ATS that has not been harvested in the last
 --min-age-hours and stores every posting unscored, then runs the triage
-pass (src/crawl/triage.py): the crawl's gates cheapest-first, bodies only
+pass (src/crawl/triage.py): the track gates cheapest-first, bodies only
 for survivors, one Claude fit call only for each hydrated survivor, capped
 per pass. A second copy started while one is running exits at once (lock
 file in the data directory). Each pass gets its own session log

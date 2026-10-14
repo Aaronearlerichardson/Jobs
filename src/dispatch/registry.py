@@ -43,9 +43,9 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Field, ValidationError, model_validator)
 
 from src import config
-from src.crawl import runner, triage
+from src.crawl import harvest, triage
 from src.discovery import board_directory, local_sourcing, paste_ingest, registries
-from src.ops import (backfill, ingest, rekey, repair, restamp, roster, scoring,
+from src.ops import (backfill, rekey, repair, restamp, roster, scoring,
                      status)
 from src.validation import drop_blank, error_lines
 
@@ -152,10 +152,8 @@ class Crawl(TopN):
     commit: Negated = Field(True, validation_alias="preview")
     send: Force = None
     verify: Veto = Field(None, validation_alias="no_verify")
-    websearch: Veto = Field(None, validation_alias="no_websearch")
     refresh: bool = False
     max_workers: int = Field(6, validation_alias="workers")
-    samples: int | None = _omit()
 
 
 class Verify(TopN):
@@ -286,14 +284,14 @@ REGISTRY: dict[str, RegistryEntry] = {
     "crawl": {
         "label": "Crawl",
         "engine": None,   # one command for every track; dispatches on engine
-        "target": runner.run_track,
+        "target": harvest.run_track,
         "params": Crawl,
     },
     # ── maintenance (any track) ───────────────────────────────────────
     "sync": {
         "label": "Sync statuses",
         "engine": None,
-        "target": status.sync_status_all,
+        "target": harvest.sync_statuses,
         "params": TopN,
     },
     "verify": {
@@ -381,7 +379,7 @@ REGISTRY: dict[str, RegistryEntry] = {
     "add-job": {
         "label": "Add manual job",
         "engine": None,
-        "target": ingest.add_manual_job,
+        "target": harvest.add_job,
         "params": AddJob,
     },
     # ── roster growth (the location-scoped engine's store) ────────────

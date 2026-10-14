@@ -221,8 +221,8 @@ Two things a reviewer holds to:
 Every platform is on the engine. Flag a new operator in the field grammar
 (`src/ats/board/fields.py`) unless at least two platforms use it.
 Conditionals in config are behaviour in config: a one-platform oddity is a
-named mechanism or a `kind`, and the non-uniform sources (`hnhiring`,
-`websearch`, the feeds) stay code.
+named mechanism or a `kind`, and the non-uniform sources (`hnhiring` and
+the other feeds) stay code.
 
 ## Docstrings
 

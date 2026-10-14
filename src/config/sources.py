@@ -1,15 +1,16 @@
-"""Non-company sources, from the profile's [sources] table: forums, web
-searches and aggregator feeds. The per-company boards are the store's
-roster, not config.
+"""Non-company sources, from the profile's [sources] table: forums and
+aggregator feeds. The per-company boards are the store's roster, not config.
 
-The forum and web-search lists ship EMPTY: they encode a field's
-vocabulary, so a generic default would only burn requests. The aggregator
+The forum list ships EMPTY: it encodes a field's vocabulary, so a generic
+default would only burn requests. The aggregator
 feeds are field-agnostic (they carry every kind of role and are filtered
 by your keywords), so they ship ON with sensible defaults. USAJOBS and
 Getro are OFF: one needs credentials, the other names a place.
 """
 
 from __future__ import annotations
+
+from typing_extensions import TypedDict
 
 from .profile import PROFILE
 
@@ -20,34 +21,20 @@ _src = PROFILE.sources
 DISCOURSE_BOARDS = [(b.label or b.url, b.url, b.category_id)
                     for b in _src.discourse]
 
-# Web searches for the sweep-style crawl (runner.build_sources, enabled by
-# [tracks.*].sources.websearch) — [sources].websearch
-# ({ label, query, max_results }). DuckDuckGo text search; each result URL is
-# parsed for JSON-LD JobPosting.
-WEBSEARCH_QUERIES: list[tuple[str, str, int]] = [
-    ((q.label or q.query)[:60], q.query, q.max_results)
-    for q in _src.websearch
-]
-
 # =========================================================================
 #  AGGREGATOR FEEDS (non-company-owned job boards, no API key required)
 # =========================================================================
 #
-# Run-to-completion each crawl: one HTTP request returns every active
-# listing, so they need no per-company config. Filtering happens in the
-# fetcher via is_relevant().
-
-# RemoteOK: single JSON endpoint at https://remoteok.com/api.
-REMOTEOK_ENABLED = _src.remoteok
+# Each is pulled whole by the harvest (src/crawl/harvest.py feed_plan),
+# stored unfiltered and judged by triage. FEEDS, below, is the one
+# table of feed families.
 
 # Remotive: https://remotive.com/api/remote-jobs (one category or all).
 # Categories: "software-dev", "data", "all-others", etc. None = all.
-REMOTIVE_ENABLED   = _src.remotive
 REMOTIVE_CATEGORY: str | None = _src.remotive_category or None
 
 # Hacker News "Ask HN: Who is hiring?" monthly thread.
 # max_threads=2 covers the current + previous month's threads.
-HNHIRING_ENABLED     = _src.hnhiring
 HNHIRING_MAX_THREADS = _src.hnhiring_max_threads
 
 # USAJOBS, [sources.usajobs]. OFF by default, unlike the feeds above: it is
@@ -57,7 +44,6 @@ HNHIRING_MAX_THREADS = _src.hnhiring_max_threads
 # omitted) means the technical set in src/ats/feeds/usajobs.DEFAULT_SERIES;
 # [] means every series.
 _usajobs = _src.usajobs
-USAJOBS_ENABLED  = _usajobs.enabled
 USAJOBS_KEYWORD: str | None = _usajobs.keyword or None
 USAJOBS_LOCATION: str | None = _usajobs.location or None
 USAJOBS_RADIUS   = _usajobs.radius
@@ -69,10 +55,11 @@ USAJOBS_RESULTS_PER_PAGE = _usajobs.results_per_page
 # on one host, each posting naming its employer. OFF by default like
 # USAJOBS: a board is a place, so there is no generic default. `boards` are
 # board URLs (any page; only the host is used). `max_details` caps the
-# posting pages fetched per board per crawl (see src/ats/feeds/getro.py
-# — titles are screened before any page fetch).
+# posting pages fetched per board per crawl (see src/ats/feeds/getro.py:
+# the listing's newest max_details postings are fetched unscreened).
+# Notes: when Getro is switched on, store its listing bodiless and let triage
+# hydrate only the survivors, as boards do (not done; Getro is off, no boards).
 _getro = _src.getro
-GETRO_ENABLED = _getro.enabled
 GETRO_BOARDS: list[str] = [b.strip() for b in _getro.boards if b.strip()]
 GETRO_MAX_DETAILS = _getro.max_details
 
@@ -90,6 +77,47 @@ BOARD_DIRECTORY = _src.board_directory
 # src/discovery/registries.py): the searches an Apify actor runs for
 # employers hiring near you, and what one run may cost.
 GOOGLE_JOBS = _src.google_jobs
+
+class FeedFamily(TypedDict):
+    """One feed family: `switch` is the track `sources` switch that enables it
+    (null: every track), `on` whether the profile turns it on, and `calls` the
+    fetches it makes -- an instance label (null for a family with one source)
+    and the keyword arguments of its fetcher (src/ats/feeds.FETCH)."""
+    switch: str | None
+    on: bool
+    calls: list[tuple[str | None, dict[str, str | int | bool | list[str] | None]]]
+
+
+#: Every feed family once; a row's `source` is "<family>" or
+#: "<family>:<instance>". src/crawl/harvest.feed_plan iterates this and
+#: src/ats/feeds.FETCH maps each family to its fetcher. (RemoteOK is the one
+#: JSON endpoint at https://remoteok.com/api.)
+FEEDS: dict[str, FeedFamily] = {
+    "remoteok": {"switch": "aggregators", "on": _src.remoteok,
+                 "calls": [(None, {})]},
+    "remotive": {"switch": "aggregators", "on": _src.remotive,
+                 "calls": [(None, {"category": REMOTIVE_CATEGORY})]},
+    "hn": {"switch": "aggregators", "on": _src.hnhiring,
+           "calls": [(None, {"max_threads": HNHIRING_MAX_THREADS})]},
+    "rss": {"switch": "aggregators", "on": bool(RSS_FEEDS),
+            "calls": [(label, {"source_label": label, "url": url,
+                               "default_location": loc,
+                               "remote_board": loc.strip().lower() == "remote"})
+                      for label, url, loc in RSS_FEEDS]},
+    "discourse": {"switch": "aggregators", "on": bool(DISCOURSE_BOARDS),
+                  "calls": [(name, {"display_name": name, "base_url": base,
+                                    "category_id": cat})
+                            for name, base, cat in DISCOURSE_BOARDS]},
+    "usajobs": {"switch": None, "on": _usajobs.enabled,
+                "calls": [(None, {"keyword": USAJOBS_KEYWORD,
+                                  "location": USAJOBS_LOCATION,
+                                  "radius": USAJOBS_RADIUS,
+                                  "series": USAJOBS_SERIES,
+                                  "results_per_page": USAJOBS_RESULTS_PER_PAGE})]},
+    "getro": {"switch": None, "on": _getro.enabled and bool(GETRO_BOARDS),
+              "calls": [(None, {"board_url": b, "max_details": GETRO_MAX_DETAILS})
+                        for b in GETRO_BOARDS]},
+}
 
 # Wikidata's API: the domain lookup's fallback (src/discovery/resolve/domain.py)
 # and tools/miss_cleanup.py.

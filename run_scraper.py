@@ -192,13 +192,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="Crawl without resume-fit scoring (no Claude spend)")
     ap.add_argument("--send", action="store_true",
                     help="Email the digest even if the track config says not to")
-    ap.add_argument("--no-websearch", action="store_true",
-                    help="Skip the web-search sources this run")
     ap.add_argument("--refresh", action="store_true",
                     help="Crawl: pull every board, not only the ones not "
                          "pulled in the last few hours")
-    ap.add_argument("--samples", type=int, default=5,
-                    help="Sample matches printed for sweep tracks (default 5)")
     ap.add_argument("--top", type=int, default=15, help="Top-N for digests")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--no-verify", action="store_true",
@@ -341,9 +337,8 @@ def main(argv: list[str] | None = None) -> None:
         # ── the crawl (daily refresh): one track, or every configured track
         params = {"no_fit": args.no_fit, "preview": args.preview,
                   "send": args.send, "no_verify": args.no_verify,
-                  "no_websearch": args.no_websearch,
                   "refresh": args.refresh, "workers": args.workers,
-                  "top": args.top, "samples": args.samples}
+                  "top": args.top}
 
         async def crawl() -> None:
             for tcfg in ([t] if t else list(config.UI_TRACKS.values())):

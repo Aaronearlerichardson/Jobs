@@ -1,5 +1,5 @@
 """Harvest triage (src/crawl/triage.py): the harvester's unscored rows go
-through the crawl's gates cheapest-first, and only survivors pay for a
+through the track gates cheapest-first, and only survivors pay for a
 body fetch or a fit score. Offline: the mission scorer, the hydrator and
 the fit scorer are all stubbed."""
 
@@ -693,6 +693,7 @@ async def test_skip_score_short_body_counted_in_summary(tmp_path, tracks, stubs,
     s = await _run(db, tracks, stubs)
 
     assert s["skip_score"] == 1 and s["surfaced"] == 1
+    assert s["attempted"] == 0  # no call made, no budget spent
     row = _row(conn, "stub")
     assert row["triage_status"] == "ok" and row["resume_fit_score"] is None
     out = capsys.readouterr().out
@@ -735,6 +736,34 @@ async def test_tag_scoped_track_ignores_untagged_companies(tmp_path, tracks, stu
     row = _row(conn, "far_eeg")
     assert row["triage_status"] == "geo"
     assert row["triage_detail"] == f"{LOCAL}=geo"      # no sweep verdict
+
+
+async def test_a_feed_row_is_judged_as_an_unknown_company_by_the_tracks_that_read_it(
+        tmp_path, tracks, stubs, monkeypatch, elsewhere):
+    """A feed's row has no company: no mission call and no roster row, no
+    detail fetch even without a body, and only the tracks whose `sources`
+    switch reads its family judge it (config.FEEDS)."""
+    monkeypatch.setitem(config.FEEDS["remoteok"], "on", True)
+    agg = tracks[1].sources.model_copy(update={"aggregators": True})
+    tracks[1] = tracks[1].model_copy(update={"sources": agg, "store_tag": "x"})
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    for jid, title, body in [("remoteok_1", "EEG Data Engineer", ""),
+                             ("remoteok_2", "Barista", "python sql"),
+                             ("remoteok_3", "Data Engineer", "python sql")]:
+        store.upsert_job(conn, {"job_id": jid, "company_name": "Zed", "title": title,
+                                "location": elsewhere, "description": body,
+                                "source": "remoteok"})
+
+    await _run(db, tracks, stubs)
+
+    assert stubs["mission"] == [] and stubs["hydrate"] == []
+    assert conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 0
+    one, two, three = (_row(conn, f"remoteok_{n}") for n in (1, 2, 3))
+    assert (one["triage_status"], store.track_set(one["track"])) == ("ok", {SWEEP})
+    assert one["triage_detail"] == f"{SWEEP}=ok", "the local track does not read feeds"
+    assert two["triage_status"] == "title"
+    assert (three["triage_status"], three["triage_detail"]) == ("anchor", f"{SWEEP}=anchor")
 
 
 async def test_keyword_focus_is_restored(tmp_path, tracks, stubs, local_addr, cfg):

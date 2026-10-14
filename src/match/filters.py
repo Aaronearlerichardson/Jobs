@@ -360,9 +360,8 @@ def is_relevant(title: str, description: str = "", *, watch_titles: bool = False
     this module.
 
     `watch_titles=True` adds tier 3 — the WATCHED-conglomerate title
-    escape hatch. Only the two DIVISION gates pass it (src.crawl.triage's
-    and src.ops.maintenance.keep_job's, which ask the same question of the
-    same posting on the harvest and crawl paths), and only for a company
+    escape hatch. Only the DIVISION gate passes it (src.crawl.triage's),
+    and only for a company
     that is watched; every other caller (the hydration ordering,
     the discovery filters) gets the unchanged two-tier answer.
 

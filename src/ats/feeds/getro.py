@@ -39,7 +39,6 @@ import asyncio
 import json
 import re
 from collections import deque
-from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -253,17 +252,13 @@ async def _fetch_sitemap(origin: str, label: str) -> list[dict[str, str]]:
     return entries
 
 
-async def fetch_getro_all(board_url: str, max_details: int = 150, detail_delay: float = 0.3,
-                          gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
-    """Relevant postings from one Getro board, as crawler job dicts.
+async def fetch_getro_all(board_url: str, max_details: int = 150, detail_delay: float = 0.3) -> list[FetchedJob]:
+    """Every posting of one Getro board, as crawler job dicts.
 
-    Sitemap first; then, newest first, one page fetch per posting whose
-    slug title passes `gate`, up to `max_details` (the rest wait for the
-    next crawl: newest first, the cap trims the stalest), `detail_delay`
-    seconds apart, each page read off the loop. The final relevance
-    decision is `gate(title, description)` on the page's full text;
-    `gate=None` keeps every posting. Returns [] — never raises — when
-    the board is unreachable.
+    Sitemap first; then, newest first, one page fetch per posting, up to
+    `max_details` (the rest wait for the next crawl: newest first, the cap
+    trims the stalest), `detail_delay` seconds apart, each page read off
+    the loop. Returns [] — never raises — when the board is unreachable.
 
     See tests/test_fetcher_parsers.py::TestGetro.
     """
@@ -279,11 +274,10 @@ async def fetch_getro_all(board_url: str, max_details: int = 150, detail_delay: 
     jobs: list[FetchedJob] = []
     fetched = 0
     for e in entries:
-        if gate is not None and not gate(e["title_guess"]):
-            continue
         if fetched >= max_details:
             print(f"    [i] Getro {label}: detail cap ({max_details}) reached; "
                   f"older postings wait for the next crawl")
+            http.note_capped(len(entries))
             break
         try:
             r = await http.send("GET", e["url"], headers=HEADERS)
@@ -296,7 +290,7 @@ async def fetch_getro_all(board_url: str, max_details: int = 150, detail_delay: 
         job = await asyncio.to_thread(lambda: parse_job_page(r.text, board_url, e["url"]))
         if job and not job["posted_at"]:
             job["posted_at"] = norm_posted_date(e["lastmod"])
-        if job and (gate is None or gate(job["title"], job["description"])):
+        if job:
             jobs.append(job)
         if detail_delay:
             await asyncio.sleep(detail_delay)

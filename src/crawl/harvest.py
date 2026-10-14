@@ -1,25 +1,27 @@
 """Background whole-board harvester: fetch EVERY board, store everything,
 score nothing.
 
-A crawl of one track (src/crawl/runner.py) is this same pipeline scoped to
-that track: `run`'s `scope` narrows the boards pulled to its store tag and
-the tracks verified, digested and announced to itself. Triage still judges
-every roster track.
+A crawl of one track (`run_track`) is this same pipeline scoped to
+that track: `run`'s `scope` narrows the boards pulled to its store tag, the
+feeds to the ones it reads, and the tracks verified, digested and announced
+to itself. Triage still judges every track that reads harvested rows.
 
 Unscoped, it is a slow, thorough pass that runs in the
 background (Task Scheduler at log-on, repeating every few hours) and
 
   * takes every company with a fetchable board (store.harvestable_companies:
-    active or not, dormant or not, any tag -- only rows with no board, or a
+    active or not, any tag -- only rows with no board, or a
     blocklisted name, are skipped), except an inactive one mission-scored
     off-mission (plan), whose open postings the pass closes instead
     (store.retire_stopped);
   * pulls the WHOLE board, no location filter, as a bodiless listing;
   * stores the rows unscored and untracked (jobs.harvested_at stamped), and
     reconciles open/closed status against the full snapshot;
-  * never touches crawl_state;
+  * pulls the non-company FEEDS the tracks read (RemoteOK, Remotive, HN
+    who-is-hiring, RSS, Discourse, USAJOBS, Getro) the same way, ungated,
+    their rows tagged with `jobs.source` instead of a company;
   * then hands everything pending to the triage pass (src/crawl/triage.py),
-    which runs the crawl's gates cheapest-first, hydrates only the
+    which runs the track gates cheapest-first, hydrates only the
     survivors, and fit-scores only the hydrated survivors.
 
 Triage is where the Claude spend is: one mission call per never-scored
@@ -55,8 +57,9 @@ import time
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from contextlib import closing
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
 
 from typing_extensions import TypedDict
 
@@ -66,15 +69,19 @@ from src import store
 from src import tags
 from src.ats.board import company as company_fetch
 from src.ats.coords import slug_named
+from src.ats.feeds import FETCH
+from src.ats.feeds.getro import board_host
 from src.claude.api import api_disabled, have_api_key, report_cache_stats
 from src.claude.resume import resume_text
 from src.config import RuntimeTrack
 from src.crawl import health, triage
 from src.crawl.hydrate import MISS_BACKOFF_S, BoardStats, hydrate_rows
 from src.crawl.triage import DEFAULT_WORKERS
-from src.match.locality import geo_mode, location_unknown
+from src.discovery.apply import attribute_employers
+from src.match.locality import geo_mode, location_unknown, remote_signal_for
 from src.net import http
-from src.ops.maintenance import new_watch_hits, rewrite_digest
+from src.ops.ingest import add_manual_job
+from src.ops.maintenance import new_watch_hits, rewrite_digest, track_writer
 from src.ops.repair import bury_404_board
 from src.ops.scoring import self_heal_unscored, verify_top
 from src.ops.status import check_closed_jobs
@@ -308,35 +315,100 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
 
 def list_plan(db_path: str | Path | None, only: Collection[str] | None = None,
               names: Iterable[str] | None = None, min_age_hours: float | None = None,
-              limit: int | None = None, tag: str | None = None) -> None:
-    """Print the boards `plan` would pull from the store at `db_path`, one
-    line each, and fetch nothing (harvest.py --list; a previewed crawl)."""
+              limit: int | None = None, *,
+              scope: RuntimeTrack | None = None) -> None:
+    """Print the boards and feeds `run` would pull from the store at
+    `db_path` for the same arguments, one line each, and fetch nothing
+    (harvest.py --list; a previewed crawl)."""
+    tag, feeds, roster = _pull_scope(scope, only, names)
     stats: PlanStats = {}
     with closing(store.connect(db_path)) as conn:
         boards = plan(conn, only=only, names=names, min_age_hours=min_age_hours,
-                      limit=limit, stats=stats, tag=tag)
+                      limit=limit, stats=stats, tag=tag) if roster else []
     for c in boards:
         print(f"  {c['name']}  ({c['ats']}, ~{c.get('total_job_count') or 0}"
               f" jobs, last harvested {c.get('last_harvested_at') or 'never'})")
     print(f"  {len(boards)} board(s)" + deferred_note(stats))
+    for f in feeds:
+        print(f"  {f.source}  (feed)")
+    if feeds:
+        print(f"  {len(feeds)} feed(s)")
+
+
+# --------------------------------------------------------------------------- #
+#  Feeds                                                                       #
+# --------------------------------------------------------------------------- #
+
+class Feed(NamedTuple):
+    """One non-company source the pull reads whole: the `jobs.source` its rows
+    carry ("<family>" or "<family>:<instance>", family per config.FEEDS)
+    and its ungated fetch."""
+    source: str
+    fetch: Callable[[], Awaitable[list[FetchedJob] | None]]
+
+
+def _pull_scope(scope: RuntimeTrack | None, only: Collection[str] | None,
+                names: Iterable[str] | None) -> tuple[str | None, list[Feed], bool]:
+    """What a run scoped to `scope` pulls beyond the board filters: the
+    roster tag, the feeds (none for an `only`/`names` pass), and whether
+    the roster is read at all."""
+    return (scope.store_tag if scope else None,
+            [] if only or names else feed_plan(scope),
+            scope is None or scope.sources.store)
+
+
+def feed_plan(scope: RuntimeTrack | None = None) -> list[Feed]:
+    """The feeds a pull reads: those of the families `scope` (default: every
+    configured track) reads (config.feed_families), fetched whole.
+
+    >>> from src.config.profile_schema import TrackSources
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), sources=TrackSources(aggregators=True))
+    >>> ("remoteok" in {f.source for f in feed_plan(t)}) == config.FEEDS["remoteok"]["on"]
+    True
+    >>> off = t.model_copy(update={"sources": TrackSources(aggregators=False)})
+    >>> {f.source.split(":")[0] for f in feed_plan(off)} <= {"usajobs", "getro"}
+    True
+    """
+    on: set[str] = set()
+    for t in [scope] if scope else config.UI_TRACKS.values():
+        on |= config.feed_families(t)
+    feeds: list[Feed] = []
+    for family, fam in config.FEEDS.items():
+        for label, kwargs in fam["calls"] if family in on else ():
+            if family == "getro":       # one instance per board host
+                label = board_host(str(kwargs["board_url"]))
+                if not label:
+                    continue
+            feeds.append(Feed(family if label is None else f"{family}:{label}",
+                              partial(FETCH[family], **kwargs)))
+    return feeds
 
 
 # --------------------------------------------------------------------------- #
 #  One board                                                                   #
 # --------------------------------------------------------------------------- #
 
-def _row(job: FetchedJob, company: CompanyRow, stamp: str) -> JobIn:
+def _row(job: FetchedJob, company: CompanyRow | None, stamp: str,
+         source: str | None = None) -> JobIn:
     """The store row for one harvested posting: identity, body, dates -- no
-    track, no score."""
+    track, no score. A feed's posting (`company` None, `source` its feed)
+    names its own employer, and carries the remote signal the fetcher's
+    hint or its text gives, which triage cannot recover from the row."""
     desc = (job.get("description") or "")[:config.MAX_DESC_CHARS]
-    return {
-        "job_id": job["id"], "company_id": company.get("id"),
-        "company_name": company.get("name"), "title": job.get("title"),
+    row: JobIn = {
+        "job_id": job["id"],
+        "company_id": company.get("id") if company else job.get("company_id"),
+        "company_name": company.get("name") if company else job.get("company"),
+        "title": job.get("title"),
         "url": job.get("url"), "location": job.get("location"),
         "geo_mode": geo_mode(job.get("location", ""), desc),
         "posted_at": job.get("posted_at"), "description": desc,
         "harvested_at": stamp,
     }
+    if source:
+        sig = remote_signal_for(job)
+        row.update(source=source, remote_eligible=bool(sig), remote_signal=sig)
+    return row
 
 
 def _soft_failed(stats: BoardStats) -> bool:
@@ -351,6 +423,41 @@ def _soft_failed(stats: BoardStats) -> bool:
     return not stats.get("fetched") and bool(stats.get("fetch_errors"))
 
 
+def _stats(name: str | None, ats: str | None) -> BoardStats:
+    """The stats a board's (or feed's) pull starts from."""
+    return {"name": name, "ats": ats, "fetched": 0, "new": 0, "hydrated": 0,
+            "unhydrated": 0, "closed": 0, "reopened": 0, "fetch_errors": 0,
+            "err": None, "incomplete": False, "capped": False,
+            "capped_total": None, "secs": 0.0}
+
+
+async def _snapshot(fetch: Callable[[], Awaitable[list[FetchedJob] | None]],
+                    stats: BoardStats,
+                    progress: Callable[[], object]) -> list[FetchedJob] | None:
+    """`fetch`'s rows, with the fetch accounting (net.http.snapshot_info)
+    added to `stats`; None, `stats` filled, when it raised. `progress()`
+    is called when the listing is back.
+
+    A fetcher does not RAISE on a dead board -- it reports and returns [],
+    which is also what a board with nothing on it returns, so `fetched: 0`
+    alone cannot tell "404" from "no openings". net.http counts the
+    reported failures per task, and a host's task runs one board at a
+    time, so resetting around the fetch attributes them to this board.
+    """
+    http.reset_fetch_failures()
+    try:
+        jobs = await fetch() or []
+    except Exception as e:                      # noqa: BLE001 - reported
+        stats["fetch_errors"] = http.fetch_failures()
+        stats["incomplete"] = True
+        stats["err"] = f"fetch: {type(e).__name__}: {e}"
+        return None
+    progress()
+    stats["fetched"] = len(jobs)
+    stats.update(http.snapshot_info())
+    return jobs
+
+
 async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = False,
                         delay: float | None = None, now: datetime | None = None,
                         backoff_s: float = MISS_BACKOFF_S,
@@ -358,7 +465,7 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
     """Fetch, hydrate and store ONE board, its store work on `db` (the
     pass's store.Writer). Returns a stats dict; a fetch failure is
     reported, not raised, and leaves the store untouched (nothing is
-    closed on a failed or empty snapshot; see _write_board for an
+    closed on a failed or empty snapshot; see _write_rows for an
     incomplete or capped one). `delay` defaults to config.HYDRATE_DELAY_S.
     `progress()` is called when the listing is back and after every
     hydration GET (pull's stall bound).
@@ -374,30 +481,14 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
     failure fills last_error, never `err`, which means an exception.
     """
     t0 = time.monotonic()
-    stats: BoardStats = {"name": company.get("name"), "ats": company.get("ats"),
-                             "fetched": 0, "new": 0, "hydrated": 0, "unhydrated": 0,
-                             "closed": 0, "reopened": 0, "fetch_errors": 0, "err": None,
-                             "incomplete": False, "capped": False, "capped_total": None,
-                             "secs": 0.0}
-    # A fetcher does not RAISE on a dead board -- it reports and returns [],
-    # which is also what a board with nothing on it returns, so `fetched: 0`
-    # alone cannot tell "404" from "no openings". net.http counts the
-    # reported failures per task, and a host's task runs one board at a
-    # time, so resetting around the fetch attributes them to this board.
-    http.reset_fetch_failures()
-    try:
-        jobs = await company_fetch.fetch_company(company, employer=company["name"]) or []
-    except Exception as e:                      # noqa: BLE001 - reported
-        stats["fetch_errors"] = http.fetch_failures()
-        stats["incomplete"] = True
-        stats["err"] = f"fetch: {type(e).__name__}: {e}"
+    stats = _stats(company.get("name"), company.get("ats"))
+    jobs = await _snapshot(lambda: company_fetch.fetch_company(company, employer=company["name"]),
+                           stats, progress)
+    if jobs is None:
         stats["secs"] = time.monotonic() - t0
         return stats
-    progress()
-    stats["fetched"] = len(jobs)
-    stats.update(http.snapshot_info())
 
-    try:
+    async def prepare() -> list[FetchedJob]:
         # Bodies already in the store (an earlier harvest, or a crawl) are
         # reused, never re-fetched: many listings come back bodiless every
         # time, and re-hydrating 100 known rows is what tripped one host's
@@ -409,58 +500,111 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
                     j["description"] = stored[j["id"]]
         if hydrate:
             await hydrate_rows(jobs, company, stats, delay, backoff_s, progress)
+        return jobs
+
+    promoted = await _store_snapshot(db, jobs, stats, t0, now, prepare,
+                                     partial(_write_board, company=company), company=company)
+    if promoted:
+        print(f"    [!] {company.get('name')}: no jobs for >= "
+              f"{store.HARVEST_DEAD_AFTER_DAYS}d since its first fetch "
+              f"error - promoted to '{promoted}'")
+    return stats
+
+
+async def harvest_feed(feed: Feed, db: store.Writer, now: datetime | None = None,
+                       progress: Callable[[], object] = lambda: None) -> BoardStats:
+    """Fetch and store ONE feed whole, as harvest_board does a board: the
+    rows stored unfiltered under `feed.source`, its vanished rows closed
+    against a full snapshot (_write_rows), a failure reported, not
+    raised. A Getro posting is first linked to its employer's roster row
+    (discovery.apply.attribute_employers), which drops the copies that
+    row's own board already stored."""
+    t0 = time.monotonic()
+    stats = _stats(feed.source, "feed")
+    jobs = await _snapshot(feed.fetch, stats, progress)
+    if jobs is None:
+        stats["secs"] = time.monotonic() - t0
+        return stats
+
+    async def prepare() -> list[FetchedJob]:
+        if any(j.get("_employer") for j in jobs):
+            return await db.run(attribute_employers, jobs, commit=True)
+        return jobs
+
+    await _store_snapshot(db, jobs, stats, t0, now, prepare,
+                          partial(_write_rows, source=feed.source), source=feed.source)
+    return stats
+
+
+async def _store_snapshot(db: store.Writer, jobs: list[FetchedJob], stats: BoardStats,
+                          t0: float, now: datetime | None,
+                          prepare: Callable[[], Awaitable[list[FetchedJob]]],
+                          write: Callable[..., str | None], *,
+                          company: CompanyRow | None = None,
+                          source: str | None = None) -> str | None:
+    """`prepare`d rows stamped and written by `write` in ONE store.batch
+    (a board is one lock acquisition, not one per posting); the snapshot
+    closed against is all of `jobs`. `write` returns mark_harvested's
+    promotion, if any. A store failure is reported in `stats`, with
+    `secs`, not raised."""
+    try:
+        kept = await prepare()
         stamp_dt = now or datetime.now()
         stamp = stamp_dt.isoformat()
         rows = await asyncio.to_thread(
-            lambda: [(_row(j, company, stamp), location_unknown(j.get("location")))
-                     for j in jobs])
-        promoted = await db.batch(_write_board, jobs, rows, company, stats, stamp_dt)
-        if promoted:
-            print(f"    [!] {company.get('name')}: no jobs for >= "
-                  f"{store.HARVEST_DEAD_AFTER_DAYS}d since its first fetch "
-                  f"error - promoted to '{promoted}'")
+            lambda: [(_row(j, company, stamp, source), location_unknown(j.get("location")))
+                     for j in kept])
+        return await db.batch(write, jobs, rows, stats, stamp_dt)
     except Exception as e:                      # noqa: BLE001 - reported
         # A store failure is NOT a fetch error, and calling it one hid this
         # bug for a day: every "database is locked" reads as an unreachable
         # board in the 2026-09-10 logs. The board's postings are simply not
         # written; the next pass re-fetches them.
         stats["err"] = f"store: {type(e).__name__}: {e}"
-    stats["secs"] = time.monotonic() - t0
-    return stats
+        return None
+    finally:
+        stats["secs"] = time.monotonic() - t0
 
 
-def _write_board(conn: sqlite3.Connection, jobs: list[FetchedJob],
-                 rows: list[tuple[JobIn, bool]], company: CompanyRow,
-                 stats: BoardStats, stamp_dt: datetime) -> str | None:
-    """One board's snapshot written, inside the caller's store.batch (ONE
-    transaction, which is the whole point: a board is one lock
-    acquisition, not one per posting); `rows` are its (store row,
-    keep_location) pairs. Returns mark_harvested's promotion.
+def _write_rows(conn: sqlite3.Connection, jobs: list[FetchedJob],
+                rows: list[tuple[JobIn, bool]], stats: BoardStats, stamp_dt: datetime,
+                *, company_id: int | None = None, source: str | None = None) -> None:
+    """One snapshot's rows written, inside the caller's store.batch;
+    `rows` are its (store row, keep_location) pairs.
 
     The rows that arrived are always stored. Closing against the snapshot
     is what a partial pull cannot be trusted for: an INCOMPLETE one (a
     fetch failed partway) closes nothing, and neither does a CAPPED one
     (store.sync_job_statuses's `capped`) -- its vanished rows wait for
-    ops.check_closed_jobs's URL probe instead.
-
-    A soft-failed snapshot (_soft_failed) is recorded as one:
-    store.mark_harvested keeps the last good total_job_count and runs its
-    dead-board cycle."""
-    if jobs and company.get("id") and not stats.get("incomplete"):
+    ops.check_closed_jobs's URL probe instead."""
+    if jobs and (company_id or source) and not stats.get("incomplete"):
         # A full, successful snapshot is the best evidence there is for
         # what the board lists: close what vanished, revive returners --
         # across every track (track=None), on this pass's own stamp.
         stats["reopened"], stats["closed"] = store.sync_job_statuses(
-            conn, company["id"], jobs, track=None,
-            capped=stats.get("capped", False), now=stamp_dt)
+            conn, company_id, jobs, track=None,
+            capped=stats.get("capped", False), now=stamp_dt, source=source)
     for row, keep_location in rows:
         # A whole-board listing can say "N Locations" every pass; the real
         # list triage resolved stays.
         if store.upsert_job(conn, row, keep_location=keep_location):
             stats["new"] += 1
-    if not company.get("id"):
+
+
+def _write_board(conn: sqlite3.Connection, jobs: list[FetchedJob],
+                 rows: list[tuple[JobIn, bool]], stats: BoardStats, stamp_dt: datetime,
+                 *, company: CompanyRow) -> str | None:
+    """One board's snapshot written (`_write_rows`), then recorded in the
+    same transaction. Returns mark_harvested's promotion.
+
+    A soft-failed snapshot (_soft_failed) is recorded as one:
+    store.mark_harvested keeps the last good total_job_count and runs its
+    dead-board cycle."""
+    company_id = company.get("id")
+    _write_rows(conn, jobs, rows, stats, stamp_dt, company_id=company_id)
+    if not company_id:
         return None
-    promoted = store.mark_harvested(conn, company["id"], len(jobs),
+    promoted = store.mark_harvested(conn, company_id, len(jobs),
                                     soft_fail=_soft_failed(stats), now=stamp_dt)
     # A definitive "no such board" answer (404/410) buries at once; any
     # other failure waits out store.HARVEST_DEAD_AFTER_DAYS.
@@ -481,25 +625,25 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
               triage: bool = True, score_cap: int | None = None, *,
               scope: RuntimeTrack | None = None,
               fit: bool = True, top_n: int = 5) -> dict[str, float | Mapping[str, object]]:
-    """Harvest every planned board (`pull`), then triage what was stored
-    and report (`_triage`), in that order. Returns the summary dict (also
-    printed); the triage summary rides in it under "triage".
+    """Harvest every planned board and feed (`pull`), then triage what was
+    stored and report (`_triage`), in that order. Returns the summary dict
+    (also printed); the triage summary rides in it under "triage".
 
     A scoped run (a crawl of one track) sets `scope`: only the boards
-    carrying its `store_tag` are pulled, and only it is verified,
-    self-healed, digested and announced, by its own verify_top and email.
-    None (the default) pulls every board and reports every roster track.
-    Triage still judges every roster track, scoring `scope`'s rows first.
-    `fit=False` scores nothing; `top_n` is how many of each digest are
-    printed.
+    carrying its `store_tag` and the feeds it reads are pulled, and only
+    it is verified, self-healed, digested and announced, by its own
+    verify_top and email. None (the default) pulls every board and every
+    feed some track reads, and reports every track that reads harvested
+    rows. Triage still judges all of them, scoring `scope`'s rows first.
+    An `only`/`names` pass pulls no feed. `fit=False` scores nothing;
+    `top_n` is how many of each digest are printed.
 
     `triage=False` skips the gate/hydrate/score pass (the rows wait for
     the next one, or for `run_scraper.py --triage`); `score_cap`
     (triage.SCORE_CAP when None) is the run's one budget of fit-score
     calls, refused ones included: triage takes what it needs, the
-    self-heal what is left, and the summary's "score_left" is what
-    remains for the caller (the crawl's non-roster sources). Mission
-    scoring and deep verify keep their own limits and draw nothing from it.
+    self-heal what is left. Mission scoring and deep verify keep their
+    own limits and draw nothing from it.
     `max_workers` bounds the concurrency. `board_fn` exists for tests (it
     is harvest_board's signature). A cancel (Ctrl+C) is raised here once
     the pass has unwound.
@@ -513,15 +657,64 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
     summary = await pull(db_path, only=only, names=names,
                          min_age_hours=min_age_hours, limit=limit,
                          hydrate=hydrate, max_hours=max_hours, board_fn=board_fn,
-                         tag=scope.store_tag if scope else None)
+                         scope=scope)
     async with store.Writer(db_path) as db:
         flagged = await db.run(store.flag_duplicate_jobs)
     if flagged:
         print(f"  {flagged} cross-board duplicate flag(s) changed")
     out: dict[str, float | Mapping[str, object]] = {**summary}
     if triage:
-        out["triage"], out["score_left"] = await _triage(
+        out["triage"] = await _triage(
             db_path, max_workers, score_cap, since, scope=scope, fit=fit, top_n=top_n)
+    return out
+
+
+async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
+                    send: bool | None = None, verify: bool | None = None,
+                    refresh: bool = False, max_workers: int = 6,
+                    top_n: int = 15) -> None:
+    """Run one crawl of track `t` (a config.UI_TRACKS entry): `run` scoped
+    to it, every switch read from the track config. The keyword args only
+    OVERRIDE it for this run (None = use the config): `send` overrides
+    t.email, `verify` (bool) overrides t.verify_top (True -> top_n, False
+    -> skip). `refresh` pulls every board, not only the ones not pulled in
+    the last few hours. `fit=False` skips resume scoring; `commit=False`
+    prints the boards and feeds the crawl would pull and stops.
+    """
+    if not commit:
+        list_plan(t.db_path, min_age_hours=0 if refresh else None, scope=t)
+        return
+    n = t.verify_top if verify is None else (top_n if verify else 0)
+    await run(db_path=t.db_path,
+              scope=t.model_copy(update={"email": t.email if send is None else send,
+                                         "verify_top": n}),
+              min_age_hours=0 if refresh else None, fit=fit,
+              top_n=top_n, max_workers=max_workers)
+
+
+async def sync_statuses(t: RuntimeTrack, top_n: int = 15) -> None:
+    """Status-only reconciliation of track `t`: pull every board and feed
+    in its scope now (closing what vanished, reopening what returned), no
+    triage and no scoring, then rewrite its digest from the corrected
+    ranking.
+    """
+    await run(db_path=t.db_path, scope=t, triage=False, min_age_hours=0)
+    async with track_writer(t) as db:
+        await db.run(rewrite_digest, t, top_n,
+                     lambda n_open: f"\n  {n_open} open job(s) in ranking.")
+
+
+
+async def add_job(url: str = "", title: str = "", company: str = "", location: str = "",
+                  description: str = "", pull_board: bool = True,
+                  t: RuntimeTrack | None = None) -> dict[str, int | bool | str]:
+    """Add one job by hand (`add_manual_job`), then, when its company has a
+    board, pull the whole board and triage it under the run's budget.
+    Returns add_manual_job's summary."""
+    t = t or config.track_for_engine("local")
+    out = await add_manual_job(url, title, company, location, description, t=t)
+    if pull_board and out.get("board"):
+        await run(db_path=t.db_path, scope=t, names=[str(out["company"])], min_age_hours=0)
     return out
 
 
@@ -530,21 +723,24 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
                limit: int | None = None, hydrate: bool = False,
                max_hours: float | None = None,
                board_fn: Callable[..., Awaitable[BoardStats]] = harvest_board,
-               stall_s: float = 900.0, tag: str | None = None) -> dict[str, float]:
-    """The pull: plan (`plan`), then every board fetched and stored, one
-    task per host (Board.origin; per platform while a row's origin is
-    unsettled) walking its boards in plan order and every host at once;
-    the store work on one store.Writer. Returns the summary dict (also
-    printed). Each board's harvest_attempted_at is stamped as its walk
-    starts it (plan's rotation key).
+               stall_s: float = 900.0, *,
+               scope: RuntimeTrack | None = None) -> dict[str, float]:
+    """The pull of `scope`'s boards and feeds (_pull_scope): plan (`plan`;
+    no boards unless `scope` reads the roster), then every board
+    fetched and stored, one task per host (Board.origin; per platform while
+    a row's origin is unsettled) walking its boards in plan order and every
+    host at once, and one task per feed (`harvest_feed`, counted among the summary's
+    "boards"); the store work on one store.Writer. Returns the summary
+    dict (also printed). Each board's harvest_attempted_at is stamped as
+    its walk starts it (plan's rotation key).
 
     `max_hours` is the pass budget. Past it, or on Ctrl+C, the walks are
     cancelled: the boards committed stay, a board being written rolls
     back, and a board not yet started never starts; the budget names each
-    board it cut off (the summary's "abandoned"). A board with no progress
-    (harvest_board's) for `stall_s` is cut off the same way and its walk
-    moves on: a request bounds each read (config.FETCH_TIMEOUT), not its
-    total, so a server trickling bytes could hold one forever.
+    board it cut off (the summary's "abandoned"). A board or feed with no
+    progress (harvest_board's) for `stall_s` is cut off the same way and
+    its walk moves on: a request bounds each read (config.FETCH_TIMEOUT),
+    not its total, so a server trickling bytes could hold one forever.
 
     The header line names how many off-mission, inactive boards `plan`
     deferred to its longer interval this pass and how many it left out
@@ -561,12 +757,14 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
     summary: dict[str, float] = {"boards": 0, "ok": 0, "err": 0, "abandoned": 0, "dead": 0,
                                "fetched": 0, "new": 0, "hydrated": 0, "closed": 0,
                                "reopened": 0, "retired": 0, "secs": 0.0}
+    tag, feeds, roster = _pull_scope(scope, only, names)
     async with store.Writer(db_path) as db:
         plan_stats: PlanStats = {}
         boards = await db.run(plan, only=only, names=names,
                               min_age_hours=min_age_hours, limit=limit,
-                              stats=plan_stats, tag=tag)
-        if not names:
+                              stats=plan_stats, tag=tag) if roster else []
+        plan_stats.setdefault("min_age_hours", 0.0)
+        if roster and not names:
             try:
                 summary["retired"] = len(await db.run(store.retire_stopped))
             except Exception as e:              # noqa: BLE001 - the next pass retries
@@ -574,48 +772,56 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
         hosts: dict[str, list[CompanyRow]] = {}
         for c in boards:
             hosts.setdefault(cast(str, company_fetch.board_origin(c)), []).append(c)
-        summary["boards"] = len(boards)
+        summary["boards"] = len(boards) + len(feeds)
         bar = "=" * 70
         print(f"\n{bar}\n  [HARVEST] whole-board pull - {datetime.now():%Y-%m-%d %H:%M}")
-        print(f"  {len(boards)} board(s) on {len(hosts)} host(s), one board at a "
+        print(f"  {len(boards)} board(s) on {len(hosts)} host(s)"
+              + (f" and {len(feeds)} feed(s)" if feeds else "")
+              + f", one board at a "
               f"time per host, hydrate={'on' if hydrate else 'off'}, "
               f"skip if harvested < {plan_stats['min_age_hours']:g}h ago"
               + deferred_note(plan_stats)
               + (f", stop after {max_hours:g}h" if max_hours else "") + f"\n{bar}\n")
-        if not boards:
+        if not boards and not feeds:
             print("  nothing to do" + (f"; {summary['retired']} job(s) closed at "
                                        f"stopped boards" if summary["retired"] else ""))
             return summary
 
         t_start = time.monotonic()
-        running: dict[int, CompanyRow] = {}    # id(company) -> company, mid-walk
+        running: dict[int, str] = {}    # id(unit) -> "name (kind)", mid-walk
         tally = health.Tally("harvest")
 
-        async def walk(group: list[CompanyRow]) -> None:
+        async def one(unit: object, name: str, kind: str,
+                      call: Callable[[Callable[[], object]], Awaitable[BoardStats]]
+                      ) -> BoardStats | None:
+            """`call` (given the stall-bound's progress callback) on one board
+            or feed, reported; None when the stall bound cut it off."""
             loop = asyncio.get_running_loop()
+            running[id(unit)] = f"{name} ({kind})"
+            stall = asyncio.timeout(stall_s)
+            try:
+                async with stall:
+                    s = await call(lambda: stall.reschedule(loop.time() + stall_s))
+            except Exception as e:              # noqa: BLE001 - reported
+                s = _stats(name, kind) | {"err": f"{type(e).__name__}: {e}"}
+            del running[id(unit)]
+            if stall.expired():
+                print(f"  [!] {name} ({kind}): no progress in {stall_s:g}s - abandoned")
+                summary["abandoned"] += 1
+                return None
+            _report(name, kind, s, summary)
+            return s
+
+        async def walk(group: list[CompanyRow]) -> None:
             for c in group:
-                running[id(c)] = c
-                stall = asyncio.timeout(stall_s)
-                try:
-                    async with stall:
-                        # Stamped as it starts, so a board that fails, wedges
-                        # or runs into the budget rotates back; one never
-                        # started keeps its place at the front (plan).
-                        await db.run(store.mark_harvest_attempted, c["id"])
-                        s = await board_fn(
-                            c, db, hydrate=hydrate,
-                            progress=lambda: stall.reschedule(loop.time() + stall_s))
-                except Exception as e:          # noqa: BLE001 - reported
-                    s = BoardStats(err=f"{type(e).__name__}: {e}", fetched=0,
-                                   new=0, hydrated=0, closed=0, reopened=0,
-                                   secs=0.0)
-                del running[id(c)]
-                if stall.expired():
-                    print(f"  [!] {c['name']} ({c['ats']}): no progress in "
-                          f"{stall_s:g}s - abandoned")
-                    summary["abandoned"] += 1
-                else:
-                    _report(c, s, summary)
+                async def pull_board(progress: Callable[[], object], c: CompanyRow = c) -> BoardStats:
+                    # Stamped as it starts, so a board that fails, wedges
+                    # or runs into the budget rotates back; one never
+                    # started keeps its place at the front (plan).
+                    await db.run(store.mark_harvest_attempted, c["id"])
+                    return await board_fn(c, db, hydrate=hydrate, progress=progress)
+                s = await one(c, c["name"], c["ats"] or "", pull_board)
+                if s is not None:
                     tally.note(c["ats"] or "", s["fetched"], s.get("fill") or {},
                                err=s["err"], snap=s)
 
@@ -624,9 +830,12 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
                 async with asyncio.TaskGroup() as tg:
                     for group in hosts.values():
                         tg.create_task(walk(group))
+                    for f in feeds:
+                        tg.create_task(one(f, f.source, "feed",
+                                           lambda progress, f=f: harvest_feed(f, db, progress=progress)))
         except TimeoutError:
-            for c in running.values():
-                print(f"  [!] {c['name']} ({c['ats']}): run out of time - abandoned")
+            for label in running.values():
+                print(f"  [!] {label}: run out of time - abandoned")
             summary["abandoned"] += len(running)
         for line in await db.run(health.record, tally):
             print(f"  [!] {line}")
@@ -655,8 +864,9 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
     return summary
 
 
-def _report(c: CompanyRow, s: BoardStats, summary: dict[str, float]) -> None:
-    """One finished board's status line, its stats added to `summary`."""
+def _report(name: str, kind: str, s: BoardStats, summary: dict[str, float]) -> None:
+    """One finished board's (or feed's) status line, its stats added to
+    `summary`; `kind` is the board's ATS, or "feed"."""
     done = summary["ok"] + summary["err"] + 1
     if s["err"]:
         summary["err"] += 1
@@ -690,38 +900,28 @@ def _report(c: CompanyRow, s: BoardStats, summary: dict[str, float]) -> None:
             # URL probe is the only thing that can, later.
             status += (f" [capped of {s['capped_total']}: 0 closed]"
                        if s.get("capped_total") else " [capped: 0 closed]")
-    print(f"  {prefix}[{done:>3}/{summary['boards']}] {c['name']} "
-          f"({c['ats']}): {status}")
+    print(f"  {prefix}[{done:>3}/{summary['boards']}] {name} "
+          f"({kind}): {status}")
     # Churn a board's own board-diff should have damped, still showing
     # up: worth a human's attention, not just a debug line.
     fetched = s.get("fetched") or 0
     reopened = s.get("reopened") or 0
     if reopened > max(10, 0.05 * fetched):
-        print(f"    [!] {c['name']} ({c['ats']}): {reopened} reopened "
+        print(f"    [!] {name} ({kind}): {reopened} reopened "
               f"of {fetched} fetched - board churning")
-    _log.debug("board %s stats %s", c.get("name"), s)
+    _log.debug("board %s stats %s", name, s)
 
 
 async def _triage(db_path: str | Path, max_workers: int, score_cap: int | None, since: str, *,
                   scope: RuntimeTrack | None, fit: bool, top_n: int
-                  ) -> tuple[Mapping[str, object], int]:
-    """The pass's second half; returns triage.run's summary and the fit
-    calls left of the run's budget (`run`'s `score_cap`).
-
-    The gate/hydrate/score pass over everything pending in the store --
-    this pass's rows and any earlier pass left waiting on a body or over
-    the scoring cap -- then, on that same `db_path`, for `scope` (default:
-    every roster track): the self-heal of unscored rows
-    (ops.self_heal_unscored, limited to the budget triage left),
-    deep verify (ops.verify_top, within each track's verify_top; outside
-    the budget),
-    one closed-URL probe (ops.check_closed_jobs: CLOSED_PROBE_LIMIT open
-    rows no board has vouched for in CLOSED_PROBE_STALE_DAYS), each
-    track's digest (the watch section covers config.WATCH_WINDOW_DAYS), an
-    announcement of what surfaced since `since`, watch hits included (an email and/or a toast, per
-    each track's `email` and `notify`), and the Claude spend
-    footer. With fit scoring off, no API key, or the breaker already
-    tripped, verify and self-heal are one printed line instead.
+                  ) -> Mapping[str, object]:
+    """The pass's second half: triage.run over everything pending (its
+    summary is returned), then for `scope` (default: every track that
+    reads harvested rows) self-heal on the budget left, deep verify, one
+    closed-URL probe, the digest (watch section: config.WATCH_WINDOW_DAYS),
+    the announcement of what surfaced since `since`, and the Claude spend
+    footer. With fit scoring off, no API key, or the breaker tripped,
+    verify and self-heal are one printed line instead.
 
     Notes:
         The steps after triage use `db_path`, not maintenance.track_writer(t): that opens
@@ -735,8 +935,7 @@ async def _triage(db_path: str | Path, max_workers: int, score_cap: int | None, 
     result = await triage.run(db_path=db_path, max_workers=max_workers,
                               score_cap=cap, fit=fit,
                               prefer={scope.track} if scope else ())
-    attempted = result.get("attempted", 0)
-    left = cap - (int(attempted) if isinstance(attempted, (int, float)) else 0)
+    left = cap - cast(int, result.get("attempted", 0))
     async with store.Writer(db_path) as db:
         down = api_disabled()
         why = ("fit scoring off" if not fit else
@@ -759,11 +958,10 @@ async def _triage(db_path: str | Path, max_workers: int, score_cap: int | None, 
         window = (datetime.now() - timedelta(days=config.WATCH_WINDOW_DAYS)).isoformat()
         for t in tracks:
             hits = await db.run(new_watch_hits, t, window)
-            fresh_hits = await db.run(new_watch_hits, t, since)
             ranked = await db.run(rewrite_digest, t, top_n=top_n, watch_hits=hits,
                                   heading=f"\n  [{t.track}] digest rewritten:")
             await asyncio.to_thread(digest.announce, ranked, t, since,
                                     pipeline=pipeline, followups=followups,
-                                    watch_hits=hits, fresh_hits=fresh_hits)
+                                    watch_hits=hits)
     report_cache_stats()
-    return result, left
+    return result

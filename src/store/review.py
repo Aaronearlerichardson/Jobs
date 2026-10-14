@@ -143,7 +143,7 @@ def confirm_company(conn: sqlite3.Connection, cid: int,
 
     >>> from src.store.schema import connect
     >>> from src.store import (upsert_company, company_id_by_name,
-    ...                         crawlable_companies)
+    ...                         get_companies)
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, mark_pending(
     ...     {"name": "Acme", "ats": "lever", "slug": "acme", "tags": "local"}))
@@ -151,9 +151,9 @@ def confirm_company(conn: sqlite3.Connection, cid: int,
     >>> row["tags"], row["active"]
     ('local', 1)
 
-    The crawl picks it up from that moment; it could not see it before:
+    The active roster picks it up from that moment; it could not see it before:
 
-    >>> [c["name"] for c in crawlable_companies(conn)]
+    >>> [c["name"] for c in get_companies(conn)]
     ['Acme']
 
     An explicit verdict is written as-is, whatever the row's tier:

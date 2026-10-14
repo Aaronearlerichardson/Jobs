@@ -170,35 +170,31 @@ class TestApi:
             conn.close()
 
 
-class TestCompanyCrawlState:
-    """The roster tab has to show WHY a company stopped producing rows --
-    dormant is not deactivated -- and offer the one-click way back."""
+class TestCompanyHarvestState:
+    """The roster tab has to show WHY a company stopped producing rows:
+    when its board was last harvested and the dead-board cycle's miss."""
 
-    def _sleepy_store(self, db_path):
-        """One dormant company in conftest's `wired_db_path` throwaway store:
+    def _failing_store(self, db_path):
+        """One failing board in conftest's `wired_db_path` throwaway store:
         these tests write, and the suite may never touch the real one."""
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Sleepy", "ats": "greenhouse",
                                           "slug": "sleepy"})
-        conn.execute("UPDATE companies SET crawl_state='dormant', "
-                     "empty_streak=6, next_crawl_at='2099-01-01T00:00:00' "
-                     "WHERE id=?", (cid,))
-        conn.commit()
+        store.mark_harvested(conn, cid, 0, soft_fail=True)
         conn.close()
         return cid
 
-    def test_companies_expose_crawl_state(self, client, wired_db_path):
-        cid = self._sleepy_store(wired_db_path)
+    def test_companies_expose_harvest_state(self, client, wired_db_path):
+        cid = self._failing_store(wired_db_path)
         row = next(r for r in json.loads(client.get("/api/companies").data)
                    if r["id"] == cid)
-        assert row["crawl_state"] == "dormant"
-        assert row["empty_streak"] == 6
-        assert row["next_crawl_at"].startswith("2099")
+        assert row["miss_reason"] == "fetch-error:harvest"
+        assert row["last_harvested_at"]
 
     def test_capture_only_rows_show_the_marker(self, client, wired_db_path):
         # The roster shows WHY a company is never fetched: its ats reads
-        # "capture", and it stays an active, never-dormant row.
-        self._sleepy_store(wired_db_path)
+        # "capture", and it stays an active row.
+        self._failing_store(wired_db_path)
         conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Saved", "ats": store.CAPTURE_ATS,
                                           "careers_url": "https://jobs.saved.org/"})
@@ -206,24 +202,7 @@ class TestCompanyCrawlState:
         row = next(r for r in json.loads(client.get("/api/companies").data)
                    if r["id"] == cid)
         assert row["ats"] == "capture" and row["active"]
-        assert row["crawl_state"] == "active" and row["empty_streak"] == 0
-
-    def test_dormant_rows_leave_the_active_count(self, client, wired_db_path):
-        self._sleepy_store(wired_db_path)
-        assert json.loads(client.get("/api/stats").data)["companies_active"] == 0
-
-    def test_reactivate_clears_the_schedule(self, client, wired_db_path):
-        cid = self._sleepy_store(wired_db_path)
-        assert client.post(f"/api/company/{cid}/reactivate").status_code == 200
-        row = next(r for r in json.loads(client.get("/api/companies").data)
-                   if r["id"] == cid)
-        assert row["crawl_state"] == "active"
-        assert row["empty_streak"] == 0 and row["next_crawl_at"] is None
-
-    def test_unknown_company_404s(self, client, wired_db_path):
-        self._sleepy_store(wired_db_path)
-        assert client.post("/api/company/9999/reactivate").status_code == 404
-
+        assert row["miss_reason"] is None and row["last_harvested_at"] is None
 
 class TestPipelineApi:
     """The Pipeline tab past 'applied': the tracking fields it edits, the
@@ -490,11 +469,11 @@ class TestReviewQueue:
         assert rows[0]["source"] == "paste"
         assert rows[0]["local_job_count"] == 2
 
-    def test_a_candidate_is_counted_but_not_crawled(self, client,
-                                                    wired_db_path):
+    def test_a_candidate_is_counted_and_its_board_is_harvested(self, client,
+                                                               wired_db_path):
         self._queued_store(wired_db_path)
         stats = json.loads(client.get("/api/stats").data)
-        assert stats["companies_active"] == 0
+        assert stats["companies_active"] == 1
         assert stats["pending_review"] == 1
 
     def test_confirm_puts_it_on_the_roster(self, client, wired_db_path):

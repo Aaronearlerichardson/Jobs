@@ -119,7 +119,7 @@ non_us_regions = []
 # ---------------------------------------------------------------------------
 # Tracks — the searches you switch between in the web UI's header dropdown.
 #
-# A track is pure configuration run through ONE pipeline (src/crawl/runner.py).
+# A track is pure configuration run through ONE pipeline (src/crawl/harvest.py).
 # Each [tracks.<id>] table defines: which SQLite DB it reads (`db`, relative
 # to your data dir), the jobs.track value (`track`), ranking knobs (`rank_by`,
 # `min_mission`), and the UI filter defaults applied when you switch to it
@@ -163,13 +163,9 @@ default = true
 # keyword_mode = "extend"      # "extend": [keywords.<id>] ADDs to the global
 #                              # tiers; "replace": they BECOME the tiers
 # accept_remote = false        # allow remote listings through the fetch filter
-# sources = { store = true, priority_companies = false, aggregators = false, websearch = false, location_scoped = true }
+# sources = { store = true, aggregators = false }
 #   # store: active companies from this track's DB
-#   # priority_companies: [discovery] priority_companies, fetched first
 #   # aggregators: [sources] forums/RSS/RemoteOK/Remotive/HN feeds
-#   # websearch: the [sources].websearch queries
-#   # location_scoped: store boards fetched through the [locality] filter
-#   #   (whole-board for watched companies); false = lightweight ATS sweep
 # store_tag = ""               # only sweep store companies with this tag
 #                              # ("local" / "sweep" / any track's tag; src/tags.py)
 # require_core_anchor = false  # gate: posting must hit a CORE keyword
@@ -198,17 +194,6 @@ default = true
 #                              # digest goes out (needs the optional
 #                              # `winotify` package; no-op without it)
 # exclude_gate = true          # apply the [exclude.<id>] role/defense tables
-# dormant_after = 4            # after this many consecutive EMPTY DAYS a
-#                              # company goes dormant: still crawled, but
-#                              # weekly instead of every run (a roster of 300
-#                              # had 181 companies that had never produced a
-#                              # single job). An empty day is one with nothing
-#                              # in this track's scope AND no open posting
-#                              # the harvester has on file for the board. One
-#                              # non-empty fetch wakes it, and watched
-#                              # companies never sleep.
-# dormant_days = 7             # how long a dormant company is skipped before
-#                              # its next retry
 # tech_title_regex = "..."     # the technical-title gate (case-insensitive
 #                              # regex a title must match before scoring spend).
 #                              # The default is broad and field-neutral; set
@@ -226,7 +211,7 @@ willing_to_move_default = true
 remote_requires_watch = false
 # sweep-engine defaults: keyword_mode="replace", require_core_anchor=true,
 # geo_gate=false, store_tag="sweep",
-# sources = { store=true, priority_companies=true, aggregators=true, websearch=true, location_scoped=false }
+# sources = { store=true, aggregators=true }
 
 [policy]
 # Large companies to keep active despite an "other" mission score, crawling
@@ -386,10 +371,10 @@ state_suffix = ["ca", "california"]
 
 # ---------------------------------------------------------------------------
 # Non-company job sources. The feeds below carry every kind of role and are
-# filtered by YOUR keywords, so the generic ones ship on. The forum and
-# web-search lists are empty by default: they encode a specific field's
-# vocabulary, and a generic guess would only waste requests.
-# Used by tracks whose `sources.aggregators` / `sources.websearch` are on.
+# filtered by YOUR keywords, so the generic ones ship on. The forum list is
+# empty by default: it encodes a specific field's vocabulary, and a generic
+# guess would only waste requests.
+# Used by tracks whose `sources.aggregators` is on.
 # ---------------------------------------------------------------------------
 [sources]
 remoteok = true              # remoteok.com/api
@@ -409,12 +394,6 @@ discourse = [
 # rss = [
 #     { label = "Society job board", url = "https://example.org/jobs/feed", location = "Remote" },
 # ]
-
-# Web searches whose result pages are parsed for job postings. Write them the
-# way you'd type them into a search engine; `site:` narrows to one board.
-websearch = [
-    # { label = "My field on WeWorkRemotely", max_results = 12, query = '("term a" OR "term b") ("engineer" OR "scientist") site:weworkremotely.com' },
-]
 
 # USAJOBS — every federal opening, which nothing else here can see: an agency
 # lab or field office runs no ATS to put in your roster and files nothing with
@@ -561,11 +540,6 @@ aggregator_hosts = []
 # Generic words excluded when matching a search-result host to a company
 # name (so "medicaljobs.com" doesn't match on the word "medical").
 generic_name_words = []
-# Named company targets fetched (and deduped) FIRST by tracks whose
-# `sources.priority_companies` is on.
-priority_companies = [
-    # { name = "Example Co", ats = "greenhouse", slug = "examples" },
-]
 
 # ---------------------------------------------------------------------------
 # Fit rubric (src/claude/fit.py): optional; every key has a working default.

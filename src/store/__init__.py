@@ -35,14 +35,14 @@ sibling.
 from __future__ import annotations
 
 from .companies import (  # noqa: F401
-    CAPTURE_ATS, MISS_REASONS, _OFFMISSION_MIN_JOBS, _offmission_volume,
+    CAPTURE_ATS, MISS_REASONS,
     add_board, as_company, board_key, company_by_board, plan_board, realign_job_names,
-    company_by_host, company_id_by_name, crawlable_companies,
+    company_by_host, company_id_by_name,
     deactivate_company, dedup_companies, export_companies, get_companies,
     HARVEST_DEAD_AFTER_DAYS, blocked_keys, blocked_name_keys, get_company, harvestable_companies,
     import_companies, mark_harvest_attempted, mark_harvested,
-    miss_counts, miss_family, miss_family_in, reactivate_company, recent_miss_names,
-    record_alias, record_crawl_outcome, record_miss, roster_growth, roster_rows,
+    miss_counts, miss_family, miss_family_in, recent_miss_names,
+    record_alias, record_miss, roster_growth, roster_rows,
     upsert_company,
 )
 from .employers import (  # noqa: F401

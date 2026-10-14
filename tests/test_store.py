@@ -11,8 +11,6 @@ from typing import get_args, get_type_hints
 import pytest
 from pydantic import ValidationError
 
-from conftest import iso_days_ago
-
 from src import config
 from src.ats.board import BOARDS
 import src.match.locality as locality
@@ -23,7 +21,6 @@ from src.store.employers import write_mission
 from src.store.migrate import MIGRATIONS_DIR, _statements, migrate
 from src.claude import fit as claude_fit
 from src.claude.fit import disposition_examples_block
-import src.ops.maintenance as ops
 
 
 def _held_types(hint):
@@ -35,6 +32,15 @@ def _sample_row(model):
     """One value of each column's type: a row that sets every key `model` names."""
     sample = {int: 3, float: 0.5, str: "x", bool: True}
     return {col: sample[_held_types(hint)[0]] for col, hint in get_type_hints(model).items()}
+
+
+def _restore_dormancy(conn):
+    """Give a current store the columns migration 0013 dropped, so a test
+    can rewind it to an older version and replay the migrations."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(companies)")}
+    for col in ("crawl_state", "empty_streak", "last_crawled_at", "next_crawl_at"):
+        if col not in have:
+            conn.execute(f"ALTER TABLE companies ADD COLUMN {col} TEXT")
 
 
 class TestSchema:
@@ -86,6 +92,7 @@ class TestSchema:
     def test_a_version_1_store_gains_the_views_and_indexes(self, tmp_path):
         path = tmp_path / "v1.db"
         conn = store.connect(path)
+        _restore_dormancy(conn)
         for stmt in ("DROP VIEW company_open_stats", "DROP VIEW open_jobs",
                      "DROP INDEX ix_jobs_disposition", "DROP INDEX ix_jobs_open_company",
                      "DROP INDEX ix_jobs_open_seen", "PRAGMA user_version = 1"):
@@ -102,6 +109,7 @@ class TestSchema:
             self, tmp_path):
         path = tmp_path / "v2.db"
         conn = store.connect(path)
+        _restore_dormancy(conn)
         for stmt in ("DROP VIEW companies_effective", "DROP TRIGGER companies_employer_moved",
                      "ALTER TABLE companies DROP COLUMN review",
                      "ALTER TABLE companies DROP COLUMN watch",
@@ -126,6 +134,7 @@ class TestSchema:
                 "JOIN employers e ON e.id = c.employer_id ORDER BY c.id")]                 == [("Small", "Big", "local"), ("Big", "Big", None), ("Solo", "Solo", None)]
             assert conn.execute("SELECT company_name FROM jobs WHERE job_id='s1'").fetchone()[0] == "Big"
             assert conn.execute("SELECT COUNT(*) FROM employers").fetchone()[0] == 2
+            _restore_dormancy(conn)
             conn.execute("PRAGMA user_version = 2")
             conn.commit()
             conn.close()
@@ -134,6 +143,7 @@ class TestSchema:
             self, tmp_path):
         path = tmp_path / "v4.db"
         conn = store.connect(path)
+        _restore_dormancy(conn)
         for stmt in ("DROP VIEW companies_effective", "DROP TRIGGER companies_employer_moved",
                      "ALTER TABLE companies DROP COLUMN review",
                      "ALTER TABLE companies DROP COLUMN watch",
@@ -166,6 +176,7 @@ class TestSchema:
                 "OR watch IS NOT NULL")] == ["B"]
             assert not conn.execute("SELECT 1 FROM companies WHERE tags LIKE '%watch%' "
                                     "OR tags LIKE '%pending%'").fetchone()
+            _restore_dormancy(conn)
             conn.execute("PRAGMA user_version = 4")
             conn.commit()
             conn.close()
@@ -178,6 +189,7 @@ class TestSchema:
     def test_a_version_5_store_loses_the_synthesized_tags_and_replays_safely(self, tmp_path):
         path = tmp_path / "v5.db"
         conn = store.connect(path)
+        _restore_dormancy(conn)
         for name, kw in (("A", {"tags": "local", "watch": 1}),
                          ("B", {"tags": "sweep", "review": "pending"}), ("C", {})):
             store.upsert_company(conn, {"name": name, **kw})
@@ -198,6 +210,7 @@ class TestSchema:
             for table in ("companies_effective", "companies"):
                 assert [r[0] for r in conn.execute(f"SELECT tags FROM {table} ORDER BY id")] \
                     == ["local", "sweep", "sweep"]
+            _restore_dormancy(conn)
             conn.execute("PRAGMA user_version = 5")
             conn.commit()
             conn.close()
@@ -209,6 +222,7 @@ class TestSchema:
     def test_a_version_7_store_gets_its_multi_part_handles_and_replays_safely(self, tmp_path):
         path = tmp_path / "v7.db"
         conn = store.connect(path)
+        _restore_dormancy(conn)
         view = next(s for s in _statements((MIGRATIONS_DIR / "0006_view_own_tags.sql").read_text())
                     if "CREATE VIEW companies_effective" in s)
         for stmt in ("DROP VIEW companies_effective", "DROP INDEX ix_companies_board_handle",
@@ -233,6 +247,7 @@ class TestSchema:
             wd = BOARDS["workday"]      # the very handle string the old columns joined to
             assert wd.handle(rows[0]) == "|".join(map(str, before[0]))
             assert (wd.split(rows[0]["handle"]), wd.handle(rows[1])) == (("acme", 5, "External"), None)
+            _restore_dormancy(conn)
             conn.execute("PRAGMA user_version = 7")
             conn.commit()
             conn.close()
@@ -303,7 +318,8 @@ class TestSchema:
         self._unversioned_store(path)
         conn = store.connect(path)
         cols = lambda t: {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}
-        assert {"local_job_count", "crawl_state", "last_harvested_at"} <= cols("companies")
+        assert {"local_job_count", "last_nonempty_at", "last_harvested_at"} <= cols("companies")
+        assert not {"crawl_state", "empty_streak"} & cols("companies")
         assert not {"nc_job_count", "hq_location"} & cols("companies")
         assert {"anchor_signal", "triage_status", "outcome_reason"} <= cols("jobs")
         assert not {"neural_signal", "mission", "tech_bar_score"} & cols("jobs")
@@ -338,9 +354,13 @@ class TestSchema:
         assert "ix_jobs_url" in plan, plan
 
     def test_triage_pending_is_indexed(self, db):
-        """The harvester's unjudged rows are selected on triage_status."""
+        """The harvester's unjudged rows are selected on triage_status, a
+        feed's company-less ones and its snapshot's closing on `source`."""
         names = {r[1] for r in db.execute("PRAGMA index_list(jobs)")}
-        assert "ix_jobs_triage" in names
+        assert {"ix_jobs_triage", "ix_jobs_source"} <= names
+        plan = " ".join(str(r[3]) for r in db.execute(
+            "EXPLAIN QUERY PLAN SELECT job_id FROM jobs WHERE source=?", ("x",)))
+        assert "ix_jobs_source" in plan, plan
 
 
 class TestCompanies:
@@ -354,7 +374,7 @@ class TestCompanies:
         cid = store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})
         store.set_watch(db, cid, True)
         row = store.get_company(db, cid)
-        assert row["watch"] == 1 and row["tags"] is None and ops.whole_board(row)
+        assert row["watch"] == 1 and row["tags"] is None
         store.set_watch(db, cid, False)
         assert not store.get_company(db, cid)["watch"]
 
@@ -372,7 +392,6 @@ class TestCompanyReaders:
         readers = {"get_company": [store.get_company(db, cid)],
                    "get_companies": store.get_companies(db, active_only=False),
                    "pending_companies": store.pending_companies(db),
-                   "crawlable_companies": store.crawlable_companies(db),
                    "harvestable_companies": store.harvestable_companies(db)}
         assert all(rows for rows in readers.values()), readers
         assert {(name, frozenset(r)) for name, rows in readers.items() for r in rows} \
@@ -443,11 +462,8 @@ class TestStoredTypes:
 
     def test_the_company_writers_store_each_column_as_declared(self, db):
         cid = store.upsert_company(db, _sample_row(CompanyIn))
-        store.record_crawl_outcome(db, cid, 2)
         store.mark_harvested(db, cid, 2)
         store.record_miss(db, "Missed", "no-board-found")
-        store.record_crawl_outcome(db, store.upsert_company(db, {"name": "Parked"}), 0,
-                                   dormant_after=1)
         self._audit(db, "companies", CompanyRow)
 
     def test_the_job_writers_store_each_column_as_declared(self, db):
@@ -520,156 +536,9 @@ class TestImportCompanies:
         assert db.execute("SELECT total_job_count, local_job_count FROM companies"
                           ).fetchone()[:] == (5, 5)
 
-    def test_the_id_and_the_crawl_schedule_are_accepted_and_ignored(self, db, tmp_path):
-        self._load(db, tmp_path, [{"name": "A", "id": 99, "crawl_state": "dormant",
-                                   "empty_streak": 4}])
-        assert db.execute("SELECT id, crawl_state, empty_streak FROM companies"
-                          ).fetchone()[:] == (1, None, None)
-
-
-class TestDormancy:
-    """181 of 300 active companies had never produced a single job yet were
-    fetched on every crawl, and three off-mission boards produced hundreds
-    of rows nobody would apply to. Dormancy demotes both to a weekly
-    cadence instead of asking the user to deactivate boards by hand."""
-
-    def _state(self, db, company):
-        return db.execute(
-            "SELECT crawl_state, empty_streak, next_crawl_at, last_nonempty_at "
-            "FROM companies WHERE id=?", (company,)).fetchone()
-
-    def _backdate(self, db, company, days=1):
-        """Pretend the last crawl was `days` ago -- the streak only grows once
-        per calendar day, so nothing else can fake consecutive empty days."""
-        db.execute("UPDATE companies SET last_crawled_at=? WHERE id=?",
-                   (iso_days_ago(days), company))
-        db.commit()
-
-    def _empty_days(self, db, company, n, **kw):
-        state = None
-        for _ in range(n):
-            state = store.record_crawl_outcome(db, company, 0, **kw)
-            self._backdate(db, company)
-        return state
-
-    def test_streak_grows_once_per_day(self, db, company):
-        assert self._empty_days(db, company, 3) == "active"
-        assert self._state(db, company)["empty_streak"] == 3
-
-    def test_dormant_after_the_configured_run_of_empty_days(self, db, company):
-        assert self._empty_days(db, company, 4) == "dormant"
-        assert self._state(db, company)["next_crawl_at"] > datetime.now().isoformat()
-
-    def test_same_day_repeats_count_once(self, db, company):
-        # Several tracks (and a re-run after a crash) hit the same board the
-        # same afternoon; that is one empty day, not three.
-        for _ in range(3):
-            store.record_crawl_outcome(db, company, 0)
-        assert self._state(db, company)["empty_streak"] == 1
-
-    def test_fetch_error_is_neutral(self, db, company):
-        self._empty_days(db, company, 3)
-        assert store.record_crawl_outcome(
-            db, company, 0, err=RuntimeError("503")) == "active"
-        assert self._state(db, company)["empty_streak"] == 3
-
-    def test_a_short_dormant_after_still_needs_distinct_days(self, db, company):
-        assert store.record_crawl_outcome(db, company, 0, dormant_after=2) == "active"
-        assert store.record_crawl_outcome(db, company, 0, dormant_after=2) == "active"
-        self._backdate(db, company)
-        assert store.record_crawl_outcome(db, company, 0, dormant_after=2) == "dormant"
-
-    def test_jobs_reset_the_streak_and_wake_a_dormant_row(self, db, company):
-        self._empty_days(db, company, 4)
-        assert store.record_crawl_outcome(db, company, 7) == "active"
-        row = self._state(db, company)
-        assert row["empty_streak"] == 0 and row["next_crawl_at"] is None
-        assert row["last_nonempty_at"] is not None
-
-    def test_open_postings_elsewhere_keep_a_scoped_empty_board_awake(
-            self, db, company, add_job):
-        """A location-scoped read of a big employer with nothing local
-        returns nothing; the harvester's open rows say the board is alive
-        (2026-09-29: Microsoft and J&J kept going dormant)."""
-        add_job("gh_acme_1", location="Redmond, WA")
-        assert self._empty_days(db, company, 6) == "active"
-        assert self._state(db, company)["empty_streak"] == 0
-        db.execute("UPDATE jobs SET status='closed'")
-        assert self._empty_days(db, company, 4) == "dormant"
-
-    def test_watched_company_never_sleeps(self, db, company):
-        store.set_watch(db, company, True)
-        assert self._empty_days(db, company, 6) == "active"
-
-    def test_offmission_volume_sleeps_a_busy_board(self, db, company, add_job):
-        # The 663-jobs-best-fit-0.15 pattern: productive every run, and
-        # productive of nothing worth reading.
-        for i in range(store._OFFMISSION_MIN_JOBS):
-            add_job(f"gh_acme_{i}", fit=0.03)
-        assert store.record_crawl_outcome(db, company, 663) == "dormant"
-
-    def test_one_good_fit_keeps_a_busy_board_awake(self, db, company, add_job):
-        for i in range(store._OFFMISSION_MIN_JOBS):
-            add_job(f"gh_acme_{i}", fit=0.03)
-        add_job("gh_acme_star", fit=0.71)
-        assert store.record_crawl_outcome(db, company, 663) == "active"
-
-    def test_unscored_jobs_are_not_evidence(self, db, company, add_job):
-        # A board nobody has scored yet has a NULL best fit; that is missing
-        # data, not a verdict.
-        for i in range(store._OFFMISSION_MIN_JOBS):
-            add_job(f"gh_acme_{i}")
-        assert store.record_crawl_outcome(db, company, 40) == "active"
-
-    def test_watched_company_survives_the_volume_rule(self, db, company, add_job):
-        store.set_watch(db, company, True)
-        for i in range(store._OFFMISSION_MIN_JOBS):
-            add_job(f"gh_acme_{i}", fit=0.03)
-        assert store.record_crawl_outcome(db, company, 663) == "active"
-
-
-class TestCrawlableSelection:
-    def _sleeping(self, db, name, wake):
-        cid = store.upsert_company(db, {"name": name, "ats": "greenhouse",
-                                        "slug": name.lower()})
-        db.execute("UPDATE companies SET crawl_state='dormant', "
-                   "next_crawl_at=? WHERE id=?", (wake, cid))
-        db.commit()
-        return cid
-
-    def test_null_state_reads_as_active(self, db, company):
-        assert [c["id"] for c in store.crawlable_companies(db)] == [company]
-
-    def test_dormant_row_waits_for_its_slot(self, db, company):
-        self._sleeping(db, "Sleepy",
-                       (datetime.now() + timedelta(days=6)).isoformat())
-        assert {c["name"] for c in store.crawlable_companies(db)} == {"Acme"}
-
-    def test_dormant_row_returns_when_due(self, db, company):
-        self._sleeping(db, "Sleepy",
-                       (datetime.now() - timedelta(minutes=1)).isoformat())
-        assert {c["name"] for c in store.crawlable_companies(db)} == {"Acme",
-                                                                      "Sleepy"}
-
-    def test_off_never_comes_back_on_its_own(self, db, company):
-        db.execute("UPDATE companies SET crawl_state='off' WHERE id=?", (company,))
-        db.commit()
-        assert store.crawlable_companies(db) == []
-
-    def test_inactive_row_stays_out(self, db, company):
-        db.execute("UPDATE companies SET active=0 WHERE id=?", (company,))
-        db.commit()
-        assert store.crawlable_companies(db) == []
-
-    def test_reactivation_wakes_it_now(self, db, company):
-        cid = self._sleeping(db, "Sleepy",
-                             (datetime.now() + timedelta(days=6)).isoformat())
-        store.reactivate_company(db, cid)
-        row = db.execute("SELECT crawl_state, empty_streak, next_crawl_at "
-                         "FROM companies WHERE id=?", (cid,)).fetchone()
-        assert (row["crawl_state"], row["empty_streak"],
-                row["next_crawl_at"]) == ("active", 0, None)
-        assert len(store.crawlable_companies(db)) == 2
+    def test_the_id_is_accepted_and_ignored(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "A", "id": 99, "crawl_state": "dormant"}])
+        assert db.execute("SELECT id FROM companies").fetchone()[0] == 1
 
 
 class TestDedupe:
@@ -1397,15 +1266,6 @@ class TestMarkHarvested:
         row = store.get_company(db, company)
         assert row["miss_reason"] == "ats-unsupported:ukg"
 
-    def test_harvest_never_touches_empty_streak_or_crawl_state(self, db,
-                                                                company):
-        db.execute("UPDATE companies SET empty_streak=2, "
-                   "crawl_state='dormant' WHERE id=?", (company,))
-        store.mark_harvested(db, company, 0, soft_fail=True)
-        row = store.get_company(db, company)
-        assert row["empty_streak"] == 2 and row["crawl_state"] == "dormant"
-
-
 class TestUpsertJobUrlRekey:
     """A posting that arrives under a NEW job_id scheme (company ats/tenant
     change, fetcher id-format change) must re-key its existing row, not
@@ -1536,16 +1396,6 @@ class TestCompanyByHost:
         dup = store.company_by_board(db, dict(row, name="Saved Inc"))
         assert dup and dup["name"] == "Saved"
 
-    def test_capture_only_rows_are_never_crawled_or_dormant(self, db, company):
-        cid = store.upsert_company(db, {"name": "Saved", "ats": store.CAPTURE_ATS,
-                                        "careers_url": "https://jobs.saved.org/"})
-        assert [c["id"] for c in store.crawlable_companies(db)] == [company]
-        # Nothing records an outcome for it, so the streak never starts.
-        row = db.execute("SELECT crawl_state, empty_streak FROM companies "
-                         "WHERE id=?", (cid,)).fetchone()
-        assert (row["crawl_state"], row["empty_streak"]) == (None, None)
-
-
 class TestDedupJobs:
     """Same company + same URL modulo query string + same title is one
     posting: iCIMS served SAS's postings as `?in_iframe=1` and
@@ -1633,7 +1483,6 @@ class TestReviewQueue:
 
     def test_candidates_are_never_crawled(self, db):
         self._queue(db)
-        assert store.crawlable_companies(db) == []
         assert store.get_companies(db, active_only=True) == []
         assert [c["name"] for c in store.get_companies(db, active_only=False)] \
             == ["Guess"]
@@ -1647,7 +1496,7 @@ class TestReviewQueue:
         cid = self._queue(db, "Real Co", tags="local")
         row = store.confirm_company(db, cid)
         assert (row["tags"], row["active"]) == ("local", 1)
-        assert [c["name"] for c in store.crawlable_companies(db)] == ["Real Co"]
+        assert [c["name"] for c in store.get_companies(db)] == ["Real Co"]
         assert store.pending_companies(db) == []
 
     def test_confirm_parks_an_off_mission_candidate(self, db):

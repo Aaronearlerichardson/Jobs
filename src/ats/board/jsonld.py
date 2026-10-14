@@ -1,31 +1,22 @@
 """
-Generic JSON-LD JobPosting fetcher.
+Generic JSON-LD JobPosting reader.
 
 Most modern career pages embed schema.org JobPosting data in a
 <script type="application/ld+json"> tag — this is the exact format that
 Google for Jobs and other aggregators consume. One parser covers
 hundreds of sites with zero per-vendor code.
-
-Use it two ways:
-
-  await fetch_jsonld_page(company, url)
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 from typing_extensions import TypedDict
 
-from src.net import http
-from src.net.http import HEADERS, fetch_failed
 from src.net.util import JSON, jsonld_scripts, parse_markup, stable_id, text_from_html
-from src.net.util import norm_posted_date as _norm_posted
-from src.rows import FetchedJob
 
 if TYPE_CHECKING:
     from lxml import etree
@@ -176,38 +167,3 @@ def read_posting(jp: Mapping[str, JSON], page_url: str = "") -> Posting:
 def postings(html: str, page_url: str = "") -> list[Posting]:
     """Every JobPosting on a page, as `read_posting` records."""
     return [read_posting(o, page_url) for o in extract_jsonld(html, page_url) if is_jobposting(o)]
-
-
-def _job_from_posting(jp: Mapping[str, JSON], company_name: str, source_url: str) -> FetchedJob:
-    p = read_posting(jp, source_url)
-    job: FetchedJob = {
-        "id":          f"jsonld_{company_name.replace(' ', '_')}_{p['key']}",
-        "company":     company_name,
-        "title":       p["title"],
-        "url":         p["url"],
-        "location":    p["location"],
-        "description": p["description"],
-        "posted_at":   _norm_posted(p["posted_at"]),
-    }
-    if p["telecommute"]:
-        job["remote_hint"] = "jsonld:telecommute"
-    return job
-
-
-async def fetch_jsonld_page(company_name: str, page_url: str,
-                            gate: Callable[..., bool] | None = None,
-                            timeout: tuple[float, float] | None = None) -> list[FetchedJob]:
-    """Fetch ONE URL; extract JobPosting records from its JSON-LD, read off
-    the loop."""
-    try:
-        r = await http.send("GET", page_url, timeout=timeout, headers=HEADERS)
-        r.raise_for_status()
-    except Exception as e:
-        return fetch_failed(f"JSON-LD {company_name} {page_url}", e)
-    jobs = await asyncio.to_thread(
-        lambda: [_job_from_posting(obj, company_name, page_url)
-                 for obj in extract_jsonld(r.text, page_url) if is_jobposting(obj)])
-    return [j for j in jobs if gate is None or gate(j["title"], j["description"])]
-
-
-

@@ -57,7 +57,6 @@ from src import runstate as _runstate                       # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
 from src.conftest import _close_stores            # noqa: E402,F401  (autouse: see there)
-import src.crawl.runner as _runner                  # noqa: E402
 import src.claude.api as _claude                    # noqa: E402
 import src.ops.scoring as _scoring                  # noqa: E402
 import src.discovery.write as _write                # noqa: E402
@@ -83,6 +82,9 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(_config, "DISCOVERY_DOMAIN_LOOKUP", False)
     # Likewise the board directory, which reads a remote dataset.
     monkeypatch.setattr(_directory, "index", lambda: _directory.Companies([], {}))
+    # No feed family is pulled unless a test turns it on (config.FEEDS[family]["on"]).
+    for fam in _config.FEEDS.values():
+        monkeypatch.setitem(fam, "on", False)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -198,17 +200,17 @@ def cfg():
 
 def track_with(**update):
     """The local track with `update` applied (model_copy does not validate)."""
-    return _runner.track_for_engine("local").model_copy(update=update)
+    return _config.track_for_engine("local").model_copy(update=update)
 
 
 @pytest.fixture(scope="session")
 def local_track():
-    return _runner.track_for_engine("local")
+    return _config.track_for_engine("local")
 
 
 @pytest.fixture(scope="session")
 def sweep_track():
-    return _runner.track_for_engine("sweep")
+    return _config.track_for_engine("sweep")
 
 
 @pytest.fixture(scope="session")

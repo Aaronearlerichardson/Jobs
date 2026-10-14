@@ -9,7 +9,7 @@
     board/         the board engine: every ATS board platform, read from
                    its config.BOARDS spec by one engine
     feeds/         the job sources that are not ATS boards (forums,
-                   aggregator feeds, USAJOBS, Getro, web search)
+                   aggregator feeds, USAJOBS, Getro)
 
 Nothing here knows about tracks, ranking or the digest: an ATS module
 turns board coordinates into job dicts and stops. It reads config, match

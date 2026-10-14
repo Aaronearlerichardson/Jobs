@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -165,11 +164,10 @@ async def _find_hiring_threads(submitted_ids: list[object], max_threads: int = 2
     return found
 
 
-async def fetch_hnhiring(max_threads: int = 2, max_comments_per_thread: int = 400,
-                         gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
+async def fetch_hnhiring(max_threads: int = 2, max_comments_per_thread: int = 400) -> list[FetchedJob]:
     """
     Scan the latest N "Ask HN: Who is hiring?" threads, return top-level
-    job comments (those passing `gate(role, text)` when a gate is given).
+    job comments.
     """
     user = await _get_item(f"{BASE}/user/whoishiring.json")
     if not user:
@@ -198,8 +196,6 @@ async def fetch_hnhiring(max_threads: int = 2, max_comments_per_thread: int = 40
                 continue
 
             company, role, location, post_url = _parse_post(text)
-            if gate is not None and not gate(role, text):
-                continue
 
             hn_url = f"https://news.ycombinator.com/item?id={cid}"
             jobs.append({

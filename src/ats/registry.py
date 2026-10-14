@@ -1,4 +1,4 @@
-"""The sweep's fetch for one named board (the crawl's priority companies),
+"""The sweep's fetch for one named board (tools/check_sources.py's probe),
 and the seed tag a newly found board gets.
 
 Every crawl path iterates STORE company rows: the companies table is the
@@ -11,7 +11,7 @@ whole), LOCAL for the boards only worth querying per region.
 tests/test_board_specs.py pins the rule.
 
 A capture-only company (``src.store.CAPTURE_ATS``) has no fetchable board
-and store.crawlable_companies never hands one to a crawl path.
+and store.harvestable_companies never hands one to a crawl path.
 
 Notes:
     The config.py seed lists retired 2026-07. Paylocity and UltiPro seeded

@@ -188,7 +188,7 @@ def _silent_board_candidates(conn: sqlite3.Connection,
     >>> old = (datetime.now() - timedelta(days=30)).isoformat()
     >>> recent = datetime.now().isoformat()
 
-    (last_harvested_at/last_nonempty_at are crawl-scheduling columns
+    (last_harvested_at/last_nonempty_at are harvest-scheduling columns
     upsert_company does not accept -- like mark_harvested, this sets them
     with a raw UPDATE.)
 

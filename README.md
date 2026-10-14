@@ -106,7 +106,7 @@ That directory holds `jobs.db`, your `profile.toml`, your résumé,
   searches DuckDuckGo misses: the resolver's careers search, the dork sweep,
   name harvesting. A run spends at most `[discovery].firecrawl_credits` (100
   by default, 2 per 10 results; the free plan has 1,000 a month) and prints
-  what it spent. The crawl's daily websearch feed never uses it.
+  what it spent.
 - **APIFY_API_KEY** (optional, paid) runs the `google_jobs` registry: add it
   to `[discovery].registries` and `discover.py --registries` reads who is
   hiring near you for your kind of role on Google Jobs, then resolves each
@@ -143,7 +143,7 @@ The shipped profile sets up the classic pair:
 | **remote** | the subject matter, your technical bar | location → remote | `python run_scraper.py --track remote` |
 
 A track is **pure configuration** — engine, database, sources, gates, scoring
-budget, digest email — run through ONE pipeline (`src/crawl/runner.py`). Rename
+budget, digest email — run through ONE pipeline (`src/crawl/harvest.py`). Rename
 them, delete one, add five. `python run_scraper.py` with no flags refreshes
 every configured track: the daily-refresh entry point.
 
@@ -153,15 +153,14 @@ configuration — it selects a crawl posture:
 - **`local`** — location-scoped. Asks each board for *your* region, so it
   stays cheap even against employers with 10,000 openings. Geo-gated; ranks by
   a combined **√(résumé-fit × company-mission)** score.
-- **`sweep`** — location-agnostic. Pulls whole boards plus aggregator feeds
-  and web search, gated hard on your `core` keywords so the wider net doesn't
-  flood the digest.
+- **`sweep`** — location-agnostic. Pulls whole boards plus aggregator feeds,
+  gated hard on your `core` keywords so the wider net doesn't flood the
+  digest.
 
 ```bash
 python run_scraper.py --track remote --preview      # read-only preview
 python run_scraper.py --track remote --send         # email the digest
 python run_scraper.py --track local --no-fit        # skip résumé-fit scoring
-python run_scraper.py --track local --no-websearch  # skip flaky web search
 python run_scraper.py --track local --top 20 --workers 8
 ```
 
@@ -368,7 +367,7 @@ own browser rendered has the job cards in its DOM, and a saved copy is filed
 host against the row's `careers_url` (`store.company_by_host`), or by the
 employer site a posting's JSON-LD names — never as a new company minted from
 the page text. The row is marked `ats = capture`: a real roster member the
-crawl loop **skips** (no fetch errors, no empty streaks, never dormant), shown
+harvest **skips** (no fetch errors, no empty streaks), shown
 with a `capture` chip on the Companies tab.
 
 Steps:
@@ -691,10 +690,10 @@ configured track.)
 ### The background harvester
 
 The crawl above is deliberately narrow: it fetches only the boards due for a
-crawl (active, not parked dormant), scoped to your locality unless a company
+crawl (the harvest plan), scoped to your locality unless a company
 is watched, sweep-tagged or above the mission floor, and hydrates only rows
 that pass the gates. `harvest.py` is the other half — a slow, thorough pass
-that pulls **every** board with a fetchable ATS (dormant, inactive, pending
+that pulls **every** board with a fetchable ATS (inactive, pending
 review; only dead/no-board rows and blocklisted names are skipped), whole and
 unfiltered, and stores every listing **unscored and bodiless**. An inactive
 company never mission-scored is read weekly (`harvest_offmission_hours`); one
@@ -706,9 +705,10 @@ the harvester closes stored rows that have vanished and reopens returners.
 
 Each pass then ends with **triage** (`src/crawl/triage.py`), which is where
 the spend is decided. Every stored row no crawl has adopted is run through
-the crawl's own gates, cheapest first, for every track that reads the
-roster: the company's cached mission tier (one Claude call per never-scored
-company, using the harvested titles as context), the technical-title regex,
+the track gates, cheapest first, for every track that reads it (its
+company's board or its feed): the company's cached mission tier (one
+Claude call per never-scored company, using the harvested titles as
+context), the technical-title regex,
 the core-keyword anchor, the geography rule (watched or mission-trusted
 companies keep remote postings, everyone else onsite only), and the exclude
 tables. Only rows that clear every free gate get a description fetched, and
@@ -781,8 +781,8 @@ Everything personal lives in `profile.toml` on your machine;
 | `[fit]` | résumé-fit rubric: axis `weights`, `gate_penalty`, `domain_ladder`, `stack_core`/`stack_anti`, `region_terms` |
 | `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
 | `[locality]` | what counts as "local" (`src/match/locality.py`) |
-| `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, web-search queries, USAJOBS (`[sources.usajobs]`), Getro network boards (`[sources.getro]`) |
-| `[discovery]` | seed companies, scan majors, directory URLs, web-search name queries, priority companies |
+| `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, USAJOBS (`[sources.usajobs]`), Getro network boards (`[sources.getro]`) |
+| `[discovery]` | seed companies, scan majors, directory URLs, web-search name queries |
 
 **Relevance model:** a job passes if it hits any `core` term, OR a `domain` +
 `skill` pair. Keep `core` narrow (high-signal); let `domain`+`skill` pull in
@@ -919,7 +919,7 @@ APIs, robots.txt policy per host, and your own roster:
 
 ```bash
 python tools/check_sources.py                  # every section
-python tools/check_sources.py --only search --deep   # just web search, full pipeline
+python tools/check_sources.py --only search   # just web search
 python tools/check_sources.py --roster         # + probe every active board you've saved
 ```
 
@@ -951,11 +951,11 @@ identically to a dead one.
 | `config/` / `profile.toml` | plumbing (secrets, paths, profile load, track tables, policy, sources; `import config` re-exports it all) vs. all search criteria |
 | `src/config/bootstrap.py` | first-run setup: seeds your profile, reports where data lives |
 | `src/config/unpack_cache.py` | the compiled binaries' onefile unpack cache: each binary deletes older builds' folders at startup |
-| `src/crawl/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
+| `src/crawl/harvest.py` | THE crawl pipeline — `run_track` is one crawl of any track (`run` scoped to it), methodology from `[tracks.*]`; unscoped, the background whole-board harvest |
 | `src/ops/` | the operations, by family: `status.py` (status sync, closed-probe), `scoring.py` (self-heal, rescore, deep-verify), `backfill.py`, `ingest.py` (external ingest, manual adds), `repair.py` (dead boards, re-resolution, slug renames), `rekey.py`, `restamp.py` (geo_mode and mission-tier restamps), `roster.py` (composite targets); `maintenance.py` holds what they share |
 | `src/ats/registry.py` | the ATS sweep: which store rows it pulls whole, and a new board's seed tag |
 | `src/ats/board/` | the board engine: every ATS platform (22 incl. Workday, Phenom and Infor CloudSuite HCM) is a `config.BOARDS` spec, parsed into the pydantic models in `spec.py` and read by one engine; an html decoder's selectors are CSS in cssselect's dialect (`:contains`, not soupsieve's `:-soup-contains`) |
-| `src/ats/feeds/` | the feed fetchers: RSS/HN/RemoteOK/Remotive/web search, CareerOneStop/NLx, USAJOBS, Getro network boards |
+| `src/ats/feeds/` | the feed fetchers: RSS/HN/RemoteOK/Remotive/Discourse, CareerOneStop/NLx, USAJOBS, Getro network boards |
 | `src/ats/board/company.py` | company-vetted, location-scoped pulls + lazy description hydration, dispatched to the board engine |
 | `src/ats/board/custom.py` | the careers-page reader behind the `custom` spec and discovery's custom-board detection |
 | `src/crawl/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
@@ -965,7 +965,7 @@ identically to a dead one.
 | `src/tags.py` | company scope tags (`local` / `sweep`) + legacy aliases |
 | `src/claude/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m src.claude.fit` |
 | `src/claude/api.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
-| `src/match/gates.py` / `src/digest/render.py` | config-driven title/exclude gates; ranked + matches digest renderers |
+| `src/match/gates.py` / `src/digest/render.py` | config-driven title/exclude gates; the ranked digest renderer |
 | `src/match/filters.py` / `locality.py` | keyword tiers; locality, remote eligibility and US eligibility — all profile-driven |
 | `src/web/` | Flask package: `routes.py`, `server.py`, `templates/` + `static/` |
 | `src/dispatch/` | how a front end runs an operation by name: `registry.py` (the one table the UI buttons and CLI flags share), `background.py` (the web UI's runner) |

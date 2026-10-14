@@ -614,8 +614,8 @@ def roster_growth(conn: sqlite3.Connection, days: int = 7) -> int:
 # as "no-board-found". For those the person drives the browser (capture.py)
 # and the crawler parses only what they saved. Such a company carries
 # ``ats = CAPTURE_ATS``: a real roster row, but one no crawl path may fetch.
-# crawlable_companies leaves it out, so it never earns an empty streak or a
-# fetch error for a board nobody asked.
+# harvestable_companies leaves it out, so it never earns a fetch error for a
+# board nobody asked.
 CAPTURE_ATS = "capture"
 
 
@@ -1020,9 +1020,11 @@ def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
 
 
 def _unwritten(row: object) -> object:
-    """The row without the columns an upsert never writes (id, the crawl
-    schedule); anything else it holds is left for validation to judge."""
-    skip = CompanyRow.__annotations__.keys() - CompanyIn.__annotations__.keys()
+    """The row without the columns an upsert never writes (id, and the
+    retired crawl-schedule columns an old export still carries); anything
+    else it holds is left for validation to judge."""
+    skip = (CompanyRow.__annotations__.keys() - CompanyIn.__annotations__.keys()
+            | {"crawl_state", "empty_streak", "last_crawled_at", "next_crawl_at"})
     return {k: v for k, v in row.items() if k not in skip} if isinstance(row, dict) else row
 
 
@@ -1047,7 +1049,7 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     companies table has, and a value each column's type accepts (`"5"` and
     `5.0` load as 5; `5.5` does not); otherwise pydantic.ValidationError
     names each bad row path and nothing is written. Columns an upsert never
-    writes (id, the crawl schedule) are accepted and ignored. Enforced by
+    writes (id, the retired crawl schedule) are accepted and ignored. Enforced by
     tests/test_store.py::TestImportCompanies.
     """
     with open(path, "rb") as f:
@@ -1082,22 +1084,14 @@ def company_id_by_name(conn: sqlite3.Connection, name: str | None) -> int | None
 
 def get_companies(conn: sqlite3.Connection, active_only: bool = True,
                   missions: Collection[str] | None = None,
-                  tag: str | None = None, due_at: str | None = None) -> list[CompanyRow]:
+                  tag: str | None = None) -> list[CompanyRow]:
     """Companies (their effective facts), optionally filtered by mission
-    tier(s), scope `tag`, and `due_at` (an ISO time): only rows with a
-    board due for a crawl then (crawlable_companies)."""
+    tier(s) and scope `tag`."""
     q = "SELECT * FROM companies_effective"
     conds: list[str] = []
     args: list[str] = []
     if active_only:
         conds.append("active = 1")
-    if due_at is not None:
-        # NULL or '' crawl_state reads as 'active'; a dormant row is due once
-        # next_crawl_at has passed; 'off' never. A capture row has no board.
-        conds.append("ats IS NOT ? AND CASE COALESCE(NULLIF(crawl_state, ''), 'active') "
-                     "WHEN 'active' THEN 1 WHEN 'dormant' THEN "
-                     "COALESCE(next_crawl_at, '') <= ? ELSE 0 END")
-        args += [CAPTURE_ATS, due_at]
     if missions:
         conds.append(f"mission_tier IN ({','.join('?' for _ in missions)})")
         args += list(missions)
@@ -1109,157 +1103,6 @@ def get_companies(conn: sqlite3.Connection, active_only: bool = True,
         q += " WHERE " + " AND ".join(conds)
     q += " ORDER BY mission_score DESC, local_job_count DESC"
     return [as_company(r) for r in conn.execute(q, args).fetchall()]
-
-
-# --------------------------------------------------------------------------- #
-#  Crawl scheduling (dormancy)                                                 #
-# --------------------------------------------------------------------------- #
-#
-# A crawl of the local roster spent most of its wall clock on boards that
-# never pay: 181 of 300 active companies had produced zero jobs ever, and
-# three high-volume boards produced hundreds of rows nobody would apply to
-# (a state health agency: 663 local jobs, best fit 0.15; a games studio;
-# a health startup: 30 jobs, best fit 0.03). Deactivating them by hand is
-# wrong -- a silent board can start hiring -- so they go DORMANT instead:
-# still crawled, just weekly rather than every run.
-#
-# Two ways in, both reversible by the board itself:
-#   * empty streak -- `dormant_after` consecutive DAYS returning nothing,
-#     from a board with no open postings on file either (a location-scoped
-#     read of a big employer with nothing local is not an empty board);
-#   * off-mission volume -- >= 30 jobs stored and a best fit under 0.20.
-# Watched companies are exempt from both: watching means "tell me the
-# moment anything opens here", which a weekly cadence would break.
-
-# Off-mission volume rule. A board this big that has never scored above
-# this is not a scoring accident, it is the wrong employer for the profile.
-_OFFMISSION_MIN_JOBS = 30
-
-
-def _offmission_volume(conn: sqlite3.Connection, company_id: int) -> bool:
-    """True when this company has stored >= 30 jobs and its BEST resume fit
-    is still under 0.20 -- the high-volume off-mission board pattern. A NULL
-    max (nothing scored yet) is missing data, not a verdict, so it fails."""
-    # Scored rows only: the harvester stores every posting on a board
-    # unscored, and 500 unjudged rows next to five scored ones say nothing
-    # about the employer.
-    row = conn.execute(
-        "SELECT COUNT(*) AS n, MAX(resume_fit_score) AS best FROM jobs "
-        "WHERE company_id = ? AND resume_fit_score IS NOT NULL",
-        (company_id,)).fetchone()
-    return bool(row and row["n"] >= _OFFMISSION_MIN_JOBS
-                and row["best"] is not None
-                and row["best"] < 0.20)
-
-
-def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
-                         err: BaseException | None = None, dormant_after: int = 4,
-                         dormant_days: int = 7) -> str | None:
-    """Stamp one company's crawl result and re-decide its crawl_state.
-
-    `n_jobs` is what the board returned for this track (already location
-    filtered), `err` the fetch exception if any. Returns the row's new
-    crawl_state.
-
-    Rules, in order:
-      * a fetch ERROR is neutral -- a 503 or a timeout is our problem, not
-        evidence the board is dead, and counting it would retire companies
-        during a network wobble;
-      * `n_jobs == 0` grows empty_streak, but only ONCE PER CALENDAR DAY:
-        several tracks (and a re-run after a crash) hit the same board on
-        the same day, and three runs in one afternoon must not read as
-        three empty days;
-      * `n_jobs > 0` resets the streak and wakes a dormant row, and so do
-        open postings on file (the harvester's whole-board read): a board
-        serving jobs elsewhere is alive, whatever this track's scope kept;
-      * either dormancy rule (streak, off-mission volume) parks the row at
-        now + `dormant_days`.
-
-    Watched companies, and rows the user switched 'off', are left alone.
-    """
-    row = conn.execute(
-        "SELECT id, watch, crawl_state, empty_streak, last_crawled_at "
-        "FROM companies_effective WHERE id = ?", (company_id,)).fetchone()
-    if not row:
-        return None
-    state = row["crawl_state"] or "active"
-    if err is not None:
-        return state
-
-    now = datetime.now()
-    stamp = now.isoformat()
-    streak = row["empty_streak"] or 0
-    sets: dict[str, object] = {"last_crawled_at": stamp}
-
-    open_on_file = conn.execute(
-        "SELECT 1 FROM jobs WHERE company_id = ? AND COALESCE(status, 'open') = 'open' "
-        "LIMIT 1", (company_id,)).fetchone() is not None
-    if n_jobs or open_on_file:
-        streak = 0
-        sets["empty_streak"] = 0
-        sets["last_nonempty_at"] = stamp
-        if state == "dormant":                     # the board woke up
-            state = "active"
-            sets["next_crawl_at"] = None
-    else:
-        same_day = (row["last_crawled_at"] or "")[:10] == stamp[:10]
-        if not same_day:
-            streak += 1
-            sets["empty_streak"] = streak
-
-    if state != "off" and not row["watch"]:
-        if streak >= dormant_after or _offmission_volume(conn, company_id):
-            state = "dormant"
-            sets["next_crawl_at"] = (now + timedelta(days=dormant_days)
-                                     ).isoformat()
-
-    sets["crawl_state"] = state
-    apply_update(conn, "companies", "id", company_id, sets)
-    return state
-
-
-def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> list[CompanyRow]:
-    """The active companies due for a crawl: everything except the dormant
-    rows whose weekly slot has not come round yet. What build_sources and
-    sync_status_all fetch, in place of every active row.
-
-    Review candidates are `active = 0`, so they are never fetched -- the
-    whole point of the queue is that an unconfirmed guess costs nothing:
-
-    >>> from src.store.schema import connect
-    >>> from src.store import mark_pending
-    >>> conn = connect(":memory:")
-    >>> _ = upsert_company(conn, mark_pending(
-    ...     {"name": "Guess", "ats": "lever", "slug": "guess"}))
-    >>> crawlable_companies(conn)
-    []
-
-    A capture-only company (ats = CAPTURE_ATS) is active and on the roster,
-    but there is no board to fetch -- the person saves its pages by hand --
-    so it is never handed to a fetcher, and never earns an empty streak:
-
-    >>> _ = upsert_company(conn, {"name": "Saved By Hand", "ats": CAPTURE_ATS,
-    ...                           "careers_url": "https://jobs.x.org/"})
-    >>> crawlable_companies(conn)
-    []
-
-    A dormant row comes round once its next_crawl_at has passed; 'off' never:
-
-    >>> for n, state, wake in [("Parked", "dormant", "2999-01-01"),
-    ...                        ("Due", "dormant", "2000-01-01"), ("Off", "off", None)]:
-    ...     _ = upsert_company(conn, {"name": n, "ats": "lever", "slug": n})
-    ...     _ = conn.execute("UPDATE companies SET crawl_state=?, next_crawl_at=? "
-    ...                      "WHERE name=?", (state, wake, n))
-    >>> [c["name"] for c in crawlable_companies(conn)]
-    ['Due']
-
-    Notes:
-        The filter was Python over every active row until 2026-10-07; the
-        SQL agreed with it on all 412,048 (row, time) pairs of the live
-        roster, dormant wake times and their neighbours included.
-    """
-    return get_companies(conn, active_only=True, tag=tag,
-                         due_at=datetime.now().isoformat())
 
 
 def blocked_name_keys(conn: sqlite3.Connection) -> set[str]:
@@ -1286,7 +1129,7 @@ def blocked_keys(conn: sqlite3.Connection) -> set[str]:
 
 def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     """Every company with a fetchable board, for the background harvester:
-    active or not, dormant or not, any tag, any mission score. Skipped only
+    active or not, any tag, any mission score. Skipped only
     when there is no board to fetch (capture rows, no ATS, a dead-board,
     no-board or duplicate miss) or the name is blocklisted, in the store or
     in the profile's [discovery] name_blocklist.
@@ -1295,8 +1138,7 @@ def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     >>> from src.store import block_name, mark_pending
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Dormant", "ats": "lever",
-    ...                           "slug": "d", "crawl_state": "dormant",
-    ...                           "next_crawl_at": "2999-01-01"})
+    ...                           "slug": "d"})
     >>> _ = upsert_company(conn, mark_pending(
     ...     {"name": "Guess", "ats": "greenhouse", "slug": "g"}))
     >>> _ = record_miss(conn, "Dead", "board-dead:ultipro", ats="ultipro",
@@ -1315,7 +1157,7 @@ def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     """
     blocked = blocked_keys(conn)
     # miss_reason families that mean there is nothing at the board's
-    # address. Everything else (inactive, dormant, pending review,
+    # address. Everything else (inactive, pending review,
     # off-mission, even 'no-local-jobs') still HAS a board, and the
     # harvester pulls it.
     rows = conn.execute(
@@ -1363,24 +1205,15 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     deactivate_company call -- which is what lets reresolve_misses pick it
     back up).
 
-    Harvest never touches empty_streak/crawl_state -- those belong to the
-    crawl's own dormancy bookkeeping (record_crawl_outcome).
-
     Returns the 'board-dead:<ats>' reason string when THIS call is the
     one that just promoted the row (so the caller can log a WARNING),
     else None.
 
     Notes:
-        Promotion sets active=0, which is NOT free of side effects: an
-        active row's board is also what crawlable_companies (the daily
-        crawl's own selection) fetches, since that reads
-        get_companies(active_only=True) same as harvest's own
-        harvestable_companies does. Deactivating a promoted board
-        therefore pulls it out of BOTH: the daily crawl on whatever
-        track(s) watch it, and every later harvest pass (already true
-        of any 'board-dead'/'no-board-found' row via
-        harvestable_companies's no-board check). That is the
-        deliberate trade here, for two reasons: (1) _reresolve_candidates
+        Promotion sets active=0, which also pulls the board out of every
+        later harvest pass (already true of any 'board-dead'/
+        'no-board-found' row via harvestable_companies's no-board check).
+        That is the deliberate trade here, for two reasons: (1) _reresolve_candidates
         only ever selects `COALESCE(active, 0) = 0` rows -- exactly as
         record_miss's own inactive-by-construction misses do -- so a
         promoted row that stayed active would never reach
@@ -1392,7 +1225,7 @@ def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
 
         This does NOT extend to the pre-promotion 'fetch-error:harvest'
         state: an active row keeps that miss_reason (and stays active,
-        still crawled and still harvested -- harvestable_companies only
+        still harvested -- harvestable_companies only
         skips the 'board-dead'/'no-board-found' prefixes) for up to
         HARVEST_DEAD_AFTER_DAYS, its grace period. One place this DOES leak
         into is purely cosmetic: store.miss_counts / the web UI's
@@ -1479,15 +1312,6 @@ def mark_harvest_attempted(conn: sqlite3.Connection, company_id: int,
     whatever comes of it (src.crawl.harvest.plan's rotation key)."""
     apply_update(conn, "companies", "id", company_id,
                  {"harvest_attempted_at": (now or datetime.now()).isoformat()})
-
-
-def reactivate_company(conn: sqlite3.Connection, company_id: int) -> None:
-    """Undormant one company: back to 'active', streak cleared, no parked
-    wake time. The escape hatch for a board the rules retired too eagerly."""
-    conn.execute(
-        "UPDATE companies SET crawl_state='active', empty_streak=0, "
-        "next_crawl_at=NULL WHERE id=?", (company_id,))
-    _commit(conn)
 
 
 def deactivate_company(conn: sqlite3.Connection, company_id: int,

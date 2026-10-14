@@ -13,7 +13,6 @@ Schema (per job):
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -38,15 +37,13 @@ class RemoteEntry(BaseModel):
     category: str | None = None
 
 
-def remote_jobs(entries: list[JSON], source: str, gate: Callable[..., bool] | None
-                ) -> list[FetchedJob]:
+def remote_jobs(entries: list[JSON], source: str) -> list[FetchedJob]:
     """A remote-only feed's dict `entries` as job dicts, ids `<source>_<id>`:
     an id-less entry (a metadata stub) is skipped, a missing company is
-    the feed's `source` name, a missing location "Remote"; `gate(title,
-    text)` reads the body, tags and category.
+    the feed's `source` name, a missing location "Remote".
 
     >>> [(j["id"], j["company"], j["location"]) for j in remote_jobs(
-    ...     [{"legal": "x"}, {"id": 7, "position": "Dev", "company_name": "Acme"}], "RemoteOK", None)]
+    ...     [{"legal": "x"}, {"id": 7, "position": "Dev", "company_name": "Acme"}], "RemoteOK")]
     [('remoteok_7', 'Acme', 'Remote')]
     """
     jobs: list[FetchedJob] = []
@@ -57,9 +54,6 @@ def remote_jobs(entries: list[JSON], source: str, gate: Callable[..., bool] | No
         if not e.id:
             continue
         title, desc = e.title or "", strip_html(e.description)
-        tag_text = " ".join(str(t) for t in e.tags or [] if t)
-        if gate is not None and not gate(title, f"{desc} {tag_text} {e.category or ''}".rstrip()):
-            continue
         jobs.append({
             "id":          f"{source.lower()}_{e.id}",
             "company":     e.company or source,
@@ -74,9 +68,9 @@ def remote_jobs(entries: list[JSON], source: str, gate: Callable[..., bool] | No
     return jobs
 
 
-async def fetch_remoteok(max_jobs: int = 500, gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
-    """RemoteOK's first `max_jobs` listings that pass `gate`, built off the loop."""
+async def fetch_remoteok(max_jobs: int = 500) -> list[FetchedJob]:
+    """RemoteOK's first `max_jobs` listings, built off the loop."""
     data = await http.get_json("https://remoteok.com/api", "RemoteOK", default=[])
     if not isinstance(data, list):
         raise TypeError("RemoteOK payload is a list")
-    return await asyncio.to_thread(remote_jobs, data[:max_jobs + 1], "RemoteOK", gate)
+    return await asyncio.to_thread(remote_jobs, data[:max_jobs + 1], "RemoteOK")

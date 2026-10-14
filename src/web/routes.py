@@ -27,7 +27,7 @@ from src.claude import api as claude_api
 from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
 from src.config import RuntimeTrack, profile_edit
-from src.crawl import health
+from src.crawl import harvest, health
 from src.discovery.paste_ingest import preview_names
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
@@ -330,11 +330,10 @@ def api_companies() -> ResponseReturnValue:
             "active": bool(c.get("active")), "tags": sorted(company_tags.parse(c.get("tags"))),
             "watched": is_watched(c), "review": c.get("review"), "open_jobs": n_open,
             "best_fit": best_fit,
-            # Crawl cadence, so the roster shows WHY a company stopped
-            # producing rows instead of looking silently broken.
-            "crawl_state": c.get("crawl_state") or "active",
-            "empty_streak": c.get("empty_streak") or 0,
-            "next_crawl_at": c.get("next_crawl_at"),
+            # Harvest freshness and the dead-board cycle's miss, so the
+            # roster shows WHY a company stopped producing rows.
+            "last_harvested_at": c.get("last_harvested_at"),
+            "miss_reason": c.get("miss_reason"),
         })
     return jsonify(out)
 
@@ -351,20 +350,6 @@ def api_watch(cid: int) -> ResponseReturnValue:
             return jsonify(error="not found"), 404
         store.set_watch(conn, cid, p.on)
     return jsonify(ok=True, watched=p.on)
-
-
-@app.post("/api/company/<int:cid>/reactivate")
-def api_reactivate(cid: int) -> ResponseReturnValue:
-    """Undormant a company: crawl it every run again. The manual override
-    for a board the dormancy rules retired too eagerly (a slug that was
-    briefly broken, a team that has only just started hiring)."""
-    with track_store(_track(_body(_Body).track)) as conn:
-        row = conn.execute("SELECT id FROM companies WHERE id=?",
-                           (cid,)).fetchone()
-        if not row:
-            return jsonify(error="not found"), 404
-        store.reactivate_company(conn, cid)
-    return jsonify(ok=True, crawl_state="active")
 
 
 @app.post("/api/company/<int:cid>/active")
@@ -604,14 +589,12 @@ def api_stats() -> ResponseReturnValue:
             "SELECT COALESCE(SUM(disposition IN ('applied','interviewing')), 0),"
             " COALESCE(SUM(disposition = 'saved'), 0)"
             " FROM jobs WHERE disposition IS NOT NULL").fetchone()
-        # Companies actually crawled every run: a dormant row is still
-        # active, but only comes round weekly, so counting it here
-        # overstated the roster by roughly 60%.
+        # Boards the harvest plan would pull (not the whole roster: boards
+        # it has stopped or buried are left out).
         roster = conn.execute(
-            "SELECT COALESCE(SUM(active = 1 AND"
-            " COALESCE(crawl_state,'active') = 'active'), 0),"
-            " COALESCE(SUM(watch = 1), 0), COALESCE(SUM(review = 'pending'), 0)"
+            "SELECT COALESCE(SUM(watch = 1), 0), COALESCE(SUM(review = 'pending'), 0)"
             " FROM companies_effective").fetchone()
+        n_boards = len(harvest.plan(conn, min_age_hours=0))
         stats = {
             "open": live[0],
             "closed": conn.execute("SELECT COUNT(*) FROM jobs WHERE status = 'closed'")
@@ -627,18 +610,18 @@ def api_stats() -> ResponseReturnValue:
             "applied_7d": conn.execute(
                 "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
                 " AND substr(applied_at,1,10) >= ?", (week_ago,)).fetchone()[0],
-            "companies_active": roster[0],
+            "companies_active": n_boards,
             # Roster GROWTH, from companies.created_at. last_probed cannot
             # answer this: a bulk mission re-score rewrites it on every row.
             "companies_new_7d": store.roster_growth(conn, days=7),
             # Candidates that failed to become crawlable companies, per reason
             # family — the worklist behind a roster that stopped growing.
             "company_misses": dict(store.miss_counts(conn)),
-            "watched": roster[1],
+            "watched": roster[0],
             # Platforms whose latest pass broke across their boards (crawl.health).
             "platform_alerts": health.alerts(conn),
             # Roster candidates waiting on a human — the Review tab's badge.
-            "pending_review": roster[2],
+            "pending_review": roster[1],
             "api_key": have_api_key(),
             "screen_model": config.CLAUDE_MODEL,
             "verify_model": config.CLAUDE_VERIFY_MODEL,

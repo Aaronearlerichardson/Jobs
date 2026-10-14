@@ -293,11 +293,11 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.add:
-        from src.ops.ingest import add_manual_job
-        runstate.run(add_manual_job(url=args.url, title=args.title,
-                                    company=args.company, location=args.location,
-                                    description=args.desc,
-                                    pull_board=not args.no_board))
+        from src.crawl.harvest import add_job
+        runstate.run(add_job(url=args.url, title=args.title,
+                             company=args.company, location=args.location,
+                             description=args.desc,
+                             pull_board=not args.no_board))
         return
 
     if args.files:

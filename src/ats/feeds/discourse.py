@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -45,8 +44,7 @@ class _Category(BaseModel):
     topic_list: _TopicList = _TopicList()
 
 
-async def fetch_discourse(display_name: str, base_url: str, category_id: int,
-                          gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
+async def fetch_discourse(display_name: str, base_url: str, category_id: int) -> list[FetchedJob]:
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
     data = await http.get_json(url, f"Discourse {display_name}", default={},
                                headers=JSON_HEADERS)
@@ -58,14 +56,13 @@ async def fetch_discourse(display_name: str, base_url: str, category_id: int,
         title = t.title or ""
         tid   = t.id
         jurl  = f"{base_url}/t/{t.slug}/{tid}"
-        if gate is None or gate(title):
-            jobs.append({
-                "id":          f"discourse_{base_url.split('.')[0].split('//')[1]}_{tid}",
-                "company":     display_name,
-                "title":       title,
-                "url":         jurl,
-                "location":    "",
-                "description": "",
-                "posted_at":   t.created_at[:10] if t.created_at else None,
-            })
+        jobs.append({
+            "id":          f"discourse_{base_url.split('.')[0].split('//')[1]}_{tid}",
+            "company":     display_name,
+            "title":       title,
+            "url":         jurl,
+            "location":    "",
+            "description": "",
+            "posted_at":   t.created_at[:10] if t.created_at else None,
+        })
     return jobs

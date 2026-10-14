@@ -273,10 +273,9 @@ class TestManualAddUsesTheSharedResolver:
         stub_mission(monkeypatch)
         monkeypatch.setattr("src.claude.api.is_active_mission",
                             lambda *a, **k: True)
-        # No crawl and no ingest: this test is about the resolver call,
-        # and both would reach the disk or the network.
+        # No ingest: this test is about the resolver call,
+        # and it would reach the disk or the network.
         monkeypatch.setattr(ingest, "ingest_external_jobs", answer(1))
-        monkeypatch.setattr(ingest, "crawl_company", answer((0, 0, 0)))
 
     def test_the_probe_first_resolver_is_gone(self):
         assert not hasattr(local_sourcing, "resolve_company_board"), \

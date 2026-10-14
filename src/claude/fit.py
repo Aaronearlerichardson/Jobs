@@ -18,7 +18,7 @@ combiner is a weighted geometric mean -- the same imbalance-punishing shape
 store.combined_score() already uses -- times the worst gate multiplier.
 
 Wired into:
-  - crawl/runner.py, crawl/triage.py, ops/maintenance.py, ops/scoring.py: call
+  - crawl/triage.py, ops/maintenance.py, ops/scoring.py: call
     `score_resume_fit(title, desc, location=...)` here for the FitResult
     (the rubric scores the profile, not résumé text).
   - src/config/profile.py:  loads the optional `[fit]` profile block (weights / gate

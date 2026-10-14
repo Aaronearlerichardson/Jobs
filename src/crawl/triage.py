@@ -57,8 +57,13 @@ Gates, per configured track, in order:
                labels and score, so it enters the ranking like a crawled
                row and the crawl never re-scores it.
 
-A row is judged against EVERY track that reads the roster; it surfaces
-into the union of the tracks it passed (jobs.track is a set). The per-
+A row is judged against EVERY track that reads it (a roster row: the
+tracks whose store_tag covers its company; a feed's row, which has no
+company: the tracks whose `sources` switch reads its family,
+config.FEEDS); it surfaces into the union of the tracks it passed
+(jobs.track is a set). A feed's row is judged as a company of unknown
+mission (never watched, never scored or written) and has no detail page to
+fetch, so it is judged on the text the feed gave. The per-
 track record ("local-tech=geo;remote-neural=title") is kept in
 triage_detail so a false drop is debuggable; triage_status carries the
 one row verdict the funnel counts.
@@ -157,16 +162,25 @@ DEFAULT_WORKERS = worker_count("harvest_workers")
 # --------------------------------------------------------------------------- #
 
 def roster_tracks(tracks: Iterable[RuntimeTrack] | None = None) -> list[RuntimeTrack]:
-    """The configured tracks whose sources include the company store --
-    the ones a harvested row can surface into."""
+    """The configured tracks that read any harvested source -- the company
+    store or a feed family -- the ones a harvested row can surface into."""
     return [t for t in (tracks or config.UI_TRACKS.values())
-            if t.sources.store]
+            if t.sources.store or config.feed_families(t)]
 
 
-def _track_applies(t: RuntimeTrack, company: CompanyRow) -> bool:
-    """A tag-scoped track (store_tag) only reads companies carrying it."""
+def _feed_only(company: CompanyRow) -> bool:
+    """True for the stand-in company of a feed's row (no roster id)."""
+    return company.get("id") is None
+
+
+def _track_applies(t: RuntimeTrack, company: CompanyRow, job: JobRow) -> bool:
+    """Whether track `t` reads `job`: a feed's row if `t` reads its family;
+    else a roster row if `t` reads the store, and a tag-scoped track
+    (store_tag) only reads companies carrying it."""
+    if source := job.get("source"):
+        return source.split(":")[0] in config.feed_families(t)
     tag = t.store_tag
-    return not tag or tags.has(company.get("tags"), tag)
+    return t.sources.store and (not tag or tags.has(company.get("tags"), tag))
 
 
 # --------------------------------------------------------------------------- #
@@ -209,7 +223,7 @@ async def ensure_mission(db: store.Writer, company: CompanyRow,
     (None, None) when scoring is unavailable -- which reads as unknown,
     not off-mission, everywhere downstream."""
     tier, score = company.get("mission_tier"), company.get("mission_score")
-    if tier or score is not None:
+    if tier or score is not None or _feed_only(company):
         return tier, score
     if config.is_multi_division(company.get("name")):
         return None, None                       # the gate ignores it anyway
@@ -286,8 +300,8 @@ def _geo_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, has_body: bo
     "<place>, ST" body rule decides.
 
     Notes:
-        Stricter than the crawl's whole-board path (ops.keep_job, which
-        lets geo_mode read the body): in the 2026-09-10 dry run the loose
+        Stricter than the old crawl's whole-board path (which
+        let geo_mode read the body): in the 2026-09-10 dry run the loose
         body match called 83 of 130 survivors local ("Garner", "apex",
         "NC" as nonconformance, HQ boilerplate) and 15 non-local rows
         remote.
@@ -302,7 +316,7 @@ def _geo_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, has_body: bo
         return OK
     if not location_unknown(loc):
         return "geo"
-    if not has_body or (needs_detail(_fetcher_shape(job, company))
+    if not has_body or (_needs_detail(job, company)
                         and not _detail_stale(job, cutoff)):
         return DEFER                    # a detail fetch may name the place
     # Nothing left that could name the place: the body is all there is.
@@ -320,7 +334,7 @@ def row_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, cutoff: str) 
     given up -- see _geo_verdict."""
     title = job.get("title") or ""
     desc = job.get("description") or ""
-    has_body = bool(desc.strip())
+    has_body = bool(desc.strip()) or _feed_only(company)
     if not gates.is_technical_role(title, t):
         return "title"
     deferred = False
@@ -348,27 +362,30 @@ def row_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, cutoff: str) 
 async def judge(db: store.Writer, company: CompanyRow, jobs: list[JobRow], tracks: list[RuntimeTrack],
                 mission_scorer: MissionScorer = score_company_mission,
                 *, cutoff: str) -> dict[str, dict[str, str]]:
-    """Gates 1-6 for one company's rows against every applicable track.
+    """Gates 1-6 for one company's rows against every track that reads them.
     Returns {job_id: {track_label: verdict}} (verdict OK / gate / DEFER).
     Mission is decided once here (`db`, a store.Writer, keeps it); the
     per-track keyword focus is applied around each track's pass over the
     rows, off the loop."""
-    applicable = [t for t in tracks if _track_applies(t, company)]
+    read = {t.track: [j for j in jobs if _track_applies(t, company, j)] for t in tracks}
     out: dict[str, dict[str, str]] = {j["job_id"]: {} for j in jobs}
-    if not applicable:
+    if not any(read.values()):
         return out
     await ensure_mission(db, company, [j.get("title") for j in jobs[:8]],
                          scorer=mission_scorer)
 
     def gate() -> dict[str, dict[str, str]]:
-        for t in applicable:
+        for t in tracks:
+            rows = read[t.track]
+            if not rows:
+                continue
             mv = mission_verdict(company, t)
             if mv != OK:
-                for j in jobs:
+                for j in rows:
                     out[j["job_id"]][t.track] = mv
                 continue
             with keyword_focus(t):
-                for j in jobs:
+                for j in rows:
                     out[j["job_id"]][t.track] = row_verdict(company, j, t, cutoff)
         return out
     return await asyncio.to_thread(gate)
@@ -414,6 +431,12 @@ def _fetcher_shape(row: JobRow, company: CompanyRow) -> FetchedJob:
             "ats": company.get("ats")}
 
 
+def _needs_detail(row: JobRow, company: CompanyRow) -> bool:
+    """needs_detail for a stored row; never for a feed's, whose feed gave
+    all there is."""
+    return not _feed_only(company) and needs_detail(_fetcher_shape(row, company))
+
+
 async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: float | None = None,
                           backoff_s: float = MISS_BACKOFF_S) -> BoardStats:
     """Fetch bodies for one company's survivors, serially, within the
@@ -432,15 +455,16 @@ async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: fl
 
 def _by_company(conn: sqlite3.Connection, rows: list[JobRow]
                 ) -> tuple[dict[int, list[JobRow]], dict[int, CompanyRow | None]]:
-    """Rows grouped by company, plus the roster row for each.
+    """Rows grouped by company (a feed's row, which has none, alone under its negated row id), plus the roster row for each; a
+    feed's row gets a stand-in with only the name its feed gave.
 
     Both gate phases work per company, not per row: the mission gate is a
-    company-level verdict and hydration is per host. The grouping itself
-    is ops.group_by_company -- this module had reimplemented it, and the
-    body gates a third time inline.
+    company-level verdict and hydration is per host.
     """
-    groups = ops.group_by_company(rows)
-    return groups, {cid: store.get_company(conn, cid) for cid in groups}
+    groups = ops.group_by_company(rows, alone="id")
+    return groups, {cid: store.get_company(conn, cid) if cid > 0 else
+                    cast(CompanyRow, {"name": rs[0].get("company_name") or ""})
+                    for cid, rs in groups.items()}
 
 
 async def _judged(db: store.Writer, companies: dict[int, CompanyRow], groups: dict[int, list[JobRow]],
@@ -561,7 +585,7 @@ async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors
     waiting: dict[str, str] = {}
     for jid, (c, r, status) in survivors.items():
         job = _fetcher_shape(r, c)
-        if not needs_detail(job):
+        if not _needs_detail(r, c):
             continue
         if not (r.get("url") or "").strip():
             waiting[jid] = "no URL to fetch a body from"
@@ -659,11 +683,11 @@ async def _body_gates(db: store.Writer, companies: dict[int, CompanyRow], surviv
     left_rows: list[tuple[CompanyRow, JobRow]] = []
     # The survivor rows carry company_id themselves, so the same grouping
     # helper works here without rebuilding the (company, row) pairs.
-    groups = ops.group_by_company([r for _, r, _ in survivors.values()])
+    groups = ops.group_by_company([r for _, r, _ in survivors.values()], alone="id")
     async for c, r, status, detail, surfaced in _judged(db, companies, groups,
                                                         tracks, mission_scorer,
                                                         cutoff):
-        if status == OK and (r.get("description") or "").strip():
+        if status == OK and ((r.get("description") or "").strip() or _feed_only(c)):
             final[r["job_id"]] = (c, r, surfaced, detail)
         elif status in (OK, DEFER):
             summary["left"] += 1
@@ -715,9 +739,9 @@ async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], su
 
     Returns (scores, over_cap). Rows over the cap stay pending -- their
     bodies are stored now, so the next pass reaches them for free. A row
-    the scorer refuses for a body under fit.MIN_DESC_CHARS (its SKIP-SCORE
-    print) is counted in summary['skip_score']. `summary['attempted']` is
-    the fit calls made, refused ones included (`scored` counts only the
+    with a body under fit.MIN_DESC_CHARS makes no call: it is counted in
+    summary['skip_score'] and kept out of the slice before the cap.
+    `summary['attempted']` is the fit calls made (`scored` counts only the
     answered): what this step took of the run's one scoring budget.
 
     Notes:
@@ -726,8 +750,12 @@ async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], su
         twenty-odd BCBA postings among them, while 1357 rows waited.
     """
     order = sorted(final.values(), key=score_order(prefer))
-    to_score: list[tuple[CompanyRow, JobRow, list[str], str]] = order[:score_cap] if fit else []
-    over_cap: set[str] = {x[1]["job_id"] for x in order[score_cap:]} if fit else set()
+    scorable = [x for x in order
+                if len((x[1].get("description") or "").strip()) >= MIN_DESC_CHARS]
+    if fit:
+        summary["skip_score"] += len(order) - len(scorable)
+    to_score: list[tuple[CompanyRow, JobRow, list[str], str]] = scorable[:score_cap] if fit else []
+    over_cap: set[str] = {x[1]["job_id"] for x in scorable[score_cap:]} if fit else set()
     scores: dict[str, FitResult] = {}
     summary["attempted"] = len(to_score)
     if to_score:
@@ -747,8 +775,6 @@ async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], su
             if res.score is not None:
                 scores[r["job_id"]] = res
                 summary["scored"] += 1
-            elif len((r.get("description") or "").strip()) < MIN_DESC_CHARS:
-                summary["skip_score"] += 1
     return scores, over_cap
 
 

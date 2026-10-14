@@ -1024,7 +1024,7 @@ class TestAddNamesQueue:
         await paste_ingest.add_names(["Alpaca Health"], max_workers=1)
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
-        assert store.crawlable_companies(db) == []
+        assert store.get_companies(db) == []
 
     async def test_a_blocklisted_name_is_never_resolved(self, monkeypatch, db):
         store.block_name(db, "Oncology", "not a company")
@@ -1091,7 +1091,7 @@ class TestScoreAndUpsert:
         # ... but the row itself sits in the queue, off the crawl.
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
-        assert store.crawlable_companies(db) == []
+        assert store.get_companies(db) == []
         stored = store.get_companies(db, active_only=False)[0]
         assert stored["active"] == 0
         assert tags.has(stored["tags"], tags.LOCAL) and stored["review"] == "pending"
@@ -1110,7 +1110,7 @@ class TestScoreAndUpsert:
         _, active, pending = await self._upsert(
             db, hit, source="paste", include_missions=("adjacent",))
         assert (active, pending) == (1, False)
-        assert [c["name"] for c in store.crawlable_companies(db)] \
+        assert [c["name"] for c in store.get_companies(db)] \
             == ["Alpaca Health"]
         assert store.pending_companies(db) == []
         # The activation rule is src.claude.is_active_mission, and it is
@@ -1118,7 +1118,7 @@ class TestScoreAndUpsert:
         _, active, _ = await self._upsert(
             db, hit, source="paste", include_missions=())
         assert active == 0
-        assert store.crawlable_companies(db) == []
+        assert store.get_companies(db) == []
 
     async def test_a_board_tracked_under_another_name_costs_no_score(
             self, monkeypatch, db):
@@ -1384,10 +1384,10 @@ class TestDiscoveredBoardsReachTheRoster:
         row = store.get_companies(db, active_only=False)[0]
         assert [c["name"] for c in store.harvestable_companies(db)] \
             == ["Beta Custom"]
-        assert [c["name"] for c in store.crawlable_companies(db)] \
+        assert [c["name"] for c in store.get_companies(db)] \
             == ["Beta Custom"]
         # src.crawl.harvest.fetch_whole_board and the local track
-        # (src.crawl.runner) both dispatch a roster row here.
+        # (src.crawl.harvest.run_track) both dispatch a roster row here.
         seen = serve("<html></html>")
         await company_fetch.fetch_company(row, None)
         assert seen == ["https://beta.example/careers"]

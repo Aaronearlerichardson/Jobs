@@ -9,5 +9,4 @@ from __future__ import annotations
 from .render import (  # noqa: F401
     APPLY_BAND_LIMIT, age_tag, apply_band_rows, new_ranked_rows,
     write_ranked_digest, send_ranked_digest, announce, toast,
-    write_matches_digest, send_matches_digest,
 )

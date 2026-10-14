@@ -120,8 +120,8 @@ def _mode(argv: list[str]) -> str:
     # is. A session whose only flags are these is the daily crawl.
     for tok in argv:
         if tok.startswith("--") and tok[2:] not in {
-                "track", "preview", "no-fit", "send", "no-websearch", "refresh",
-                "samples", "top", "workers", "no-verify", "stale-days", "limit",
+                "track", "preview", "no-fit", "send", "refresh",
+                "top", "workers", "no-verify", "stale-days", "limit",
                 "described-only", "why", "db"}:
             return tok[2:]
     return "crawl"

@@ -18,6 +18,7 @@ import ast
 import asyncio
 import builtins
 import functools
+import json
 import re
 import sys
 import time
@@ -1260,3 +1261,25 @@ def test_the_build_unpacks_where_unpack_cache_looks(monkeypatch):
         assert {"--file-version=0.1.0.7", "--product-version=0.1.0.7"} <= set(cmd)
     assert unpack_cache.version_key(build_app.parse_describe("v0.1-158-g5525f88")) \
         == (0, 1, 0, 158)
+
+
+def test_every_param_the_ui_sends_is_one_its_op_accepts():
+    """app.js names each op's params by hand (the OPS table and the add-job /
+    add-board forms); OpParams forbids extras, so a key it does not accept
+    (a field, or its validation alias) fails every run of that card."""
+    from src.dispatch.registry import REGISTRY
+    js = (ROOT / "src" / "web" / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    table = js.split("const OPS = ", 1)[1].split("\n];", 1)[0] + "\n]"
+    sent = {op[0]: [p[0] for p in op[3]]
+            for op in json.loads(re.sub(r",(\s*[\]}])", r"\1", table))}
+    for card in js.split('<div class="op ')[1:]:
+        if m := re.search(r'data-op="([\w-]+)"', card):
+            sent.setdefault(m[1], []).extend(re.findall(r'data-a="(\w+)"', card))
+    assert {"crawl", "add-job", "add-board"} <= sent.keys()
+    bad = {}
+    for op, keys in sent.items():
+        accepted = {"track"} | {f.validation_alias or name for name, f
+                                in REGISTRY[op]["params"].model_fields.items()}
+        if missing := [k for k in keys if k not in accepted]:
+            bad[op] = missing
+    assert not bad, f"app.js sends params their op's OpParams forbids: {bad}"

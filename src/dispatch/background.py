@@ -339,7 +339,7 @@ async def queue_clear() -> int:
 # The operations, from the ONE registry shared with the CLIs, in the
 # {label, engine, params, fn} shape routes.py and the tests read: `engine`
 # is the crawl engine the op needs ("local" = the location-scoped crawler,
-# "sweep" = the location-agnostic one, src/crawl/runner.py; None = any
+# "sweep" = the location-agnostic one, src/crawl/harvest.py; None = any
 # track), matched against the active track's profile-configured engine and
 # never against a user-chosen track id. `params` is the op's model, which
 # api_run validates the POSTed JSON with; `fn(args)` is the op's coroutine

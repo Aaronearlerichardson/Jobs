@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable
 
 from lxml import etree
 
@@ -76,8 +75,7 @@ def _find(item: etree._Element, name: str) -> tuple[etree._Element | None, str]:
 
 
 async def fetch_rss(source_label: str, url: str, default_location: str = "Remote",
-                    max_items: int = 200, remote_board: bool = False,
-                    gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
+                    max_items: int = 200, remote_board: bool = False) -> list[FetchedJob]:
     """
     Pull an RSS/Atom feed, yield relevant jobs, the feed read off the loop.
 
@@ -93,11 +91,11 @@ async def fetch_rss(source_label: str, url: str, default_location: str = "Remote
     except Exception as e:
         return fetch_failed(f"RSS {source_label}", e)
     return await asyncio.to_thread(_jobs, r.content, source_label, url, default_location,
-                                   max_items, remote_board, gate)
+                                   max_items, remote_board)
 
 
 def _jobs(feed: bytes, source_label: str, url: str, default_location: str, max_items: int,
-          remote_board: bool, gate: Callable[..., bool] | None) -> list[FetchedJob]:
+          remote_board: bool) -> list[FetchedJob]:
     """The feed body `feed` as fetch_rss's job dicts."""
     root = parse_markup(feed, xml=True, url=url)
     items = named(root, "item") or named(root, "entry")
@@ -126,9 +124,6 @@ def _jobs(feed: bytes, source_label: str, url: str, default_location: str, max_i
             region = region_text.strip()
 
         location = region or default_location
-
-        if gate is not None and not gate(role, desc):
-            continue
 
         job: FetchedJob = {
             "id":          f"rss_{source_label.replace(' ', '_')}_{stable_id(guid)}",

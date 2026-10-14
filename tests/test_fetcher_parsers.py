@@ -512,7 +512,7 @@ class TestUsajobs:
 
 class TestRelevanceGate:
     """The keyword filter is a `gate` PARAMETER of every fetcher, injected
-    by the ATS registry (and the runner's feed thunks) rather than
+    by the ATS registry rather than
     imported by the fetcher modules. A fetcher called with no gate keeps
     every posting; the registry's thunk keeps only the relevant ones —
     which is why the canary widens the filter before judging a board's
@@ -661,15 +661,6 @@ class TestGetro:
         ids = [j["id"] for j in await getro.fetch_getro_all(self.BOARD, detail_delay=0)]
         assert "getro_91000003" not in ids
 
-    async def test_titles_are_screened_before_any_page_fetch(self, board):
-        jobs = await getro.fetch_getro_all(
-            self.BOARD, detail_delay=0,
-            gate=lambda title, desc="": "data" in title.lower())
-        assert [j["id"] for j in jobs] == ["getro_91000001", "getro_91000004"]
-        pages = [u for u in board if "/jobs/" in u]
-        assert all("91000001" in u or "91000004" in u for u in pages)
-        assert not any("api.getro.com" in u for u in board)
-
     async def test_the_detail_cap_trims_the_oldest(self, board, match_everything):
         jobs = await getro.fetch_getro_all(self.BOARD, max_details=2, detail_delay=0)
         assert [j["id"] for j in jobs] == ["getro_91000002"]
@@ -774,7 +765,7 @@ class TestGetroAttribution:
         assert row["review"] == "pending"
         assert job["company_id"] == row["id"]
         assert store.get_company(db, row["id"])["active"] == 0
-        assert store.crawlable_companies(db) == []
+        assert store.get_companies(db) == []
         assert not store.is_confirmed_company(db, "Orbit Health")
 
     def test_the_apply_link_supplies_the_candidates_board(self, db):

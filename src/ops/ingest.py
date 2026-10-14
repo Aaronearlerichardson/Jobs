@@ -1,6 +1,5 @@
 """External and hand-picked postings into a track's store: the ingest
-behind capture.py and the NLx feed, the manual add, and the one-company
-crawl that pulls the added company's other postings."""
+behind capture.py and the NLx feed, and the manual add."""
 
 from __future__ import annotations
 
@@ -18,10 +17,8 @@ from src.discovery.write import mission_context
 from src.discovery.resolve import board as resolve_board
 from src.match import gates
 from src.match.locality import NC_RE, geo_mode
-from src.net.http import fetch_failed
 from src.net.parallel import fan_out
-from src.ops.maintenance import (keep_job, score_job, _scored_row, _t,
-                                 whole_board, board_index, board_match,
+from src.ops.maintenance import (_scored_row, _t, board_index, board_match,
                                  remote_trusted, track_writer)
 from src.rows import BoardHit, CompanyRow, FetchedJob
 
@@ -139,48 +136,10 @@ async def ingest_external_jobs(jobs: list[FetchedJob], source: str = "indeed", m
         return scored
 
 
-async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int = 6,
-                        t: RuntimeTrack | None = None) -> tuple[int, int, int]:
-    """Fetch ONE store company's locality-scoped board (whole board for
-    watched/sweep-tagged companies), apply the track's filters, resume-fit-
-    score the new postings, and store them on `db` (a store.Writer).
-    Returns (n_fetched, n_kept, n_new). Used by the manual-add flow to pull
-    a company's other jobs once it's in the roster."""
-    t = _t(t)
-    loc_re = None if whole_board(company,
-                                  t.remote_mission_floor) else NC_RE
-    try:
-        jobs = await company_fetch.fetch_company(company, loc_re, employer=company["name"])
-    except Exception as e:
-        fetch_failed(f"fetch error for {company['name']}", e)
-        return (0, 0, 0)
-    # A successful non-empty snapshot is the authority on what this company
-    # currently lists: close stored rows that vanished, revive returners.
-    if jobs and company.get("id"):
-        await db.run(store.sync_job_statuses, company["id"], jobs, track=t.track)
-    kept = [j for j in jobs if await keep_job(company, j, t)]
-    fresh = await db.run(lambda conn: [j for j in kept
-                                       if not store.job_exists(conn, j["id"])])
-    n_new = 0
-    async for row in fan_out(fresh, lambda j: score_job(company, j, t.track),
-                             "scoring", max_workers):
-        # Kept separate from the scoring failure fan_out reports: a store
-        # write that fails is not a scoring problem, and lumping the two
-        # together is what hid the write-lock starvation in harvest.py for
-        # a day (every locked write read as an unreachable board).
-        try:
-            await db.run(store.upsert_job, row)
-            n_new += 1
-        except Exception as e:
-            print(f"    [!] store error: {e}")
-    return (len(jobs), len(kept), n_new)
-
-
 async def add_manual_job(url: str, title: str, company: str, location: str,
-                         description: str = "", pull_board: bool = True,
-                         max_workers: int = 6, t: RuntimeTrack | None = None) -> dict[str, int | bool | str]:
-    """Add ONE hand-picked job, register/resolve its COMPANY, and — if that
-    company's board resolves — pull its OTHER in-scope jobs too.
+                         description: str = "", t: RuntimeTrack | None = None) -> dict[str, int | bool | str]:
+    """Add ONE hand-picked job, register/resolve its COMPANY. The company's
+    other jobs come from a harvest of its board (crawl.harvest.add_job).
 
     The single job is curated (exclude/technical gates skipped, you chose
     it) but still geo-gated on location-scoped tracks. For bot-gated giants
@@ -265,18 +224,11 @@ async def add_manual_job(url: str, title: str, company: str, location: str,
           "location": location or "", "description": description or ""}],
         source="manual", curated=True, t=t)
 
-    # 3) The company's OTHER jobs — crawl its board whenever it has one
-    #    (freshly resolved OR already in the roster), unless --no-board.
-    n_other = 0
     async with track_writer(t) as db:
         row = await db.run(lambda conn: store.get_company(
             conn, store.company_id_by_name(conn, name)))
         has_board = bool(row and row.get("ats"))
-        if pull_board and row and row.get("ats"):
-            _, _, n_other = await crawl_company(db, row, max_workers, t=t)
-            print(f"    pulled {n_other} other in-scope job(s) from {name}'s board")
 
     status = "active board" if has_board else "recorded (board unresolved)"
-    print(f"\n  DONE: +{n_job} job, +{n_other} from board; company '{name}' - {status}.")
-    return {"job_added": n_job, "other_jobs": n_other,
-            "board": has_board, "company": name}
+    print(f"\n  DONE: +{n_job} job; company '{name}' - {status}.")
+    return {"job_added": n_job, "board": has_board, "company": name}

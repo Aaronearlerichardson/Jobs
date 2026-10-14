@@ -134,8 +134,8 @@ class TestAttribution:
         assert (job["company_id"], job["company_name"]) == (row["id"], "Acme Health")
         # One roster row, still: the page text minted no second company.
         assert len(store.get_companies(roster, active_only=False)) == 1
-        # And the crawl loop never picks it up.
-        assert store.crawlable_companies(roster) == []
+        # And the harvest never picks it up.
+        assert store.harvestable_companies(roster) == []
 
     async def test_unknown_host_still_records_a_lead(self, roster, local_addr):
         html = """<html><head><link rel="canonical" href="https://jobs.stranger.org/p/1">
@@ -191,7 +191,7 @@ class TestAttribution:
         assert await add_board("Acme Health System", "https://jobs.acmehealth.org/",
                          capture=True) is None
         assert len(store.get_companies(roster, active_only=False)) == 1
-        assert store.crawlable_companies(roster) == []
+        assert store.harvestable_companies(roster) == []
 
 
 async def test_ingest_links_jobs_to_their_company_and_hydrates_per_board(

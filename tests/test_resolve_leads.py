@@ -43,7 +43,7 @@ class TestResolveLeads:
         rows = await local_sourcing.resolve_leads(max_workers=1)
         assert [r["name"] for r in rows] == ["Alpaca Health"]
         assert [c["name"] for c in store.pending_companies(db)] == ["Alpaca Health"]
-        assert store.crawlable_companies(db) == []
+        assert store.get_companies(db) == []
         assert "1 board(s) resolved" in capsys.readouterr().out
 
     async def test_a_miss_is_recorded_with_its_reason(self, monkeypatch, db, capsys):

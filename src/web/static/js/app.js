@@ -71,7 +71,7 @@ function renderTiles() {
     [s.pipeline, "in pipeline"], [s.saved, "saved"],
     [s.applied_7d ?? 0, "applied this week"],
     [s.closed, "closed"], [dated + "%", "have post date"],
-    [s.companies_active, "active companies"], [s.watched, "watched"],
+    [s.companies_active, "boards harvested"], [s.watched, "watched"],
   ].map(([v, l]) => `<div class="tile"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("")
     + ((s.platform_alerts || []).length ? `<div class="tile" title="${esc(s.platform_alerts.join("; "))}"><b>${s.platform_alerts.length}</b><span>platforms failing</span></div>` : "");
   $("#keywarn").hidden = !!s.api_key;
@@ -539,27 +539,21 @@ function renderReview() {
 
 /* ---------------- companies ---------------- */
 
-/* Crawl cadence cell. A dormant company is NOT broken and NOT switched
-   off — it produced nothing for days (or floods the run with off-mission
-   rows), so it is fetched weekly instead of every run. Without this the
-   roster gave no clue why a board had gone quiet. */
+/* Harvest cell: when the board was last pulled, and whether the harvest's
+   dead-board cycle has marked it failing or dead. Without this the roster
+   gave no clue why a board had gone quiet. */
 function crawlCell(c) {
   // Capture-only: a board no fetcher can reach (bot challenge, JS-only
-  // page). Never crawled, never dormant — the person saves its pages by
+  // page). Never harvested — the person saves its pages by
   // hand with capture.py and the jobs land here under this row.
   if (c.ats === "capture") {
     return `<span class="chip tier" title="not crawled: browse the board yourself and save pages into ./captures (python capture.py --watch)">capture</span>`;
   }
-  const st = c.crawl_state || "active";
-  if (st === "active") {
-    return c.empty_streak
-      ? `<span class="chip tier" title="consecutive empty days">empty ${c.empty_streak}</span>`
-      : "";
-  }
-  const when = (c.next_crawl_at || "").slice(0, 10);
-  return `<span class="chip age-stale" title="skipped until ${esc(when || "?")}">${esc(st)}</span>
-    <button class="reactivate" data-react="${c.id}"
-     title="crawl this company every run again">wake</button>`;
+  const miss = c.miss_reason || "";
+  const state = miss.startsWith("board-dead") ? `<span class="chip age-stale" title="${esc(miss)}">dead</span> `
+    : miss.startsWith("fetch-error") ? `<span class="chip age-stale" title="${esc(miss)}">failing</span> ` : "";
+  const when = (c.last_harvested_at || "").slice(0, 10);
+  return `${state}<span class="loc" title="last harvested">${esc(when || "never")}</span>`;
 }
 
 /* Fit at which the roster suggests watching a company. The watch list is
@@ -583,7 +577,7 @@ function renderCompanies() {
   $("#companies").innerHTML = `<table>
     <thead><tr><th></th><th>Company</th><th>ATS</th><th>Mission</th>
     <th class="num">Score</th><th class="num">Open jobs</th><th>Tags</th>
-    <th>Crawl</th><th>Active</th></tr></thead>
+    <th>Harvested</th><th>Active</th></tr></thead>
     <tbody>${rows.map(c => `
       <tr>
         <td><button class="star ${c.watched ? "on" : ""}" data-id="${c.id}"
@@ -603,13 +597,6 @@ function renderCompanies() {
       toast(b.classList.contains("on") ? "unwatched" : "watching");
       await refreshData();
     } catch (e) { toast("failed: " + e.message); }
-  });
-  document.querySelectorAll("button[data-react]").forEach(b => b.onclick = async () => {
-    try {
-      await post(withTrack(`/api/company/${b.dataset.react}/reactivate`), {});
-      toast("crawled every run again");
-    } catch (e) { toast("failed: " + e.message); }
-    await refreshData();
   });
   document.querySelectorAll("input[data-active]").forEach(cb => cb.onchange = async () => {
     try { await post(withTrack(`/api/company/${cb.dataset.active}/active`), { on: cb.checked }); }
@@ -633,7 +620,7 @@ const OP_GROUPS = [
 const OPS = [
   ["crawl", "Crawl", "Fetches every company board this track follows, keeps the postings that pass its filters, and scores the new ones against your résumé.",
    [["top", "top N", 15], ["workers", "workers", 6], ["no_verify", "skip verify", false, "check"],
-    ["no_websearch", "skip web search", false, "check"], ["no_fit", "skip fit scoring", false, "check"]],
+    ["no_fit", "skip fit scoring", false, "check"]],
    "routine", "The main one — run it daily. Uses the Claude API."],
   ["sync", "Refresh open/closed", "Re-checks the same boards and marks vanished postings closed, without re-scoring anything.",
    [["top", "top N", 15]],

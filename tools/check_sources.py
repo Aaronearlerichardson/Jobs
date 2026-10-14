@@ -283,10 +283,9 @@ async def probe_feeds() -> list[dict[str, Any]]:
 #  3. web search                                                               #
 # --------------------------------------------------------------------------- #
 #
-# The flakiest source by a wide margin, and the one the crawl spends the most
-# wall-clock on. Three layers can each fail independently, so probe each:
-#   the DDG endpoints directly | the bounded/cached src.net.ddg.search() |
-#   the full fetch_websearch() (search -> visit results -> parse JSON-LD)
+# The flakiest source by a wide margin (discovery's name resolver searches
+# with it). Two layers can each fail independently, so probe each:
+#   the DDG endpoints directly | the bounded/cached src.net.ddg.search()
 
 SEARCH_QUERIES = [
     ("plain terms",     'machine learning engineer jobs'),
@@ -295,7 +294,7 @@ SEARCH_QUERIES = [
 ]
 
 
-async def probe_search(deep: bool = False) -> list[dict[str, Any]]:
+async def probe_search() -> list[dict[str, Any]]:
     from src.net.ddg import search as ddg_text
 
     out = []
@@ -345,26 +344,6 @@ async def probe_search(deep: bool = False) -> list[dict[str, Any]]:
                     "seconds": elapsed})
         await asyncio.sleep(config.SEARCH_PROBE_PAUSE_S)
 
-    # -- layer 3: the whole pipeline --------------------------------------
-    if deep:
-        from src.ats.feeds.websearch import fetch_websearch
-        for label, q in SEARCH_QUERIES[1:]:
-            started = time.monotonic()
-            postings, note, exc = await _run_fetcher(
-                fetch_websearch, f"probe: {label}", q, max_results=5)
-            blob = f"{note} {exc}"
-            if postings:
-                status, detail = OK, f"{len(postings)} postings parsed from results"
-            elif exc:
-                status, detail = BROKEN, exc[:110]
-            else:
-                status = blame(blob)
-                detail = (note[:110] or
-                          "0 postings — no results, or none carried JSON-LD")
-            out.append({"section": "search", "name": f"fetch_websearch: {label}",
-                        "status": status, "detail": detail, "rows": len(postings),
-                        "seconds": round(time.monotonic() - started, 1)})
-            await asyncio.sleep(config.SEARCH_PROBE_PAUSE_S)
     return out
 
 
@@ -518,7 +497,7 @@ async def _probe_robots_all() -> list[dict[str, Any]]:
 SECTIONS: dict[str, tuple[str, Callable[[argparse.Namespace], Awaitable[list[dict[str, Any]]]]]] = {
     "robots": ("robots.txt policy", lambda a: _probe_robots_all()),
     "feeds":  ("Aggregator feeds", lambda a: probe_feeds()),
-    "search": ("Web search", lambda a: probe_search(deep=a.deep)),
+    "search": ("Web search", lambda a: probe_search()),
     "forums": ("Forums", lambda a: probe_forums()),
     "api":    ("Keyed APIs", lambda a: probe_api()),
     "gated":  ("Gated by policy", lambda a: probe_gated()),
@@ -578,9 +557,6 @@ def main() -> int:
                     help="also probe every active board in YOUR store")
     ap.add_argument("--limit", type=int, default=None,
                     help="with --roster: cap the boards probed")
-    ap.add_argument("--deep", action="store_true",
-                    help="with the search section: also run the full "
-                         "search->visit->parse pipeline (slow)")
     ap.add_argument("--json", type=Path, help="write machine-readable results")
     args = ap.parse_args()
 

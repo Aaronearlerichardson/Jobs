@@ -1,5 +1,4 @@
-"""Open/closed reconciliation of stored job rows: the board-snapshot status
-sync and the closed-URL probe."""
+"""Open/closed reconciliation of stored job rows: the closed-URL probe."""
 
 from __future__ import annotations
 
@@ -8,138 +7,17 @@ import itertools
 import re
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import TypedDict, cast
 
 from src import config
 from src import store
 from src.ats.board import closure
-from src.ats.board import company as company_fetch
 from src.config import RuntimeTrack
-from src.match.locality import NC_RE
-from src.net.parallel import fan_out, fetch_all
-from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _t, whole_board,
-                                 group_by_company, rewrite_digest, track_writer)
-from src.rows import CompanyRow
-
-# Why a fetched board can't be reconciled, in the order the footer reports
-# them. Distinct on purpose: "the fetch raised", "the fetch came back with
-# nothing", and "the roster row has no primary key" are three different
-# faults with three different fixes, and the sync used to treat all three as
-# the same silent `continue`.
-_SYNC_SKIP_REASONS = ("fetch error", "empty board", "no roster id")
-
-
-def _sync_skip_reason(company: CompanyRow, jobs: Sequence[object] | None, err: object,
-                      snapshot: Mapping[str, object] | None = None) -> str | None:
-    """Why this company's board cannot be reconciled, or None when it can.
-    `snapshot` is fetch_all's net.http.snapshot_info() for the board: an
-    INCOMPLETE one (a page failed partway) is a fetch error too.
-
-    >>> _sync_skip_reason({"id": 1}, [{"id": "j1"}], None) is None
-    True
-    >>> _sync_skip_reason({"id": 1}, [], RuntimeError("HTTP 404"))
-    'fetch error'
-    >>> _sync_skip_reason({"id": 1}, [{"id": "j1"}], None, {"incomplete": True})
-    'fetch error'
-    >>> _sync_skip_reason({"id": 1}, [], None)
-    'empty board'
-    >>> _sync_skip_reason({"name": "Acme"}, [{"id": "j1"}], None)
-    'no roster id'
-    """
-    if err is not None or (snapshot or {}).get("incomplete"):
-        return "fetch error"
-    if not jobs:
-        return "empty board"
-    if not company.get("id"):
-        return "no roster id"
-    return None
-
-
-def _sync_skip_note(skipped: dict[str, int]) -> str:
-    """The footer's skipped-board clause, or "" when nothing was skipped.
-
-    >>> _sync_skip_note({"fetch error": 6, "empty board": 1, "no roster id": 1})
-    ', 8 skipped (6 fetch error, 1 empty board, 1 no roster id)'
-    >>> _sync_skip_note({"fetch error": 0, "empty board": 0})
-    ''
-
-    It sits beside the "N board(s) reconciled" count because that count on
-    its own is what hid the gap: 216 attempted, 208 reconciled, and no
-    arithmetic in the log to say the other eight existed.
-    """
-    parts = [f"{skipped[why]} {why}" for why in _SYNC_SKIP_REASONS
-             if skipped.get(why)]
-    if not parts:
-        return ""
-    return f", {sum(skipped.values())} skipped (" + ", ".join(parts) + ")"
-
-
-async def sync_status_all(top_n: int = 15, t: RuntimeTrack | None = None) -> tuple[int, int]:
-    """Status-only reconciliation: re-fetch every active company's board
-    (locality-scoped unless whole-board), reconcile
-    open/closed via sync_job_statuses, and rewrite today's digest from the
-    corrected ranking. NO scoring, no Claude API — the cheap recovery pass
-    for when statuses have drifted without paying for a full crawl.
-
-    A board that cannot be reconciled is skipped (never closed on a failed
-    or partial fetch) and SAID SO: one "[!]" line per board with the
-    reason, and the reason counts beside the footer's reconciled count. A
-    capped board IS reconciled (reopening still happens for whatever
-    matches), but a board-native row missing from a capped snapshot is
-    NEVER closed here, on any miss (store.sync_job_statuses's `capped`) --
-    that snapshot is an unstable window, not the board, and closing what
-    it drops is check_closed_jobs's job, which probes the row's own URL
-    instead of trusting one page-capped pull."""
-    t = _t(t)
-    async with track_writer(t) as db:
-        companies = await db.run(store.crawlable_companies, tag=t.store_tag)
-        print(f"  reconciling statuses across {len(companies)} active compan(ies)...")
-        loc = NC_RE if t.sources.location_scoped else None
-        sources = [(c["name"], c["ats"] or "?",
-                    (lambda cc=c: company_fetch.fetch_company(
-                        cc, None if (whole_board(cc, t.remote_mission_floor)
-                                     or loc is None) else loc, employer=cc["name"])))
-                   for c in companies]
-        fetched = await fetch_all(sources)
-        n_closed = n_reopened = n_boards = 0
-        skipped = {why: 0 for why in _SYNC_SKIP_REASONS}
-        for c, (jobs, err, snapshot) in zip(companies, fetched):
-            why = _sync_skip_reason(c, jobs, err, snapshot)
-            if why:
-                # The skip itself is right and stays: fetchers soft-fail to
-                # [], so an error or an empty snapshot is indistinguishable
-                # from a board that emptied for real, and reconciling one
-                # would close every job of a company whose ATS merely
-                # hiccuped. What was wrong is that it happened in silence —
-                # 2026-09-11 (data/logs/session-20260911-161836-webui-sync
-                # .log): 16:18:37 "reconciling statuses across 216 active
-                # compan(ies)...", 16:20:51 "208 board(s) reconciled", and
-                # not one line in between about the other eight. A skipped
-                # board is a company whose statuses are now stale, so it is
-                # a WARNING ("  [!]" lines are logged at WARNING —
-                # src/session_log.py::_level_for), named and counted.
-                skipped[why] += 1
-                detail = f": {err}" if err is not None else ""
-                print(f"    [!] {(c.get('name') or '?')[:34]:34} "
-                      f"not reconciled ({why}){detail}")
-                continue
-            n_re, n_cl = await db.run(
-                store.sync_job_statuses, c["id"], jobs, track=t.track,
-                capped=snapshot["capped"] if snapshot else False)
-            n_boards += 1
-            n_closed += n_cl
-            n_reopened += n_re
-            if n_cl or n_re:
-                print(f"  {c['name'][:34]:34} {len(jobs):3} listed -> "
-                      f"{n_cl:2} closed, {n_re:2} reopened")
-        tally = (f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
-                 f"{n_reopened} reopened{_sync_skip_note(skipped)}; ")
-        await db.run(rewrite_digest, t, top_n,
-                     lambda n_open: f"{tally}{n_open} open job(s) in ranking.")
-        return (n_closed, n_reopened)
-
+from src.net.parallel import fan_out
+from src.ops.maintenance import (_DEAD_BOARD_FAMILY, group_by_company,
+                                 track_writer)
 
 # How stale an OPEN row at a board-dead company must be before this closes
 # it outright, with no URL probe at all: the company's OWN board fetch has

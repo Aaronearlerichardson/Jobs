@@ -315,8 +315,6 @@
   .star.suggest { font-size: 11px; color: var(--accent); padding: 1px 8px;
                   border: 1px solid var(--accent); border-radius: 999px;
                   margin-left: 6px; vertical-align: 1px; }
-  .reactivate { background: none; border: none; color: var(--accent);
-                font-size: 11.5px; text-decoration: underline; padding: 0 4px; }
 
   /* ------- review queue ------- */
   .tabcount { display: inline-block; min-width: 16px; border-radius: 999px;

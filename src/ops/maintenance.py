@@ -18,12 +18,10 @@ from src import config
 from src import digest
 from src.digest.render import score_text
 from src import store
-from src import tags
 from src.ats.board import company as company_fetch
 from src.claude.fit import score_resume_fit
 from src.config import RuntimeTrack
 from src.match import gates
-from src.match.filters import is_relevant
 from src.match.locality import (NC_RE, geo_label, geo_mode, is_nc, location_unknown,
                                 remote_signal, us_eligible)
 from src.net.http import fetch_failed
@@ -87,25 +85,31 @@ async def track_writer(t: RuntimeTrack | None = None, db: store.Writer | Connect
 
 
 @overload
-def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: Literal["company_id"] = "company_id"
-                                              ) -> dict[int, list[T]]: ...
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: Literal["company_id"] = "company_id",
+                                              alone: str | None = None) -> dict[int, list[T]]: ...
 @overload
-def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str) -> dict[str, list[T]]: ...
-def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str = "company_id"
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str,
+                                              alone: str | None = None) -> dict[str, list[T]]: ...
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str = "company_id",
+                                              alone: str | None = None
                                               ) -> dict[int, list[T]] | dict[str, list[T]]:
     """`rows` bucketed by `key` (their company id by default), in
-    first-seen order.
+    first-seen order. With `alone` naming an integer field, a row whose key
+    is falsy (a feed's, with no company) stands alone under that field negated.
 
     >>> group_by_company([{"company_id": 1, "t": "a"}, {"company_id": 2},
     ...                   {"company_id": 1, "t": "b"}])
     {1: [{'company_id': 1, 't': 'a'}, {'company_id': 1, 't': 'b'}], 2: [{'company_id': 2}]}
+    >>> list(group_by_company([{"company_id": None, "id": 7}, {"company_id": 3, "id": 8}], alone="id"))
+    [-7, 3]
 
     Both backfill paths need this: a board with several stale rows must be
     fetched once, not once per row.
     """
     out: dict[object, list[T]] = {}
     for r in rows:
-        out.setdefault(r[key], []).append(r)
+        k = r[key] or (-cast(int, r[alone]) if alone else r[key])
+        out.setdefault(k, []).append(r)
     return cast(dict[int, list[T]], out)
 
 
@@ -180,7 +184,7 @@ def new_watch_hits(conn: sqlite3.Connection, t: RuntimeTrack, since: str
     seen since `since` (an ISO time; callers pass the start of
     config.WATCH_WINDOW_DAYS) that clear the title gate, the track's
     exclude gate and `us_eligible`, as (company, job, in_ranking) -- the flag
-    says the row carries `t`'s label.
+    says the row carries `t`'s label; the job carries its `first_seen`.
 
     >>> from pathlib import Path
     >>> conn = store.connect(":memory:")
@@ -199,9 +203,10 @@ def new_watch_hits(conn: sqlite3.Connection, t: RuntimeTrack, since: str
     []
     """
     hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
+    companies: dict[int, CompanyRow | None] = {}
     for r in conn.execute(
             "SELECT j.job_id, j.title, j.url, j.location, j.description, j.track, "
-            "j.company_id FROM open_jobs j JOIN companies_effective c "
+            "j.company_id, j.first_seen FROM open_jobs j JOIN companies_effective c "
             "ON c.id = j.company_id WHERE c.watch = 1 AND j.first_seen >= ? "
             "ORDER BY j.company_name, j.first_seen", (since,)):
         title, desc = r["title"] or "", r["description"] or ""
@@ -210,11 +215,14 @@ def new_watch_hits(conn: sqlite3.Connection, t: RuntimeTrack, since: str
                 or (t.exclude_gate and gates.exclude_reason(
                     title, desc, allow_defense=True, track_id=t.id))):
             continue
-        company = store.get_company(conn, r["company_id"])
+        if r["company_id"] not in companies:
+            companies[r["company_id"]] = store.get_company(conn, r["company_id"])
+        company = companies[r["company_id"]]
         if company is None:
             continue
         hits.append((company, {"id": r["job_id"], "title": title, "url": r["url"] or "",
-                               "location": r["location"] or ""},
+                               "location": r["location"] or "",
+                               "first_seen": r["first_seen"] or ""},
                      t.track in store.track_set(r["track"])))
     return hits
 
@@ -306,94 +314,6 @@ def _mission_trusted(company: CompanyRow | None, floor: float | None) -> bool:
          "mission_score": company.get("mission_score")}, floor)
 
 
-def whole_board(company: CompanyRow, mission_floor: float | None = None) -> bool:
-    """Whether a company's ENTIRE board is fetched, with no location filter.
-
-    Either scope tag qualifies on its own — a sweep board is cheap to pull
-    whole, a watched one must never miss a posting:
-
-    >>> whole_board({"name": "Acme", "watch": 1})
-    True
-    >>> whole_board({"name": "Acme", "tags": "sweep"})
-    True
-    >>> whole_board({"name": "Acme", "tags": "local"})
-    False
-
-    Given a `mission_floor` (the track's `remote_mission_floor`), a
-    core-mission company qualifies on its score too, so its remote postings
-    — which a locality-scoped fetch would never return — can reach the
-    ranking that now admits them:
-
-    >>> core = {"name": "Acme", "tags": "local", "mission_score": 0.9}
-    >>> whole_board(core), whole_board(core, 0.85)
-    (False, True)
-    >>> whole_board({"name": "Acme", "mission_score": 0.5}, 0.85)
-    False
-
-    Everyone else gets the locality-scoped pull.
-
-    Notes:
-        Whole-board fetches are the expensive kind: at the shipped floor of
-        0.85 about 112 further boards per run stop being location-scoped,
-        and the count climbs fast as the floor drops. It is a knob to move
-        deliberately.
-    """
-    return (tags.has(company, tags.SWEEP) or is_watched(company)
-            or _mission_trusted(company, mission_floor))
-
-
-# --------------------------------------------------------------------------- #
-#  Crawl helpers (per-company gate + score), used by runner + single adds.     #
-# --------------------------------------------------------------------------- #
-
-async def keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bool:
-    """Company-linked posting filter: technical-title gate, multi-division
-    keyword gate, per-track excludes, and (when the track's geo_gate is on)
-    the whole-board geography check."""
-    title = job.get("title", "")
-    if not gates.is_technical_role(title, t):
-        return False
-    watched = is_watched(company)
-    if config.is_multi_division(company["name"]):
-        # Workday/SmartRecruiters listings carry no description until the
-        # detail call — but the relevance gate NEEDS the description (titles
-        # like "Research Scientist" say nothing about the division). Hydrate
-        # first; only locality-filtered jobs at conglomerates pay the GET.
-        await company_fetch.hydrate_description(job)
-        # Same widening src.crawl.triage's division gate applies: a WATCHED
-        # conglomerate's own engineering vocabulary ([policy]
-        # watch_division_titles) counts as in-field here too. Without it the
-        # crawl path and the triage path disagreed about the same posting at
-        # the same company, and one silently dropped what the other kept.
-        if not is_relevant(title, job.get("description", ""),
-                           watch_titles=watched):
-            return False
-    if t.exclude_gate and gates.exclude_reason(
-            title, job.get("description", ""),
-            allow_defense=watched, track_id=t.id):
-        return False
-    floor = t.remote_mission_floor
-    if t.geo_gate and whole_board(company, floor):
-        # Whole-board companies are fetched with no location restriction,
-        # which lets their remote and onsite-elsewhere reqs through the
-        # fetch. Gate here:
-        #   watched / core-mission -> local-onsite or explicitly-remote (and
-        #              US-eligible: "Canada, Remote" is not remote for us) is
-        #              scored (the watch flag is human-curated, the mission
-        #              floor is a judged score, and ranked_jobs admits both
-        #              kinds of remote into the local list);
-        #   sweep   -> local-onsite ONLY. That tag is machine-set and proved
-        #              untrustworthy for an out-of-area exception (slug
-        #              collisions flooded the ranking with remote junk).
-        gm = geo_mode(job.get("location", ""), job.get("description", ""))
-        if remote_trusted(company, floor):
-            if gm is None or (gm == "remote" and not us_eligible(job.get("location", ""))):
-                return False
-        elif gm != "onsite":
-            return False
-    return True
-
-
 async def _scored_row(job: FetchedJob, *, company_id: int | None, company_name: str | None,
                       track: str, status: str | None = None) -> JobIn:
     """Score one fetched posting and shape it into a jobs-table row.
@@ -425,12 +345,6 @@ async def _scored_row(job: FetchedJob, *, company_id: int | None, company_name: 
     if status is not None:
         row["status"] = status
     return row
-
-
-async def score_job(company: CompanyRow, job: FetchedJob, track: str) -> JobIn:
-    await company_fetch.hydrate_description(job)
-    return await _scored_row(job, company_id=company["id"],
-                             company_name=company["name"], track=track)
 
 
 # The miss-reason family status.check_closed_jobs closes on -- the one of

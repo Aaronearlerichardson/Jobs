@@ -1,10 +1,8 @@
 """Digest renderers, the Gmail sender, and the posting-age tag.
 
-Track-agnostic: the two digest shapes the crawls produce — the RANKED
-digest (fit-ordered table with pipeline/watch sections, written by
-store-crawl tracks) and the MATCHES digest (flat surfaced-postings table,
-written by sweep tracks) — both take the track config `t` and derive their
-tag/filename from it, so any user-defined track gets its own digest.
+Track-agnostic: the RANKED digest (fit-ordered table with pipeline/watch
+sections) takes the track config `t` and derives its tag/filename from
+it, so any user-defined track gets its own digest.
 
 Every digest, written or emailed, is a title plus a list of SECTIONS, each
 `(heading, intro, body)` with the body a table or a bullet list whose rows
@@ -12,7 +10,7 @@ are already `(markdown, html)` pairs. `_render` turns that list into the
 markdown document and the HTML document in one pass, so a file and the
 email built from the same sections cannot drift apart. The row and cell
 builders (`_link`, `_fit`, `_cells`, `_bullet`, ...) are the pieces the
-four public renderers compose.
+public renderers compose.
 """
 
 from __future__ import annotations
@@ -259,7 +257,7 @@ def _render(title: str, sections: Iterable[tuple[str | None, object, tuple[str, 
             ) -> tuple[str, str]:
     """(markdown, html) documents for a title and its sections. A section is
     `(heading, intro, body)`; any part may be None. The HTML is the body
-    only — `_html_doc` wraps it for mail."""
+    only — `send_ranked_digest` wraps it for mail."""
     md, html = [f"# {title}\n"], [f"<h2>{title}</h2>"]
     for heading, intro, body in sections:
         parts: list[str] = []
@@ -275,11 +273,6 @@ def _render(title: str, sections: Iterable[tuple[str | None, object, tuple[str, 
             html.append(body[1])
         md.append("\n\n".join(parts) + "\n")
     return "\n".join(md), "".join(html)
-
-
-def _html_doc(body: str, width: int) -> str:
-    return (f'<html><body style="font-family:sans-serif;max-width:{width}px">'
-            f"{body}</body></html>")
 
 
 def _ranked_digest_path(t: RuntimeTrack, report_dir: Path | None = None) -> Path:
@@ -489,7 +482,8 @@ def send_ranked_digest(
 
     plain, html = _render(f"{tag} New Postings — {today}", sections)
     subject = f"{tag} {len(fresh)} new match(es) - {today}"
-    if _send_gmail(subject, plain, _html_doc(html, 900)):
+    doc = f'<html><body style="font-family:sans-serif;max-width:900px">{html}</body></html>'
+    if _send_gmail(subject, plain, doc):
         print(f"  {tag} digest emailed ({len(fresh)} new, {len(hits)} watch).")
         return True
     return False
@@ -498,8 +492,7 @@ def send_ranked_digest(
 def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
              pipeline: list[JobRow] | None = None,
              followups: list[JobRow] | None = None,
-             watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None,
-             fresh_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None) -> int:
+             watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None) -> int:
     """Tell you what surfaced into track `t`'s ranking since `since` (an
     ISO time, compared with each row's `triaged_at`): the count, as an email
     when the track sets `email` and a desktop toast when it sets `notify`.
@@ -508,8 +501,8 @@ def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
     Rows that repeat a role you applied to (store.prior_lookup) and rows
     under `digest_min_fit` do not count, so a quiet pass says nothing.
     `watch_hits` (the digest's rolling watch window) ride along in the
-    email; `fresh_hits`, the ones first seen since `since`, also count and
-    trigger a send on their own.
+    email; the ones first seen since `since` also count and trigger a send
+    on their own.
 
     >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), digest_min_fit=0.4)
     >>> rows = [{"job_id": "a", "triaged_at": "2026-10-05T12:00:01", "resume_fit_score": 0.8},
@@ -519,21 +512,10 @@ def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
     1
     >>> announce([], t, "2026-10-05T12:00:00")
     0
-
-    A watch hit first seen since `since` is news on its own; one only in the
-    window (`watch_hits` without `fresh_hits`) is not:
-
-    >>> hit = ({"name": "Acme"}, {"id": "w", "title": "Engineer", "url": "",
-    ...        "location": ""}, False)
-    >>> announce([], t, "2026-10-05T12:00:00", watch_hits=[hit])
-    0
-    >>> announce([], t, "2026-10-05T12:00:00", watch_hits=[hit], fresh_hits=[hit])
-      [T] 1 new match(es) since 2026-10-05T12:00:00 (set [tracks.t] email or notify to be told)
-    1
     """
     fresh = new_ranked_rows(ranked, t, since, "triaged_at",
                             prior=store.prior_lookup(pipeline or []))
-    news = list(fresh_hits or [])
+    news = [h for h in watch_hits or [] if (h[1].get("first_seen") or "") >= since]
     if not fresh and not news:
         return 0
     how = []
@@ -585,60 +567,6 @@ def toast(t: RuntimeTrack, count: int, path: str | Path, lead: str = "Open today
     except Exception:   # a convenience after the send: whatever winotify raises, not fatal
         _log.warning("toast failed", exc_info=True)
         return False
-
-
-# --------------------------------------------------------------------------- #
-#  Matches digest (sweep tracks)
-# --------------------------------------------------------------------------- #
-
-def _matches_sections(matches: list[FetchedJob], tag: str
-                      ) -> list[tuple[str | None, object, tuple[str, str] | None]]:
-    if not matches:
-        return [(None, "_No matching postings this run._", None)]
-    n_remote = sum(1 for j in matches if j.get("remote_eligible"))
-    n_md, n_html = _bold(f"{len(matches)} posting(s)")
-    tail = f" ({n_remote} remote-eligible; location-agnostic sweep)."
-    with_fit = any(j.get("resume_fit_score") is not None for j in matches)
-    cols = (("Fit",) if with_fit else ()) + (
-        "Tag", "Company", "Title", "Location", "Anchor", "Remote signal")
-    # Sweep rows carry `company`, store rows `company_name`.
-    rows = [_cells(([score_text(j.get("resume_fit_score"))] if with_fit else [])
-                   + [tag, j.get("company") or j.get("company_name"), _link(j),
-                      j.get("location"), j.get("anchor_signal", ""),
-                      j.get("remote_signal", "")])
-            for j in matches]
-    return [(None, (n_md + tail, n_html + tail),
-             _table(cols, rows, numeric={"Fit"}))]
-
-
-def write_matches_digest(matches: list[FetchedJob], report_dir: Path | None,
-                         t: RuntimeTrack) -> Path:
-    """Flat surfaced-postings digest for a sweep track, written under
-    `report_dir` (default config.REPORT_DIR); returns the path."""
-    today, tag = _today(), _tag(t)
-    md, _ = _render(f"{tag} Job Alert - {today}",
-                    _matches_sections(matches, tag))
-    path = _digest_path(report_dir, f"{t.id}_matches_{today}.md")
-    path.write_text(md, encoding="utf-8")
-    return path
-
-
-def send_matches_digest(matches: list[FetchedJob], t: RuntimeTrack,
-                        cfg: object = None) -> bool:
-    """Email the matches digest — the same table `write_matches_digest`
-    writes. True when a message went out; a no-op without matches. `cfg`
-    is unused (the runner still passes it)."""
-    if not matches:
-        print("  No matches - skipping email.")
-        return False
-    today, tag = _today(), _tag(t)
-    plain, html = _render(f"{tag} Job Alert - {today}",
-                          _matches_sections(matches, tag))
-    subject = f"{tag} {len(matches)} posting(s) - {today}"
-    if _send_gmail(subject, plain, _html_doc(html, 760)):
-        print(f"  {tag} digest emailed ({len(matches)} posting(s)).")
-        return True
-    return False
 
 
 # --------------------------------------------------------------------------- #

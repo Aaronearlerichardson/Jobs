@@ -112,22 +112,9 @@ def test_harvest_stamp_survives_a_tracked_upsert():
     assert row["track"] == "local"
 
 
-def test_offmission_volume_ignores_unscored_harvest_rows():
-    conn = store.connect(":memory:")
-    c = _company(conn, "Acme")
-    for i in range(40):                      # 40 harvested, unscored
-        store.upsert_job(conn, {"job_id": f"u{i}", "company_id": c["id"],
-                                "title": "T", "harvested_at": "x"})
-    for i in range(3):                       # 3 scored, all poor
-        store.upsert_job(conn, {"job_id": f"s{i}", "company_id": c["id"],
-                                "title": "T", "resume_fit_score": 0.1})
-    assert not store._offmission_volume(conn, c["id"])
-
-
-def test_harvestable_ignores_active_dormant_and_tags_but_not_dead_boards():
+def test_harvestable_ignores_active_and_tags_but_not_dead_boards():
     conn = store.connect(":memory:")
     _company(conn, "Live")
-    _company(conn, "Parked", crawl_state="dormant", next_crawl_at="2999-01-01")
     _company(conn, "Inactive", active=0)
     store.upsert_company(conn, store.mark_pending(
         {"name": "Pending", "ats": "lever", "slug": "p"}))
@@ -136,7 +123,7 @@ def test_harvestable_ignores_active_dormant_and_tags_but_not_dead_boards():
     store.record_miss(conn, "Dead", "board-dead:lever", ats="lever", slug="d")
     store.upsert_company(conn, {"name": "NoAts"})
     names = sorted(c["name"] for c in store.harvestable_companies(conn))
-    assert names == ["Inactive", "Live", "NoLocal", "Parked", "Pending"]
+    assert names == ["Inactive", "Live", "NoLocal", "Pending"]
 
 
 # ── plan: off-mission cadence ────────────────────────────────────────────────
@@ -278,8 +265,6 @@ async def test_harvest_board_stores_hydrates_and_closes(tmp_path, monkeypatch):
     assert rows["gh_acme_1"]["resume_fit_score"] is None
     comp = store.get_company(conn, c["id"])
     assert comp["last_harvested_at"] and comp["total_job_count"] == 2
-    # The crawl's own bookkeeping is untouched.
-    assert comp["crawl_state"] is None and comp["last_crawled_at"] is None
 
 
 async def test_harvest_board_fetch_error_leaves_store_alone(tmp_path, monkeypatch):
@@ -621,6 +606,73 @@ async def test_run_reports_and_skips_fresh_boards(tmp_path, monkeypatch):
     assert s["fetched"] == 3 and s["new"] == 2
 
 
+async def test_sync_and_add_job_are_runs_of_the_harvest(tmp_path, monkeypatch):
+    """The status sync pulls every scoped board now, with no triage, and
+    rewrites the digest; a manual add pulls (and triages) only its company."""
+    t = track_with(db_path=tmp_path / "t.db")
+    calls, digests = [], []
+
+    async def run(**kw):
+        calls.append(kw)
+        return {}
+
+    monkeypatch.setattr(harvest, "run", run)
+    monkeypatch.setattr(harvest, "rewrite_digest",
+                        lambda conn, t, top_n, heading: digests.append(top_n) or [])
+    await harvest.sync_statuses(t, top_n=7)
+    assert calls == [{"db_path": t.db_path, "scope": t, "triage": False, "min_age_hours": 0}]
+    assert digests == [7]
+
+    async def added(*a, **k):
+        return {"board": True, "company": "Acme"}
+
+    monkeypatch.setattr(harvest, "add_manual_job", added)
+    calls.clear()
+    await harvest.add_job("u", "T", "Acme", "Durham, NC", t=t)
+    assert [c["names"] for c in calls] == [["Acme"]] and calls[0]["min_age_hours"] == 0
+    calls.clear()
+    await harvest.add_job("u", "T", "Acme", "Durham, NC", pull_board=False, t=t)
+    assert calls == []
+
+
+async def test_a_feed_is_stored_whole_and_a_full_snapshot_closes_what_vanished(
+        tmp_path, monkeypatch):
+    """A feed's rows are stored unfiltered under its `source`, carrying the
+    remote hint the fetcher gave; the next full snapshot closes the ones it
+    dropped, a capped one closes nothing, and neither touches a roster row."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme")
+    store.upsert_job(conn, {"job_id": "gh_acme_1", "company_id": c["id"], "title": "T"})
+    rows = [{"id": f"remoteok_{n}", "title": f"Role {n}", "company": f"Co {n}",
+             "url": f"https://r.test/{n}", "location": "Worldwide",
+             "remote_hint": "board:remoteok"} for n in (1, 2, 3)]
+
+    async def fetch_once(jobs, cap=False):
+        async def fetch():
+            if cap:
+                http.note_capped()
+            return jobs
+        monkeypatch.setattr(harvest, "feed_plan", lambda scope=None: [harvest.Feed("remoteok", fetch)])
+        return await harvest.pull(db)
+
+    first = await fetch_once(rows)
+    got = {r["job_id"]: r for r in conn.execute("SELECT * FROM jobs WHERE source='remoteok'")}
+    assert first["new"] == 3 and set(got) == {"remoteok_1", "remoteok_2", "remoteok_3"}
+    assert (got["remoteok_1"]["company_name"], got["remoteok_1"]["company_id"]) == ("Co 1", None)
+    assert (got["remoteok_1"]["remote_eligible"], got["remoteok_1"]["remote_signal"]) \
+        == (1, "hint:board:remoteok")
+
+    def status():
+        return {r["job_id"]: r["status"] for r in conn.execute("SELECT job_id, status FROM jobs")}
+
+    assert (await fetch_once(rows[:2]))["closed"] == 1
+    assert status() == {"gh_acme_1": "open", "remoteok_1": "open", "remoteok_2": "open",
+                        "remoteok_3": "closed"}
+    assert (await fetch_once(rows[:1], cap=True))["closed"] == 0
+    assert status()["remoteok_2"] == "open"
+
+
 async def test_run_budget_cancels_the_pass(tmp_path, capsys):
     """Past the budget the walks are cancelled: the board mid-fetch is named
     and abandoned, the one queued behind it on its host never starts, and
@@ -880,8 +932,7 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
             harvest.CLOSED_PROBE_LIMIT, harvest.CLOSED_PROBE_STALE_DAYS)
 
     async def test_score_cap_is_one_budget_of_calls(self, tmp_path, monkeypatch):
-        """Self-heal takes what triage's fit CALLS left (refused ones count),
-        and the summary hands the remainder to the caller."""
+        """Self-heal takes what triage's fit CALLS left (refused ones count)."""
         db, order = self._wire(monkeypatch, tmp_path)
         monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
         monkeypatch.setattr(harvest, "resume_text", lambda: "resume")
@@ -890,8 +941,8 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
         limits = []
         monkeypatch.setattr(harvest, "self_heal_unscored", answer(
             lambda *a, limit, **kw: limits.append(limit) or 2))
-        s = await harvest.run(db_path=db, board_fn=make_board_fn(), score_cap=10)
-        assert limits == [3] and s["score_left"] == 1
+        await harvest.run(db_path=db, board_fn=make_board_fn(), score_cap=10)
+        assert limits == [3]
 
     @pytest.mark.parametrize("key, fatal, why", [
         ("YOUR_ANTHROPIC_API_KEY_HERE", None, "no ANTHROPIC_API_KEY"),

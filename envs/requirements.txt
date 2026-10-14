@@ -27,7 +27,7 @@ annotated-types>=0.6
 # closed TypedDicts and ReadOnly (src/rows.py); typing has them from 3.13/3.15.
 typing_extensions>=4.13
 
-# Free Google alternative for the web-search fetcher.
+# Free Google alternative for discovery's web search.
 # DDG text search, no API key.
 ddgs>=5.0.0
 

@@ -1,8 +1,6 @@
 """The three passes over the roster's boards.
 
-    runner.py   a crawl of one track: the harvest scoped to it, then the
-                sources off the roster
-    harvest.py  the whole-board pull: everything stored, then triaged
+    harvest.py  the whole-board and feed pull (a crawl is a scoped run): everything stored, then triaged
     triage.py   what the harvester stored, gated cheapest-first
     page_capture.py  jobs parsed out of pages you captured by hand
 

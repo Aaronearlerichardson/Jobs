@@ -13,22 +13,19 @@ relevance gate is narrower than any single Remotive category.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 
 from src.net import http
 from src.rows import FetchedJob
 from .remoteok import remote_jobs
 
 
-async def fetch_remotive(category: str | None = None, max_jobs: int | None = None,
-                         gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
+async def fetch_remotive(category: str | None = None, max_jobs: int | None = None) -> list[FetchedJob]:
     """Remotive's listings (of the `category` slug, e.g. "software-dev",
-    when given; the first `max_jobs` when given) that pass `gate`, built
-    off the loop."""
+    when given; the first `max_jobs` when given), built off the loop."""
     url = "https://remotive.com/api/remote-jobs"
     if category:
         url = f"{url}?category={category}"
     data = await http.get_json(url, "Remotive", default={})
     jobs = data.get("jobs") if isinstance(data, dict) else None
     entries = jobs if isinstance(jobs, list) else []
-    return await asyncio.to_thread(remote_jobs, entries[:max_jobs], "Remotive", gate)
+    return await asyncio.to_thread(remote_jobs, entries[:max_jobs], "Remotive")

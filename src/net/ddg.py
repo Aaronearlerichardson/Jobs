@@ -1,23 +1,22 @@
 """The one web text-search client: DuckDuckGo, and Firecrawl behind it.
 
-DDG is the crawl's single biggest time sink: a plain `DDGS().text(q)` has no
+DDG is discovery's single biggest time sink: a plain `DDGS().text(q)` has no
 wall-clock bound, so when DDG rate-limits (frequent), the library's internal
 retry/backoff blocks for many minutes yielding nothing -- profiled at ~1271s
 of a 1726s --local run. Every caller (the local-sourcing resolvers, the ATS
-dork sweep, the websearch fetcher) goes through `search`, which has:
+dork sweep) goes through `search`, which has:
 
   * one disk cache (7-day TTL) so repeat runs -- and repeat queries within a
     run -- return instantly instead of re-hitting DDG; only genuine non-empty
     hits are cached, so a throttled/empty query is retried next run;
   * one paid fallback: a first page DDG missed is asked of Firecrawl
     (src.net.firecrawl, when FIRECRAWL_API_KEY is set), within the run's
-    credits; discovery's searches take it, the crawl's websearch feed
-    does not;
+    credits;
   * one wall-clock budget per query: the library runs on a daemon thread
     of its own, the caller stops waiting for it at the deadline
     (asyncio.timeout), and it starts no retry once no one waits, so one
     throttled query gives up after ~budget seconds instead of stalling
-    the whole crawl;
+    the whole run;
   * one retry policy: DDG surfaces its throttling as an exception ("No
     results found."/"Ratelimit"), and a fresh session after a pause recovers
     far more than a single try.
@@ -361,14 +360,14 @@ def _on_own_thread[T](loop: asyncio.AbstractEventLoop, fn: Callable[[threading.E
 
 
 async def search(query: str, max_results: int = 10, page: int = 1, budget: float = 25.0,
-                 retries: int = 2, fallback: bool = True) -> list[Hit]:
+                 retries: int = 2) -> list[Hit]:
     """Bounded, cached, retried web text search. Returns a list of result
     dicts (each with 'href'/'title'/...), or [] on miss, timeout or missing
     package -- every caller already tolerates an empty list. `budget` is
     DDG's hard per-query wall-clock cap, in seconds. The disk cache is read
     and written off the loop.
 
-    With `fallback`, a first page DDG missed is asked of Firecrawl
+    A first page DDG missed is asked of Firecrawl
     (`firecrawl.search`), whose answer is cached even when empty: it is
     an answer, not a throttle. After MISS_STREAK DDG misses in a row,
     Firecrawl is asked first and a later page not at all, until the run's
@@ -381,7 +380,7 @@ async def search(query: str, max_results: int = 10, page: int = 1, budget: float
         _log.debug("ddg cache hit (%d result(s)): %s", len(hits), query)
         return hits
     s = _SEARCHES()
-    skip = fallback and s.misses >= MISS_STREAK and firecrawl.usable(max_results)
+    skip = s.misses >= MISS_STREAK and firecrawl.usable(max_results)
     if skip and not s.firecrawl_first:
         s.firecrawl_first = True
         print(f"  web search: DuckDuckGo missed {s.misses} in a row; Firecrawl "
@@ -393,7 +392,7 @@ async def search(query: str, max_results: int = 10, page: int = 1, budget: float
         return hits
     if not skip:
         s.misses += 1
-    if not fallback or page != 1:
+    if page != 1:
         return []
     found = await firecrawl.search(query, max_results)
     if found is None:

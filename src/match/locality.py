@@ -331,9 +331,9 @@ def location_unknown(location: str | None) -> bool:
 # halves were never really separable: locality answers "where is
 # this job", and "remote" is one of the answers.
 #
-# Side-effect-free, like the rest of this module. The sweep runner
-# (src/crawl/runner.py) stamps `remote_signal` on its rows, and the
-# webapp reads it. None of it touches the locality gate above, so the
+# Side-effect-free, like the rest of this module. The harvest
+# (src/crawl/harvest.py) stamps `remote_signal` on a feed's rows, triage on
+# the rest, and the webapp reads it. None of it touches the locality gate above, so the
 # onsite crawl path is undisturbed by changes here.
 #
 # Two precision rules keep false positives down -- these get

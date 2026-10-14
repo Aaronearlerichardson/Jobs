@@ -301,6 +301,3 @@ DISCOVERY_MISS_RETRY_DAYS    = PROFILE.discovery.miss_retry_days
 # search result to a company's own ATS board (src/discovery/websearch_board.py).
 DISCOVERY_AGGREGATOR_HOSTS    = tuple(PROFILE.discovery.aggregator_hosts)
 DISCOVERY_GENERIC_NAME_WORDS  = set(PROFILE.discovery.generic_name_words)
-# Named company targets a track fetches first, as (name, ats, slug).
-DISCOVERY_PRIORITY_COMPANIES = [(c.name, c.ats, c.slug)
-                                for c in PROFILE.discovery.priority_companies]

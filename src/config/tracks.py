@@ -4,7 +4,7 @@ what a table leaves out, and the built-in pair used when a profile has no
 
 Each track bundles a DB, a jobs.track value, ranking knobs, and the UI
 filter defaults that flip on switch (src/web/routes.py), plus the crawl
-methodology src/crawl/runner.py runs it with. The schema, the per-engine
+methodology src/crawl/harvest.py (run_track) runs it with. The schema, the per-engine
 defaults and the built-in pair live in src/config/profile_schema.py
 (Track, ENGINE_DEFAULTS, DEFAULT_TRACKS); this module turns validated
 tracks into RuntimeTracks. Code keys off the ENGINE a track resolves
@@ -16,12 +16,7 @@ Crawl-methodology keys, every one overridable in the track's own table:
   accept_remote       config.ACCEPT_REMOTE while this track crawls
   sources             which source families the crawl assembles
     .store            active companies from the track's own DB
-    .priority_companies  [discovery] priority_companies, fetched first
     .aggregators      Discourse/RemoteOK/Remotive/HN/RSS feeds
-    .websearch        DDG web-search queries
-    .location_scoped  store boards fetched through the locality filter
-                      (whole-board for watched/sweep-tagged companies);
-                      False = lightweight ATS sweep, location-agnostic
   store_tag           only sweep store companies carrying this tag (None=all)
   require_core_anchor gate: posting must hit a CORE keyword
   geo_gate            gate: drop non-local non-remote postings (locality
@@ -49,9 +44,6 @@ Crawl-methodology keys, every one overridable in the track's own table:
                       title must match before any API spend)
   exclude_gate        apply the [exclude.<id>] role/defense/nonclinical
                       tables to postings (False = skip entirely)
-  dormant_after       consecutive empty DAYS before a company goes dormant
-  dormant_days        how long a dormant company is skipped before its next
-                      (weekly) retry -- see store.record_crawl_outcome
 """
 
 from __future__ import annotations
@@ -66,6 +58,7 @@ from pydantic import ConfigDict, model_validator
 from .paths import DATA_DIR
 from .profile import PROFILE, PROFILE_PATH, _self, keyword_snapshot, restore_keywords
 from .profile_schema import ENGINE_ALIASES, Track, TrackKeywords, parse
+from .sources import FEEDS
 
 
 class RuntimeTrack(Track):
@@ -106,13 +99,13 @@ def _build_ui_tracks(raw: Mapping[str, object] | None) -> dict[str, RuntimeTrack
 
     >>> t = _build_ui_tracks({"my_track": {
     ...     "engine": "neural", "verify_top": 3, "store_tag": "",
-    ...     "sources": {"websearch": False}}})["my_track"]
+    ...     "sources": {"store": True}}})["my_track"]
     >>> t.engine, t.keyword_mode, t.store_tag, t.verify_top
     ('sweep', 'replace', 'sweep', 3)
     >>> t.label, t.track, t.db_path.name
     ('my_track', 'my-track', 'my_track.db')
     >>> sorted(k for k, on in t.sources if on)
-    ['aggregators', 'priority_companies', 'store']
+    ['aggregators', 'store']
 
     Notes:
         A [tracks] section that is present but empty falls back to the
@@ -135,6 +128,23 @@ def default_track_id(tracks: Mapping[str, Track]) -> str | None:
     """
     return next((tid for tid, t in tracks.items() if t.default),
                 next(iter(tracks), None))
+
+
+def feed_families(t: Track) -> set[str]:
+    """The feed families `t` reads: those the profile turns on
+    (FEEDS) whose `sources` switch `t` has on, a null switch meaning
+    every track.
+
+    >>> from .profile_schema import TrackSources
+    >>> agg = Track(sources=TrackSources(aggregators=True))
+    >>> sorted(feed_families(agg) & {"hn", "usajobs"}) == sorted(
+    ...     f for f in ("hn", "usajobs") if FEEDS[f]["on"])
+    True
+    >>> "hn" in feed_families(Track(sources=TrackSources(aggregators=False)))
+    False
+    """
+    return {f for f, fam in FEEDS.items() if fam["on"] and (
+        (switch := fam["switch"]) is None or getattr(t.sources, switch))}
 
 
 UI_TRACKS = {tid: _runtime(tid, t) for tid, t in PROFILE.tracks.items()}

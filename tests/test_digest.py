@@ -214,11 +214,13 @@ class TestSendRankedDigest:
 
     def test_announce_emails_a_fresh_watch_hit_without_a_ranked_row(self, track, sent):
         hit = ({"name": "Watched Co"},
-               {"title": "Any Role", "url": "https://w.co/1", "location": "Anywhere"}, False)
+               {"title": "Any Role", "url": "https://w.co/1", "location": "Anywhere",
+                "first_seen": "2026-10-05T13:00:00"}, False)
         t = track.model_copy(update={"email": True})
         since = "2026-10-05T12:00:00"
-        assert digest.announce([], t, since, watch_hits=[hit]) == 0 and not sent
-        assert digest.announce([], t, since, watch_hits=[hit], fresh_hits=[hit]) == 1
+        old = (hit[0], {**hit[1], "first_seen": "2026-10-01T00:00:00"}, False)
+        assert digest.announce([], t, since, watch_hits=[old]) == 0 and not sent
+        assert digest.announce([], t, since, watch_hits=[hit]) == 1
         assert "Watched Co" in sent[0][1]
 
     def test_pipeline_section_carries_only_fresh_closures(self, track, sent):
@@ -377,15 +379,7 @@ def golden_inputs(hometown):
          {"title": "Listed Role", "url": "https://l.co/2",
           "location": None}, False),
     ]
-    matches = [
-        {"title": "M One", "url": "https://m.io/1", "company": "Mco",
-         "location": "Remote", "remote_eligible": True,
-         "anchor_signal": "core:eeg", "remote_signal": "location:remote",
-         "resume_fit_score": 0.5},
-        {"title": "M Two", "url": "https://m.io/2", "company_name": "Nco",
-         "location": "Elsewhere, YY", "resume_fit_score": None},
-    ]
-    return ranked, pipeline, followups, watch_hits, matches
+    return ranked, pipeline, followups, watch_hits
 
 
 def _check_golden(name, text):
@@ -399,7 +393,7 @@ def _check_golden(name, text):
 class TestGolden:
     def test_written_ranked_digest(self, golden_track, hometown, report_dir,
                                    golden_clock):
-        ranked, pipeline, followups, hits, _ = golden_inputs(hometown)
+        ranked, pipeline, followups, hits = golden_inputs(hometown)
         path = digest.write_ranked_digest(
             ranked, golden_track, watch_hits=hits, pipeline=pipeline,
             followups=followups)
@@ -412,7 +406,7 @@ class TestGolden:
         _check_golden("ranked_bare.md", path.read_text(encoding="utf-8"))
 
     def test_ranked_email(self, golden_track, hometown, sent, golden_clock):
-        ranked, pipeline, followups, hits, _ = golden_inputs(hometown)
+        ranked, pipeline, followups, hits = golden_inputs(hometown)
         assert digest.send_ranked_digest(
             ranked, golden_track, watch_hits=hits, pipeline=pipeline,
             followups=followups) is True
@@ -420,36 +414,6 @@ class TestGolden:
         assert subject == f"[GOLDEN] 2 new match(es) - {golden_clock}"
         _check_golden("ranked_email.md", plain)
         _check_golden("ranked_email.html", html)
-
-    def test_written_matches_digest(self, golden_track, hometown, report_dir,
-                                    golden_clock):
-        *_, matches = golden_inputs(hometown)
-        path = digest.write_matches_digest(matches, report_dir,
-                                              golden_track)
-        assert path == report_dir / f"golden_matches_{golden_clock}.md"
-        _check_golden("matches.md", path.read_text(encoding="utf-8"))
-
-    def test_written_matches_digest_without_fit(self, golden_track, hometown,
-                                                report_dir, golden_clock):
-        *_, matches = golden_inputs(hometown)
-        unscored = [{k: v for k, v in m.items() if k != "resume_fit_score"}
-                    for m in matches]
-        path = digest.write_matches_digest(unscored, report_dir,
-                                              golden_track)
-        _check_golden("matches_nofit.md", path.read_text(encoding="utf-8"))
-
-    def test_written_matches_digest_empty(self, golden_track, report_dir,
-                                          golden_clock):
-        path = digest.write_matches_digest([], report_dir, golden_track)
-        _check_golden("matches_empty.md", path.read_text(encoding="utf-8"))
-
-    def test_matches_email(self, golden_track, hometown, sent, golden_clock):
-        *_, matches = golden_inputs(hometown)
-        digest.send_matches_digest(matches, golden_track, config)
-        subject, plain, html = sent[0]
-        assert subject == f"[GOLDEN] 2 posting(s) - {golden_clock}"
-        _check_golden("matches_email.md", plain)
-        _check_golden("matches_email.html", html)
 
 
 class TestEveryDigestWriterCarriesTheTriageFunnel:

@@ -54,10 +54,10 @@ class TestValidate:
                                                   "fit.weights.domain"]
 
     def test_allows_arrays_of_tables(self):
-        # discovery.priority_companies is [{name=..,ats=..,slug=..}, ...]
+        # discovery.seed_companies is [{name=.., notes=..}, ...]
         errs = profile_edit.validate(
             '[discovery]\n'
-            'priority_companies = [{name="A", ats="greenhouse", slug="a"}]')
+            'seed_companies = [{name="A", notes="n"}]')
         assert errs == []
 
 

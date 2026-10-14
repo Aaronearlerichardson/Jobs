@@ -15,7 +15,7 @@ reads:
                         JUNK_NAME_WORDS, REGISTRIES, DEFAULT_TRACKS
     src/config/tracks.py    [tracks.*] tables -> UI_TRACKS
     src/config/policy.py    [policy] + HTTP timeouts / user agents
-    src/config/sources.py   [sources]: forums, web search, aggregator feeds
+    src/config/sources.py   [sources]: forums, aggregator feeds, FEEDS
     src/config/boards.py    BOARDS: every per-platform ATS board fact, read from
                         board_specs/ (one TOML file each), and the host
                         lists derived from them
@@ -87,7 +87,7 @@ from .profile import (  # noqa: F401
     DISCOVERY_NAME_SEARCH_QUERIES, DISCOVERY_BRAINSTORM_NAMES,
     DISCOVERY_NAME_BLOCKLIST, DISCOVERY_WEBSEARCH_CAP, DISCOVERY_MISS_RETRY_DAYS,
     DISCOVERY_AGGREGATOR_HOSTS, DISCOVERY_GENERIC_NAME_WORDS,
-    DISCOVERY_PRIORITY_COMPANIES, DISCOVERY_FIRECRAWL_CREDITS,
+    DISCOVERY_FIRECRAWL_CREDITS,
 )
 from .secrets import (  # noqa: F401
     SETTINGS, require_creds,
@@ -97,12 +97,11 @@ from .secrets import (  # noqa: F401
     USAJOBS_API_KEY, USAJOBS_EMAIL, FIRECRAWL_API_KEY, APIFY_API_KEY,
 )
 from .sources import (  # noqa: F401
-    DISCOURSE_BOARDS, WEBSEARCH_QUERIES,
-    REMOTEOK_ENABLED, REMOTIVE_ENABLED, REMOTIVE_CATEGORY,
-    HNHIRING_ENABLED, HNHIRING_MAX_THREADS,
-    USAJOBS_ENABLED, USAJOBS_KEYWORD, USAJOBS_LOCATION, USAJOBS_RADIUS,
+    DISCOURSE_BOARDS, FEEDS,
+    REMOTIVE_CATEGORY, HNHIRING_MAX_THREADS,
+    USAJOBS_KEYWORD, USAJOBS_LOCATION, USAJOBS_RADIUS,
     USAJOBS_SERIES, USAJOBS_RESULTS_PER_PAGE,
-    GETRO_ENABLED, GETRO_BOARDS, GETRO_MAX_DETAILS,
+    GETRO_BOARDS, GETRO_MAX_DETAILS,
     BOARD_DIRECTORY, GOOGLE_JOBS, WIKIDATA_API, FIRECRAWL_API, APIFY_API,
     RSS_FEEDS,
 )
@@ -110,5 +109,5 @@ from .tables import NON_US_PLACES, REGISTRIES  # noqa: F401
 from .tracks import (  # noqa: F401
     _build_ui_tracks,
     UI_TRACKS, DEFAULT_TRACK, track_for_engine, RuntimeTrack,
-    apply_keyword_focus, keyword_focus,
+    apply_keyword_focus, keyword_focus, feed_families,
 )

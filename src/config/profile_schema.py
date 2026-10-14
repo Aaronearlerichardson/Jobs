@@ -170,10 +170,7 @@ class Locations(_Table):
 class TrackSources(_Table):
     model_config = ConfigDict(frozen=True)
     store: bool = True
-    priority_companies: bool = False
     aggregators: bool = False
-    websearch: bool = False
-    location_scoped: bool = True
 
 
 class Methodology(_Table):
@@ -196,8 +193,6 @@ class Methodology(_Table):
     digest_min_fit: Unit = 0.4
     notify: bool = False
     exclude_gate: bool = True
-    dormant_after: Annotated[int, Field(ge=1)] = 4
-    dormant_days: Annotated[int, Field(ge=1)] = 7
     # The default technical-title gate: a posting whose TITLE doesn't match
     # this never costs an API call. Broad and field-neutral on purpose;
     # narrow or widen it per track.
@@ -221,12 +216,11 @@ ENGINE_DEFAULTS = {
     # A location-scoped crawl of the companies in your store: asks each
     # board for YOUR region, so it stays cheap on huge employers.
     "local": Methodology(),
-    # A location-AGNOSTIC sweep: whole boards, aggregator feeds and web
-    # search, gated hard on CORE keywords.
+    # A location-AGNOSTIC sweep: whole boards and aggregator feeds,
+    # gated hard on CORE keywords.
     "sweep": Methodology(
         keyword_mode="replace", accept_remote=True,
-        sources=TrackSources(priority_companies=True, aggregators=True,
-                             websearch=True, location_scoped=False),
+        sources=TrackSources(aggregators=True),
         store_tag=tags.SWEEP, require_core_anchor=True, geo_gate=False,
         verify_top=0, exclude_gate=False),
 }
@@ -355,12 +349,6 @@ class Discourse(_Table):
     category_id: int = 0
 
 
-class WebSearch(_Table):
-    label: str = ""
-    query: Filled
-    max_results: Annotated[int, Field(ge=1)] = 12
-
-
 class RssFeed(_Table):
     label: str = ""
     url: Filled
@@ -427,7 +415,6 @@ class Sources(_Table):
     hnhiring: bool = True
     hnhiring_max_threads: Count = 2
     discourse: list[Discourse] = []
-    websearch: list[WebSearch] = []
     # Absent -> these general remote-job feeds; [] -> no RSS at all.
     rss: list[RssFeed] = Field(default_factory=_default_rss)
     usajobs: Usajobs = Field(default_factory=Usajobs)
@@ -441,12 +428,6 @@ class Sources(_Table):
 class SeedCompany(_Table):
     name: Filled
     notes: str = ""
-
-
-class PriorityCompany(_Table):
-    name: Filled
-    ats: Filled
-    slug: Filled
 
 
 class DirectoryPage(_Table):
@@ -491,7 +472,6 @@ class Discovery(_Table):
     miss_retry_days: Count = 14
     aggregator_hosts: list[str] = []
     generic_name_words: list[str] = []
-    priority_companies: list[PriorityCompany] = []
 
 
 # --- [fit] -------------------------------------------------------------------

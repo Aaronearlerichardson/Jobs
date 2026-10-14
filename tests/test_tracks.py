@@ -4,11 +4,8 @@ and keyword focus."""
 import pytest
 from pydantic import ValidationError
 
-import src.ops.maintenance as ops
-from src import tags
 from src.match.filters import core_anchor
 from src.config.profile_schema import Track, parse
-from tests.test_triage import _PLAIN_ENG_BODY
 
 
 class TestTrackConfig:
@@ -35,8 +32,7 @@ class TestTrackConfig:
         assert all(hasattr(local_track, k) for k in
                    ("keyword_mode", "sources", "store_tag", "require_core_anchor",
                     "geo_gate", "verify_top", "verify_floor",
-                    "email", "exclude_gate", "tech_title_regex",
-                    "dormant_after", "dormant_days"))
+                    "email", "exclude_gate", "tech_title_regex"))
 
     def test_verify_floor_defaults_and_is_overridable(self, cfg):
         assert cfg.UI_TRACKS[cfg.DEFAULT_TRACK].verify_floor == 0.25
@@ -62,76 +58,12 @@ class TestTrackConfig:
     def test_a_key_the_track_sets_beats_its_engine_and_sources_merge(self):
         t = Track(engine="neural", verify_top=7, sources={"store": False})
         assert (t.engine, t.verify_top) == ("sweep", 7)
-        assert (t.sources.store, t.sources.websearch) == (False, True)
+        assert (t.sources.store, t.sources.aggregators) == (False, True)
 
     def test_an_unknown_engine_is_reported_on_the_engine_key(self):
         with pytest.raises(ValidationError) as err:
             Track(engine="bogus")
         assert [e["loc"] for e in err.value.errors()] == [("engine",)]
-
-
-class TestRemoteAdmissionGates:
-    """The fetch side of `remote_mission_floor`. A core-mission company that
-    nobody has starred is pulled whole-board and its explicitly-remote rows
-    survive the geo gate — otherwise the ranking would admit rows the crawl
-    never fetched."""
-
-    def _co(self, mission=None, tag="", name="Acme", watch=0):
-        return {"id": 1, "name": name, "ats": "greenhouse", "slug": "acme",
-                "mission_score": mission, "tags": tag, "watch": watch}
-
-    def _job(self, location, title="Data Engineer"):
-        return {"id": "gh_acme_1", "title": title, "location": location,
-                "url": "https://acme.io/1", "description": ""}
-
-    def _track(self, local_track, floor=0.85):
-        return local_track.model_copy(update={"remote_mission_floor": floor})
-
-    def test_conglomerates_never_qualify_by_score(self, cfg, monkeypatch):
-        monkeypatch.setattr(cfg, "is_multi_division", lambda n: True)
-        assert not ops.whole_board(self._co(mission=0.99), 0.85)
-
-    async def test_remote_row_survives_the_geo_gate(self, local_track):
-        assert await ops.keep_job(self._co(mission=0.9), self._job("Remote - US"),
-                             self._track(local_track))
-
-    async def test_onsite_elsewhere_still_drops(self, local_track, elsewhere):
-        assert not await ops.keep_job(self._co(mission=0.9), self._job(elsewhere),
-                                 self._track(local_track))
-
-    async def test_local_row_is_kept(self, local_track, local_addr):
-        assert await ops.keep_job(self._co(mission=0.9), self._job(local_addr),
-                             self._track(local_track))
-
-    async def test_sweep_tag_alone_admits_no_remote(self, local_track):
-        # Machine-set tag: whole-board fetch, local-onsite rows ONLY.
-        assert not await ops.keep_job(self._co(tag=tags.SWEEP),
-                                 self._job("Remote - US"),
-                                 self._track(local_track))
-
-    async def test_watching_admits_remote(self, local_track):
-        assert await ops.keep_job(self._co(watch=1), self._job("Remote - US"),
-                             self._track(local_track))
-
-    async def test_multi_division_watch_widens_the_crawl_paths_division_gate(
-            self, local_track, division_vocab):
-        # keep_job is the CRAWL path's division gate; src.crawl.triage has
-        # its own copy (tested in test_triage.py against the same fixture).
-        # The two used to disagree about the same posting at the same
-        # watched conglomerate -- this pins that they now agree.
-        job = self._job("Remote - US",
-                        title="Senior Software Engineer, AI Research Clusters")
-        job["description"] = _PLAIN_ENG_BODY
-        assert await ops.keep_job(self._co(watch=1, name="Megacorp Watched"),
-                             job, self._track(local_track))
-
-    async def test_multi_division_without_watch_keeps_the_crawl_paths_narrow_gate(
-            self, local_track, division_vocab):
-        job = self._job("Remote - US",
-                        title="Senior Software Engineer, AI Research Clusters")
-        job["description"] = _PLAIN_ENG_BODY
-        assert not await ops.keep_job(self._co(tag="", name="Megacorp Watched"),
-                                 job, self._track(local_track))
 
 
 class TestKeywordFocus:

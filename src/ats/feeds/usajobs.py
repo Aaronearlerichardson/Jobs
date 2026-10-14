@@ -33,7 +33,7 @@ Notes:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from src import config
 from src.net import http
@@ -276,10 +276,9 @@ def _search_params(keyword: str | None, location: str | None, radius: int | None
 
 async def fetch_usajobs(keyword: str | None = None, location: str | None = None,
                         radius: int | None = None, series: Sequence[str] | None = None,
-                        results_per_page: int = 250, max_pages: int = 20,
-                        gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
-    """Search USAJOBS and return the announcements passing `gate` as job
-    dicts (all of them when `gate` is None), each page read off the loop.
+                        results_per_page: int = 250, max_pages: int = 20) -> list[FetchedJob]:
+    """Search USAJOBS and return its announcements as job
+    dicts, each page read off the loop.
 
     Pages until ``SearchResult.SearchResultCountAll`` is covered, at most
     `max_pages` (so a mistyped filter cannot walk the entire federal
@@ -339,8 +338,7 @@ async def fetch_usajobs(keyword: str | None = None, location: str | None = None,
             if not job or job["id"] in seen:
                 continue
             seen.add(job["id"])
-            if gate is None or gate(job["title"], job["description"]):
-                jobs.append(job)
+            jobs.append(job)
 
         if not total or fetched >= total:
             break

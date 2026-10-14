@@ -128,8 +128,8 @@ def _args(**given):
                 described_only=False, verify_all=False, miss_days=None,
                 reresolve_families=None,
                 prune_offmission=False, no_fit=False, preview=False,
-                send=False, no_verify=False, no_websearch=False,
-                refresh=False, samples=5, requeue=False,
+                send=False, no_verify=False,
+                refresh=False, requeue=False,
                 requeue_apply=False, rekey_apply=False,
                 restamp_apply=False, restamp_undo="")
     base.update(given)

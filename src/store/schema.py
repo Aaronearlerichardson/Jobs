@@ -138,11 +138,11 @@ def apply_update(conn: sqlite3.Connection, table: str, id_col: str, id_val: obje
     >>> _ = conn.execute("INSERT INTO companies (name, active) VALUES ('A', 1)")
     >>> cid = conn.execute("SELECT id FROM companies").fetchone()["id"]
     >>> apply_update(conn, "companies", "id", cid,
-    ...              {"crawl_state": "dormant", "empty_streak": 3})
+    ...              {"total_job_count": 9, "local_job_count": 3})
     1
-    >>> dict(conn.execute("SELECT crawl_state, empty_streak "
+    >>> dict(conn.execute("SELECT total_job_count, local_job_count "
     ...                   "FROM companies").fetchone())
-    {'crawl_state': 'dormant', 'empty_streak': 3}
+    {'total_job_count': 9, 'local_job_count': 3}
     >>> apply_update(conn, "companies", "id", cid, {})
     0
 

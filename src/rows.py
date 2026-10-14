@@ -78,6 +78,7 @@ class JobIn(_FitFields, total=False):
     posted_at: str | None
     status: str
     harvested_at: str | None
+    source: str | None
 
 
 class Employer(TypedDict, closed=True):
@@ -99,9 +100,7 @@ class FetchedJob(_FitFields, total=False, closed=True):
         Nothing is required, because the shape differs by stage: a fetcher
         sets `id`, `title`, `url`, `location` and `description` (a feed or
         `board_jobs` adds `company`, `adapt` swaps it for `ats`), then
-        `attribute_employers` stamps `company_id`, the sweep gates
-        `track_tag` to `anchor_signal`, and a fit score the eight fit
-        columns. The board engine's own row, before `board_jobs`, is
+        `attribute_employers` stamps `company_id`. The board engine's own row, before `board_jobs`, is
         `spec.EngineRow`.
     """
     id: str
@@ -110,16 +109,13 @@ class FetchedJob(_FitFields, total=False, closed=True):
     location: str
     description: str
     posted_at: str | None
+    first_seen: str
     remote_hint: str
     company: str
     ats: str | None
     company_url: str
     _employer: Employer
     company_id: int | None
-    track_tag: str
-    remote_eligible: bool
-    remote_signal: str
-    anchor_signal: str
 
 
 class _JobColumns(TypedDict):
@@ -164,6 +160,7 @@ class _JobColumns(TypedDict):
     referral: int | None
     outcome_reason: str | None
     dup_of: int | None
+    source: str | None
 
 
 class JobRow(_JobColumns, closed=True):
@@ -255,11 +252,7 @@ class CompanyRow(TypedDict, closed=True):
     created_at: str | None
     miss_reason: str | None
     miss_at: str | None
-    crawl_state: str | None
-    empty_streak: int | None
-    last_crawled_at: str | None
     last_nonempty_at: str | None
-    next_crawl_at: str | None
     last_harvested_at: str | None
     harvest_attempted_at: str | None
     employer_id: int | None

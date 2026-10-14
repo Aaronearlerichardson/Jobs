@@ -180,13 +180,10 @@ class TestFirecrawlFallback:
         assert out[0]["href"] == "https://jobs.lever.co/acme"
         assert made == [] and len(sent) == 1
 
-    async def test_a_hit_or_a_search_without_fallback_never_asks_it(self, monkeypatch, serve):
+    async def test_a_hit_never_asks_it(self, monkeypatch, serve):
         sent = serve({FIRECRAWL: _answer("https://x.example/")})
         hit = [{"href": "https://acme.example/careers"}]
         assert (await _search(monkeypatch, [hit]))[0] == hit
-        Fake, _made = _fake_ddgs([[]])
-        monkeypatch.setattr(ddg, "_ddgs_class", lambda: Fake)
-        assert await ddg.search("beta jobs", budget=5, fallback=False) == []
         assert sent == []
 
     async def test_a_miss_streak_asks_it_first_and_no_later_page(
