@@ -242,8 +242,8 @@ def _silent_board_candidates(conn: sqlite3.Connection,
     harvested_cut = (now - timedelta(days=silent_harvested_within_days)
                     ).isoformat()
     return [store.as_company(r) for r in conn.execute(
-        "SELECT * FROM companies_effective WHERE ats IS NOT NULL AND ats != ? "
-        "AND miss_reason IS NULL "
+        f"SELECT * FROM companies_effective WHERE ats IS NOT NULL AND ats != ? "
+        f"AND {store.NOT_FEED} AND miss_reason IS NULL "
         "AND COALESCE(total_job_count, 0) = 0 "
         "AND last_harvested_at IS NOT NULL AND last_harvested_at >= ? "
         "AND COALESCE(created_at, '') <= ? "
@@ -310,6 +310,18 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
     >>> [c["name"] for c in _reresolve_candidates(conn, limit=1)]
     ['Advarra']
 
+    A feed's roster row that went board-dead is not retried (the next
+    store.sync_feed_companies revives it):
+
+    >>> store.sync_feed_companies(conn)
+    >>> _ = conn.execute("UPDATE companies SET active=0, miss_reason='board-dead:remoteok' "
+    ...                  "WHERE ats='remoteok'")
+    >>> [c["name"] for c in _reresolve_candidates(conn)]
+    ['Advarra', 'Emmes']
+    >>> store.sync_feed_companies(conn)
+    >>> conn.execute("SELECT miss_reason FROM companies WHERE ats='remoteok'").fetchone()[0] is None
+    True
+
     `days` keeps only rows whose miss is at least that old, so a nightly
     run does not re-probe what this morning already failed:
 
@@ -355,7 +367,7 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
               if days else None)
     # A NULL miss_at predates the column: unknown age, so old enough.
     conds = ["COALESCE(active, 0) = 0", "miss_reason IS NOT NULL",
-             store.miss_family_in()]
+             store.miss_family_in(), store.NOT_FEED]
     args: list[str | int] = [json.dumps(sorted(families))]
     if wanted:
         conds.append("lower(name) IN (SELECT value FROM json_each(?))")

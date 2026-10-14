@@ -738,27 +738,27 @@ async def test_tag_scoped_track_ignores_untagged_companies(tmp_path, tracks, stu
     assert row["triage_detail"] == f"{LOCAL}=geo"      # no sweep verdict
 
 
-async def test_a_feed_row_is_judged_as_an_unknown_company_by_the_tracks_that_read_it(
+async def test_a_feed_row_is_judged_by_the_tracks_that_read_its_family(
         tmp_path, tracks, stubs, monkeypatch, elsewhere):
-    """A feed's row has no company: no mission call and no roster row, no
-    detail fetch even without a body, and only the tracks whose `sources`
-    switch reads its family judge it (config.FEEDS)."""
+    """A feed's roster row (config.FEED_TIER) is never mission-scored and its
+    rows get no detail fetch even without a body; only the tracks whose
+    `sources` switch reads its family judge them (config.FEEDS)."""
     monkeypatch.setitem(config.FEEDS["remoteok"], "on", True)
     agg = tracks[1].sources.model_copy(update={"aggregators": True})
     tracks[1] = tracks[1].model_copy(update={"sources": agg, "store_tag": "x"})
     db = tmp_path / "s.db"
     conn = store.connect(db)
+    feed = _company(conn, "remoteok feed", ats="remoteok", mission_tier=config.FEED_TIER)
     for jid, title, body in [("remoteok_1", "EEG Data Engineer", ""),
                              ("remoteok_2", "Barista", "python sql"),
                              ("remoteok_3", "Data Engineer", "python sql")]:
-        store.upsert_job(conn, {"job_id": jid, "company_name": "Zed", "title": title,
-                                "location": elsewhere, "description": body,
-                                "source": "remoteok"})
+        store.upsert_job(conn, {"job_id": jid, "company_id": feed["id"],
+                                "company_name": "Zed", "title": title,
+                                "location": elsewhere, "description": body})
 
     await _run(db, tracks, stubs)
 
     assert stubs["mission"] == [] and stubs["hydrate"] == []
-    assert conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 0
     one, two, three = (_row(conn, f"remoteok_{n}") for n in (1, 2, 3))
     assert (one["triage_status"], store.track_set(one["track"])) == ("ok", {SWEEP})
     assert one["triage_detail"] == f"{SWEEP}=ok", "the local track does not read feeds"

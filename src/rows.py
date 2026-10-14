@@ -78,7 +78,6 @@ class JobIn(_FitFields, total=False):
     posted_at: str | None
     status: str
     harvested_at: str | None
-    source: str | None
 
 
 class Employer(TypedDict, closed=True):
@@ -160,7 +159,6 @@ class _JobColumns(TypedDict):
     referral: int | None
     outcome_reason: str | None
     dup_of: int | None
-    source: str | None
 
 
 class JobRow(_JobColumns, closed=True):

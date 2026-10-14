@@ -9,13 +9,14 @@ left to do. The web UI opens several connections at once, so that matters.
 
 Every statement must be safe to run twice (IF NOT EXISTS, OR IGNORE, UPDATEs
 guarded on what they set): a store whose version was lowered replays them.
-ADD COLUMN, the one thing SQLite cannot guard, counts as done when the column
-is already there.
+ADD COLUMN and DROP COLUMN, the two things SQLite cannot guard, count as done
+when the column is already there (or already gone).
 """
 
 from __future__ import annotations
 
 import contextlib
+import re
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -34,6 +35,34 @@ def _statements(script: str) -> Iterator[str]:
         if sqlite3.complete_statement(buf):
             yield buf
             buf = ""
+
+
+def _already_done(statement: str, error: str) -> bool:
+    """Whether `error` just says `statement` ran before: an ADD COLUMN whose
+    column exists, or a DROP COLUMN whose column is gone. Anything else raises.
+
+    >>> _already_done("ALTER TABLE t DROP COLUMN c;", "no such column: c")
+    True
+    >>> _already_done("ALTER TABLE t ADD COLUMN c TEXT;", "duplicate column name: c")
+    True
+    >>> _already_done("-- note\\nALTER TABLE t ADD COLUMN c TEXT;", "duplicate column name: c")
+    True
+    >>> _already_done("UPDATE t SET c = 1;", "no such column: c")
+    False
+    >>> import sqlite3
+    >>> conn = sqlite3.connect(":memory:")
+    >>> _ = conn.execute("CREATE TABLE t (a)")
+    >>> for sql in ("ALTER TABLE t DROP COLUMN c;", "UPDATE t SET c = 1;"):
+    ...     try:
+    ...         conn.execute(sql)
+    ...     except sqlite3.OperationalError as e:
+    ...         print(_already_done(sql, str(e)))
+    True
+    False
+    """
+    code = " ".join(l for l in statement.splitlines() if not l.lstrip().startswith("--"))
+    verb = "ADD" if "duplicate column name" in error else "DROP" if "no such column" in error else ""
+    return bool(verb) and re.match(rf"\s*ALTER\s+TABLE\s+\S+\s+{verb}\s+COLUMN\b", code, re.I) is not None
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -57,7 +86,7 @@ def migrate(conn: sqlite3.Connection) -> None:
                     try:
                         conn.execute(statement)
                     except sqlite3.OperationalError as e:
-                        if "duplicate column name" not in str(e):
+                        if not _already_done(statement, str(e)):
                             raise
                 conn.execute(f"PRAGMA user_version = {n}")
         conn.commit()

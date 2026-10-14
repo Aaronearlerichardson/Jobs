@@ -147,6 +147,11 @@ def is_multi_division(name: str | None) -> bool:
 # catch-all), and the subset a newly-sourced company is crawled for.
 ACTIVE_MISSION_TIERS = tuple(t.name for t in MISSION_TIERS if t.active)
 
+# The tier of a feed's roster row (sources.feed_instances): it is no
+# employer, so no profile tier fits it, and is_active_mission treats it as
+# active so triage's mission gate never scores or drops it.
+FEED_TIER = "feed"
+
 
 def tier_for_score(score: float | None, tier: str | None = None) -> str | None:
     """The mission tier `score` belongs to: `tier` when the score is inside
@@ -198,6 +203,7 @@ def is_active_mission(tier: str | None, name: str | None,
 
     * its tier is one of the active tiers,
     * its tier is ``None`` -- scoring was UNAVAILABLE, not negative,
+    * its tier is FEED_TIER (a feed's roster row, never scored),
     * it is a multi-division conglomerate (profile policy).
 
     >>> tiers = ("green", "blue")
@@ -211,6 +217,8 @@ def is_active_mission(tier: str | None, name: str | None,
     rejection buries a whole discovery sweep in inactive rows:
 
     >>> is_active_mission(None, "Nowhere Robotics", tiers)
+    1
+    >>> is_active_mission(FEED_TIER, "remoteok feed", tiers)
     1
 
     Omitting `include_missions` falls back to the profile's active tiers,
@@ -238,7 +246,7 @@ def is_active_mission(tier: str | None, name: str | None,
     # `from config import`). A bare local call would silently ignore it --
     # which is exactly what tests/test_triage.py caught when this rule
     # moved here.
-    return 1 if (tier in tiers or tier is None
+    return 1 if (tier in tiers or tier is None or tier == FEED_TIER
                  or _self().is_multi_division(name)) else 0
 
 
@@ -264,8 +272,8 @@ def offmission_inactive(c: CompanyRow) -> str:
     company is what brings a stopped board back.
 
     >>> [offmission_inactive({"mission_tier": t, "active": a}) for t, a in
-    ...  (("other", 0), (None, 0), ("other", 1), ("core-mission", 0))]
-    ['stopped', 'deferred', '', '']
+    ...  (("other", 0), (None, 0), ("other", 1), ("core-mission", 0), (FEED_TIER, 0))]
+    ['stopped', 'deferred', '', '', '']
 
     Notes:
         A NULL tier reads as off-mission HERE, unlike is_active_mission,
@@ -280,7 +288,8 @@ def offmission_inactive(c: CompanyRow) -> str:
         best fit score among them was 0.36.
     """
     tier = c.get("mission_tier")
-    off = not c.get("active") and (tier is None or tier not in ACTIVE_MISSION_TIERS)
+    off = not c.get("active") and (tier is None or tier not in ACTIVE_MISSION_TIERS) \
+        and tier != FEED_TIER
     return ("deferred" if is_active_mission(tier, c.get("name")) else "stopped") if off else ""
 
 

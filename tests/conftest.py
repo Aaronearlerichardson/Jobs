@@ -83,8 +83,10 @@ def _no_network(monkeypatch):
     # Likewise the board directory, which reads a remote dataset.
     monkeypatch.setattr(_directory, "index", lambda: _directory.Companies([], {}))
     # No feed family is pulled unless a test turns it on (config.FEEDS[family]["on"]).
+    # Nor synced into the roster: no instance, so no feed rows in a test store.
     for fam in _config.FEEDS.values():
         monkeypatch.setitem(fam, "on", False)
+        monkeypatch.setitem(fam, "calls", [])
 
 
 @pytest.fixture(scope="session", autouse=True)

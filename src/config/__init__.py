@@ -46,7 +46,7 @@ from .policy import (  # noqa: F401
     JS_PROBE_BUDGET_S,
     MULTI_DIVISION_MISSION_FLOOR, is_multi_division,
     WATCH_DIVISION_TITLES, WATCH_WINDOW_DAYS,
-    ACTIVE_MISSION_TIERS, is_active_mission, tier_for_score, HARVEST_OFFMISSION_HOURS,
+    ACTIVE_MISSION_TIERS, FEED_TIER, is_active_mission, tier_for_score, HARVEST_OFFMISSION_HOURS,
     offmission_inactive, BOARD_MAX_ROWS,
     PAGE_DELAY_S, PAGE_RETRIES, PAGE_RETRY_PAUSE_S, PROBE_PAUSE_S, SEARCH_PROBE_PAUSE_S,
     NEAR_COMPLETE_ROWS, NEAR_COMPLETE_FRACTION,
@@ -103,7 +103,7 @@ from .sources import (  # noqa: F401
     USAJOBS_SERIES, USAJOBS_RESULTS_PER_PAGE,
     GETRO_BOARDS, GETRO_MAX_DETAILS,
     BOARD_DIRECTORY, GOOGLE_JOBS, WIKIDATA_API, FIRECRAWL_API, APIFY_API,
-    RSS_FEEDS,
+    RSS_FEEDS, FeedInstance, feed_instance, feed_instances, row_family,
 )
 from .tables import NON_US_PLACES, REGISTRIES  # noqa: F401
 from .tracks import (  # noqa: F401

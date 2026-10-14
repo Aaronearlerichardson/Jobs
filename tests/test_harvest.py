@@ -12,7 +12,10 @@ from conftest import (answer, company_row as _company, fake_response, make_board
                       no_pacing, track_with)
 
 from src import config, runstate, store
+from src.ats.feeds import FETCH
 from src.claude import api as claude_api
+from src.config import RuntimeTrack
+from src.config.profile_schema import TrackSources
 from src.crawl import harvest
 from src.net import http, parallel
 from src.match.names import SLUG_NAME_SOURCE
@@ -637,9 +640,10 @@ async def test_sync_and_add_job_are_runs_of_the_harvest(tmp_path, monkeypatch):
 
 async def test_a_feed_is_stored_whole_and_a_full_snapshot_closes_what_vanished(
         tmp_path, monkeypatch):
-    """A feed's rows are stored unfiltered under its `source`, carrying the
-    remote hint the fetcher gave; the next full snapshot closes the ones it
-    dropped, a capped one closes nothing, and neither touches a roster row."""
+    """A feed is a roster row (store.sync_feed_companies): its rows are stored
+    unfiltered under it, naming their own employer and carrying the remote
+    hint the fetcher gave; the next full snapshot closes the ones it dropped,
+    a capped one closes nothing, and neither touches a board's rows."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme")
@@ -647,19 +651,25 @@ async def test_a_feed_is_stored_whole_and_a_full_snapshot_closes_what_vanished(
     rows = [{"id": f"remoteok_{n}", "title": f"Role {n}", "company": f"Co {n}",
              "url": f"https://r.test/{n}", "location": "Worldwide",
              "remote_hint": "board:remoteok"} for n in (1, 2, 3)]
+    monkeypatch.setitem(config.FEEDS["remoteok"], "on", True)
+    monkeypatch.setitem(config.FEEDS["remoteok"], "calls", [(None, {})])
+    reads = RuntimeTrack(id="t", db_path=db, sources=TrackSources(aggregators=True))
 
     async def fetch_once(jobs, cap=False):
         async def fetch():
             if cap:
                 http.note_capped()
             return jobs
-        monkeypatch.setattr(harvest, "feed_plan", lambda scope=None: [harvest.Feed("remoteok", fetch)])
-        return await harvest.pull(db)
+        monkeypatch.setitem(FETCH, "remoteok", fetch)
+        return await harvest.pull(db, only={"remoteok"}, min_age_hours=0, scope=reads)
 
     first = await fetch_once(rows)
-    got = {r["job_id"]: r for r in conn.execute("SELECT * FROM jobs WHERE source='remoteok'")}
+    feed = conn.execute("SELECT id FROM companies WHERE ats='remoteok'").fetchone()[0]
+    got = {r["job_id"]: r for r in conn.execute("SELECT * FROM jobs WHERE company_id=?", (feed,))}
     assert first["new"] == 3 and set(got) == {"remoteok_1", "remoteok_2", "remoteok_3"}
-    assert (got["remoteok_1"]["company_name"], got["remoteok_1"]["company_id"]) == ("Co 1", None)
+    assert store.realign_job_names(conn) == 0
+    conn.commit()
+    assert conn.execute("SELECT company_name FROM jobs WHERE job_id='remoteok_1'").fetchone()[0] == "Co 1"
     assert (got["remoteok_1"]["remote_eligible"], got["remoteok_1"]["remote_signal"]) \
         == (1, "hint:board:remoteok")
 
@@ -930,6 +940,24 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
                          and o[0] == "closed")
         assert (closed_kw["limit"], closed_kw["stale_days"]) == (
             harvest.CLOSED_PROBE_LIMIT, harvest.CLOSED_PROBE_STALE_DAYS)
+
+    async def test_a_names_run_is_targeted(self, tmp_path, monkeypatch):
+        """Triage gets only the named company's id; dedup, self-heal, verify and
+        the closed probe never run; the digest still does."""
+        db, order = self._wire(monkeypatch, tmp_path)
+        _company(store.connect(db), "B")
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(harvest, "resume_text", lambda: "resume")
+        monkeypatch.setattr("src.crawl.triage.run", answer(
+            lambda **kw: order.append(("triage", kw)) or {"pending": 0}))
+        for name in ("self_heal_unscored", "dedup_companies", "flag_duplicate_jobs"):
+            target = harvest if name == "self_heal_unscored" else store
+            monkeypatch.setattr(target, name, answer(lambda *a, n=name, **kw: order.append(n)))
+        await harvest.run(db_path=db, board_fn=make_board_fn(), names=["B"])
+        assert self._kinds(order) == ["triage", "digest"]
+        ids = order[0][1]["company_ids"]
+        conn = store.connect(db)
+        assert ids == [conn.execute("SELECT id FROM companies WHERE name='B'").fetchone()[0]]
 
     async def test_score_cap_is_one_budget_of_calls(self, tmp_path, monkeypatch):
         """Self-heal takes what triage's fit CALLS left (refused ones count)."""

@@ -35,7 +35,7 @@ sibling.
 from __future__ import annotations
 
 from .companies import (  # noqa: F401
-    CAPTURE_ATS, MISS_REASONS,
+    CAPTURE_ATS, MISS_REASONS, NOT_FEED,
     add_board, as_company, board_key, company_by_board, plan_board, realign_job_names,
     company_by_host, company_id_by_name,
     deactivate_company, dedup_companies, export_companies, get_companies,
@@ -43,7 +43,7 @@ from .companies import (  # noqa: F401
     import_companies, mark_harvest_attempted, mark_harvested,
     miss_counts, miss_family, miss_family_in, recent_miss_names,
     record_alias, record_miss, roster_growth, roster_rows,
-    upsert_company,
+    sync_feed_companies, upsert_company,
 )
 from .employers import (  # noqa: F401
     set_board_mission, set_watch,

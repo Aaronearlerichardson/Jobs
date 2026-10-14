@@ -184,14 +184,15 @@ TRIAGE_GATES = ("mission", "title", "anchor", "geo", "exclude", "division",
 TRIAGE_OK = "ok"
 
 
-def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
+def triage_pending(conn: sqlite3.Connection, company_ids: Collection[int] | None = None,
                    limit: int | None = None) -> list[JobRow]:
     """Open rows no crawl has adopted (no track label) and triage has not
-    judged yet -- the harvester's unscored material: those linked to a
-    company, and a feed's company-less ones (`source` set). A row
-    triage looked at but could not hydrate stays NULL, so it comes back
-    here next pass. A cross-board duplicate (`dup_of`) waits for its survivor
-    instead of costing a second hydrate and score.
+    judged yet -- the harvester's unscored material (a row with no company
+    row is nobody's). A row triage looked at but could not hydrate stays
+    NULL, so it comes back here next pass. A cross-board duplicate
+    (`dup_of`) waits for its survivor instead of costing a second hydrate
+    and score. `company_ids` keeps only those companies' rows (none at all
+    when empty).
 
     >>> from src.store.schema import connect
     >>> from src.store import upsert_company
@@ -203,20 +204,22 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
     ...     _ = upsert_job(conn, {"job_id": jid, "title": "T",
     ...                           "company_id": cid, **extra})
     >>> record_triage(conn, "h4", "title", "local=title")
-    >>> _ = upsert_job(conn, {"job_id": "f1", "title": "T", "source": "remoteok"})
     >>> _ = upsert_job(conn, {"job_id": "x1", "title": "T"})
     >>> [r["job_id"] for r in triage_pending(conn)]
-    ['f1', 'h1']
+    ['h1']
+    >>> [r["job_id"] for r in triage_pending(conn, [cid])]
+    ['h1']
+    >>> triage_pending(conn, [])
+    []
     """
     q = ("SELECT j.* FROM open_jobs j "
-         "LEFT JOIN companies c ON j.company_id = c.id "
+         "JOIN companies c ON j.company_id = c.id "
          "WHERE j.triage_status IS NULL AND j.dup_of IS NULL "
-         "AND COALESCE(j.track,'') = '' "
-         "AND (c.id IS NOT NULL OR (j.company_id IS NULL AND j.source IS NOT NULL))")
+         "AND COALESCE(j.track,'') = ''")
     args: list[int] = []
-    if company_id is not None:
-        q += " AND j.company_id = ?"
-        args.append(company_id)
+    if company_ids is not None:
+        q += f" AND j.company_id IN ({','.join('?' * len(company_ids))})"
+        args.extend(company_ids)
     q += " ORDER BY j.company_id, j.first_seen"
     if limit:
         q += " LIMIT ?"
@@ -409,30 +412,24 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
     'Peoria, IL'
 
     A posting that arrives under a new id takes over the stored row with the
-    same URL and title, unless a feed (`source`) sent it or holds it:
+    same URL and title of the SAME origin (company), and no other's: one
+    posting two origins list (a feed and a board, two feeds) is two rows.
 
-    >>> _ = upsert_job(conn, {"job_id": "old", "title": "T", "url": "https://x.test/1"})
+    >>> _ = upsert_job(conn, {"job_id": "old", "title": "T", "url": "https://x.test/1",
+    ...                       "company_id": 1})
     >>> upsert_job(conn, {"job_id": "feed_a", "title": "T", "url": "https://x.test/1",
-    ...                   "source": "feed"})
+    ...                   "company_id": 2})
     True
-    >>> upsert_job(conn, {"job_id": "new", "title": "T", "url": "https://x.test/1"})
+    >>> upsert_job(conn, {"job_id": "new", "title": "T", "url": "https://x.test/1",
+    ...                   "company_id": 1})
     False
-    >>> sorted(r[0] for r in conn.execute("SELECT job_id FROM jobs WHERE url IS NOT NULL"))
-    ['feed_a', 'new']
-
-    Nor does a board's posting take a feed's row, whatever its URL and title:
-
-    >>> _ = upsert_job(conn, {"job_id": "f2", "title": "U", "url": "https://x.test/2",
-    ...                       "source": "feed"})
-    >>> upsert_job(conn, {"job_id": "b2", "title": "U", "url": "https://x.test/2"})
-    True
-    >>> sorted(r[0] for r in conn.execute("SELECT job_id FROM jobs WHERE url LIKE '%/2'"))
-    ['b2', 'f2']
+    >>> sorted(r[:] for r in conn.execute("SELECT job_id, company_id FROM jobs WHERE url IS NOT NULL"))
+    [('feed_a', 2), ('new', 1)]
     """
     now = datetime.now().isoformat()
     url = clean_url(j.get("url"))
     new = not job_exists(conn, j["job_id"])
-    if new and url and not j.get("source"):
+    if new and url:
         # Same posting arriving under a NEW id scheme — a company's ats/
         # tenant changed (Keebler custom_* -> rippling_*) or a fetcher's id
         # format did (Duke sf__<slug> -> sf_<tenant>_<num>). Re-key the
@@ -440,12 +437,13 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
         # and double-spend deep-verify (17 such URL pairs in the 2026-08-28
         # store). Title must match too — some custom boards give several
         # DISTINCT postings one landing URL, and those must stay separate
-        # rows. Not a feed's row (`source`): its ids are its own namespace,
-        # and one posting listed by two feeds is two rows -- re-keyed, the
-        # one row traded places between the feeds, a pass each.
+        # rows. Only a row of the same origin (`company_id IS ?`): a feed's
+        # ids are its own namespace, and one posting listed by two origins
+        # is two rows -- re-keyed, the one row would trade places between
+        # them, a pass each.
         prev = conn.execute(
-            "SELECT job_id, title FROM jobs WHERE url=? AND source IS NULL",
-            (url,)).fetchone()
+            "SELECT job_id, title FROM jobs WHERE url=? AND +company_id IS ?",
+            (url, j.get("company_id"))).fetchone()   # unary +: seek ix_jobs_url, not ix_jobs_company
         if (prev is not None
                 and (prev["title"] or "").strip().lower()
                 == (j.get("title") or "").strip().lower()):
@@ -473,10 +471,10 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
              description, resume_fit_score, fit_reason,
              fit_domain, fit_function, fit_stack, fit_seniority, fit_gates,
              fit_model, posted_at, first_seen, last_seen, status,
-             harvested_at, source)
+             harvested_at)
            VALUES (?,?,COALESCE((SELECT employer_name FROM board_employers
                                  WHERE company_id=?), ?),
-                   ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              title=excluded.title, url=excluded.url,
              location=CASE WHEN ? AND COALESCE(location, '') != ''
@@ -500,8 +498,7 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
              status=excluded.status,
              closed_at=CASE WHEN excluded.status='closed'
                             THEN closed_at ELSE NULL END,
-             harvested_at=COALESCE(excluded.harvested_at, harvested_at),
-             source=COALESCE(excluded.source, source)""",
+             harvested_at=COALESCE(excluded.harvested_at, harvested_at)""",
         (j["job_id"], j.get("company_id"), j.get("company_id"), j.get("company_name"),
          j.get("title"),
          url, j.get("location"), track, j.get("geo_mode"),
@@ -511,7 +508,7 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
          j.get("fit_domain"), j.get("fit_function"), j.get("fit_stack"),
          j.get("fit_seniority"), j.get("fit_gates"), j.get("fit_model"),
          j.get("posted_at"), now, now, j.get("status", "open"),
-         j.get("harvested_at"), j.get("source"), keep_location),
+         j.get("harvested_at"), keep_location),
     )
     _commit(conn)
     return new
@@ -557,8 +554,7 @@ def touch_job(conn: sqlite3.Connection, job_id: str) -> None:
 def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
                       fetched_jobs: list[FetchedJob], track: str | None = None,
                       external_grace_days: float = 3, capped: bool = False,
-                      now: datetime | None = None, *,
-                      source: str | None = None) -> tuple[int, int]:
+                      now: datetime | None = None) -> tuple[int, int]:
     """Reconcile ONE company's stored jobs against a live board snapshot
     (`fetched_jobs`: dicts with id/title/url, as returned by
     board.company.fetch_company). Rows matched by job_id, URL, or
@@ -566,18 +562,19 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
     that have vanished from the snapshot are marked closed. Returns
     (n_reopened, n_closed).
 
-    `source` reconciles a FEED's rows (`jobs.source`) against its snapshot
-    instead, by the same rules: the feed is authoritative for its own
-    ids, so every row of the source is board-native and a vanished one
-    closes at once (a capped snapshot closes nothing). A company's own
-    snapshot never touches the rows a feed stored for it.
+    A FEED's row (the company's ats a config.FEEDS family) is reconciled by
+    the same rules: the feed is authoritative for its own ids, so every
+    row of the company is board-native and a vanished one closes at once
+    (a capped snapshot closes nothing).
 
     >>> from src.store.schema import connect
+    >>> from src.store import upsert_company
     >>> conn = connect(":memory:")
+    >>> f = upsert_company(conn, {"name": "Rok", "ats": "remoteok", "slug": "remoteok"})
     >>> for n in (1, 2):
-    ...     _ = upsert_job(conn, {"job_id": f"rok_{n}", "title": "T", "source": "rok"})
+    ...     _ = upsert_job(conn, {"job_id": f"rok_{n}", "title": "T", "company_id": f})
     >>> _ = upsert_job(conn, {"job_id": "rok_3", "title": "T"})
-    >>> sync_job_statuses(conn, None, [{"id": "rok_1", "title": "T"}], source="rok")
+    >>> sync_job_statuses(conn, f, [{"id": "rok_1", "title": "T"}])
     (0, 1)
     >>> [tuple(r) for r in conn.execute("SELECT job_id, status FROM jobs")]
     [('rok_1', 'open'), ('rok_2', 'closed'), ('rok_3', 'open')]
@@ -645,8 +642,10 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
         record of why, now that the two-strike mechanism itself is gone
         and nothing computes that boundary any more.
     """
-    if not (company_id or source) or not fetched_jobs:
+    if not company_id or not fetched_jobs:
         return (0, 0)
+    ats = conn.execute("SELECT ats FROM companies WHERE id=?", (company_id,)).fetchone()
+    feed = ats is not None and config.row_family(ats[0]) != "store"
     ids = {j["id"] for j in fetched_jobs if j.get("id")}
     urls = {u for u in (_norm_url(j.get("url")) for j in fetched_jobs) if u}
     titles = {t for t in (_norm_title(j.get("title")) for j in fetched_jobs) if t}
@@ -676,8 +675,7 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
     closed: list[tuple[str, str]] = []
     rows = conn.execute(
         "SELECT job_id, url, title, track, status, first_seen, last_seen "
-        "FROM jobs WHERE " + ("source=?" if source else "company_id=? AND source IS NULL"),
-        (source or company_id,)).fetchall()
+        "FROM jobs WHERE company_id=?", (company_id,)).fetchall()
     # An external row whose URL names a posting stored as its own row is
     # that row's stale alias (a retired id scheme, the posting retitled
     # since, so upsert_job's re-key passed it by): not matched by the URL.
@@ -685,7 +683,7 @@ def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
     twin = {u: j["id"] for j in fetched_jobs
             if j.get("id") in stored and (u := _norm_url(j.get("url")))}
     for r in rows:
-        board_native = bool(source) or r["job_id"].startswith(prefixes)
+        board_native = feed or r["job_id"].startswith(prefixes)
         u = _norm_url(r["url"])
         present = (r["job_id"] in ids
                    or (not board_native

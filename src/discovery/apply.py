@@ -54,18 +54,21 @@ def _coords_from_urls(urls: Iterable[str | None]) -> CompanyIn | None:
 
 def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
                         commit: bool = True, source: str = "getro") -> list[FetchedJob]:
-    """Link each board-sourced job to its employer's roster row, queueing
+    """Drop the board-sourced jobs an employer's own board covers, and queue
     employers the roster lacks for review. Returns the jobs to keep.
+
+    A posting keeps the aggregator's roster row (its feed) as its origin:
+    this no longer re-points ``company_id`` at the employer's row, which it
+    did while a feed had no roster row of its own.
 
     Jobs without an ``_employer`` record pass through untouched. For the
     rest, per employer:
 
     * a roster row that owns the same board (the apply link's ATS
-      coordinates — ``src.store.company_by_board``) or the same name gets
-      ``company_id`` stamped on the jobs. When that row is ACTIVE and
-      confirmed, its own crawl covers the board, so a posting the store
-      already holds under the employer's URL is dropped here rather than
-      stored twice;
+      coordinates — ``src.store.company_by_board``) or the same name is the
+      employer. When that row is ACTIVE and confirmed, its own crawl covers
+      the board, so a posting the store already holds under the employer's
+      URL is dropped here rather than stored twice;
     * a name the reviewer rejected (``src.store.block_name``) drops its
       jobs — that decision was "not a company", and it sticks;
     * anything else becomes a review candidate under `commit`:
@@ -73,7 +76,7 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
       ``source = "getro:<board host>"`` and the ATS coordinates when the
       apply link revealed them. Never an active row.
 
-    `source` names the aggregator in the stored `source` column
+    `source` names the aggregator in a candidate row's `source` column
     ("getro:<board host>"). Getro is the only fetcher stamping
     `_employer` today; the argument is here so the next one does not
     have to fork this.
@@ -105,10 +108,7 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
             stored = {r[0] for r in conn.execute(
                 "SELECT url FROM jobs WHERE url IN (SELECT value FROM json_each(?))",
                 (json.dumps(urls),))} if urls else set()
-            for j in group:
-                j["company_id"] = row["id"]
-                if j.get("url") in stored:
-                    drop.add(id(j))
+            drop.update(id(j) for j in group if j.get("url") in stored)
             continue
         if name_key(name) in blocked:
             drop.update(id(j) for j in group)
@@ -127,7 +127,5 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
             candidate.update(coords)
             candidate["careers_url"] = careers_url
             candidate["tags"] = seed_tag_for(coords["ats"])
-        cid = store.add_board(conn, store.mark_pending(candidate))[0]
-        for j in group:
-            j["company_id"] = cid
+        store.add_board(conn, store.mark_pending(candidate))
     return [j for j in jobs if id(j) not in drop]

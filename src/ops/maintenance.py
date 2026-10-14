@@ -85,31 +85,25 @@ async def track_writer(t: RuntimeTrack | None = None, db: store.Writer | Connect
 
 
 @overload
-def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: Literal["company_id"] = "company_id",
-                                              alone: str | None = None) -> dict[int, list[T]]: ...
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: Literal["company_id"] = "company_id"
+                                              ) -> dict[int, list[T]]: ...
 @overload
-def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str,
-                                              alone: str | None = None) -> dict[str, list[T]]: ...
-def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str = "company_id",
-                                              alone: str | None = None
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str) -> dict[str, list[T]]: ...
+def group_by_company[T: Mapping[str, object]](rows: Iterable[T], key: str = "company_id"
                                               ) -> dict[int, list[T]] | dict[str, list[T]]:
     """`rows` bucketed by `key` (their company id by default), in
-    first-seen order. With `alone` naming an integer field, a row whose key
-    is falsy (a feed's, with no company) stands alone under that field negated.
+    first-seen order.
 
     >>> group_by_company([{"company_id": 1, "t": "a"}, {"company_id": 2},
     ...                   {"company_id": 1, "t": "b"}])
     {1: [{'company_id': 1, 't': 'a'}, {'company_id': 1, 't': 'b'}], 2: [{'company_id': 2}]}
-    >>> list(group_by_company([{"company_id": None, "id": 7}, {"company_id": 3, "id": 8}], alone="id"))
-    [-7, 3]
 
     Both backfill paths need this: a board with several stale rows must be
     fetched once, not once per row.
     """
     out: dict[object, list[T]] = {}
     for r in rows:
-        k = r[key] or (-cast(int, r[alone]) if alone else r[key])
-        out.setdefault(k, []).append(r)
+        out.setdefault(r[key], []).append(r)
     return cast(dict[int, list[T]], out)
 
 

@@ -10,6 +10,9 @@ Getro are OFF: one needs credentials, the other names a place.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+from urllib.parse import urlsplit
+
 from typing_extensions import TypedDict
 
 from .profile import PROFILE
@@ -25,7 +28,7 @@ DISCOURSE_BOARDS = [(b.label or b.url, b.url, b.category_id)
 #  AGGREGATOR FEEDS (non-company-owned job boards, no API key required)
 # =========================================================================
 #
-# Each is pulled whole by the harvest (src/crawl/harvest.py feed_plan),
+# Each is pulled whole by the harvest (src/crawl/harvest.py, one roster row per instance),
 # stored unfiltered and judged by triage. FEEDS, below, is the one
 # table of feed families.
 
@@ -78,6 +81,14 @@ BOARD_DIRECTORY = _src.board_directory
 # employers hiring near you, and what one run may cost.
 GOOGLE_JOBS = _src.google_jobs
 
+type FeedKwargs = dict[str, str | int | bool | list[str] | None]
+
+
+def _board_host(url: str) -> str:
+    """A board URL's lowercased host, '' when it names none."""
+    return (urlsplit(url if "://" in url else "https://" + url).hostname or "") if url.strip() else ""
+
+
 class FeedFamily(TypedDict):
     """One feed family: `switch` is the track `sources` switch that enables it
     (null: every track), `on` whether the profile turns it on, and `calls` the
@@ -85,13 +96,13 @@ class FeedFamily(TypedDict):
     and the keyword arguments of its fetcher (src/ats/feeds.FETCH)."""
     switch: str | None
     on: bool
-    calls: list[tuple[str | None, dict[str, str | int | bool | list[str] | None]]]
+    calls: list[tuple[str | None, FeedKwargs]]
 
 
-#: Every feed family once; a row's `source` is "<family>" or
-#: "<family>:<instance>". src/crawl/harvest.feed_plan iterates this and
-#: src/ats/feeds.FETCH maps each family to its fetcher. (RemoteOK is the one
-#: JSON endpoint at https://remoteok.com/api.)
+#: Every feed family once. Each (family, instance) is a roster row
+#: (feed_instances; store.sync_feed_companies) and src/ats/feeds.FETCH maps
+#: each family to its fetcher. (RemoteOK is the one JSON endpoint at
+#: https://remoteok.com/api.)
 FEEDS: dict[str, FeedFamily] = {
     "remoteok": {"switch": "aggregators", "on": _src.remoteok,
                  "calls": [(None, {})]},
@@ -115,9 +126,50 @@ FEEDS: dict[str, FeedFamily] = {
                                   "series": USAJOBS_SERIES,
                                   "results_per_page": USAJOBS_RESULTS_PER_PAGE})]},
     "getro": {"switch": None, "on": _getro.enabled and bool(GETRO_BOARDS),
-              "calls": [(None, {"board_url": b, "max_details": GETRO_MAX_DETAILS})
-                        for b in GETRO_BOARDS]},
+              "calls": [(_board_host(b), {"board_url": b, "max_details": GETRO_MAX_DETAILS})
+                        for b in GETRO_BOARDS if _board_host(b)]},
 }
+
+
+class FeedInstance(NamedTuple):
+    """One fetch of a feed family as a roster row: `slug` is the instance key
+    (its label, else the family), `name` the row's unique display name."""
+    family: str
+    slug: str
+    name: str
+    on: bool
+    kwargs: FeedKwargs
+
+
+def feed_instances() -> list[FeedInstance]:
+    """Every (family, instance) of FEEDS.
+
+    >>> [i.name for i in feed_instances() if i.family == "remoteok"]
+    ['remoteok feed']
+    >>> feed_instance("remoteok", "remoteok").name
+    'remoteok feed'
+    >>> feed_instance("remoteok", "gone") is None
+    True
+    >>> row_family("remoteok"), row_family("lever"), row_family(None)
+    ('remoteok', 'store', 'store')
+    >>> _board_host("https://Jobs.Example.org/x"), _board_host("jobs.example.org/x"), _board_host("")
+    ('jobs.example.org', 'jobs.example.org', '')
+    """
+    return [FeedInstance(family, label or family,
+                         f"{family} feed" + (f": {label}" if label else ""),
+                         fam["on"], kwargs)
+            for family, fam in FEEDS.items() for label, kwargs in fam["calls"]]
+
+
+def feed_instance(family: str | None, slug: object) -> FeedInstance | None:
+    """The FEEDS instance a roster row names, None when config no longer has it."""
+    return next((i for i in feed_instances() if (i.family, i.slug) == (family, slug)), None)
+
+
+def row_family(ats: str | None) -> str:
+    """The family a roster row belongs to: its `ats` when that is a FEEDS
+    key, else "store" (a board of the company store)."""
+    return ats if ats and ats in FEEDS else "store"
 
 # Wikidata's API: the domain lookup's fallback (src/discovery/resolve/domain.py)
 # and tools/miss_cleanup.py.

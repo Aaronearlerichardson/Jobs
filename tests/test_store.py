@@ -348,19 +348,10 @@ class TestSchema:
         BUSY_TIMEOUT_S with "database is locked" (2026-09-10 harvest logs).
         """
         plan = " ".join(str(r[3]) for r in db.execute(
-            "EXPLAIN QUERY PLAN SELECT job_id, title FROM jobs WHERE url=?",
-            ("x",)))
+            "EXPLAIN QUERY PLAN SELECT job_id, title FROM jobs "
+            "WHERE url=? AND +company_id IS ?", ("x", 1)))
         assert "SCAN" not in plan, f"unindexed url probe: {plan}"
         assert "ix_jobs_url" in plan, plan
-
-    def test_triage_pending_is_indexed(self, db):
-        """The harvester's unjudged rows are selected on triage_status, a
-        feed's company-less ones and its snapshot's closing on `source`."""
-        names = {r[1] for r in db.execute("PRAGMA index_list(jobs)")}
-        assert {"ix_jobs_triage", "ix_jobs_source"} <= names
-        plan = " ".join(str(r[3]) for r in db.execute(
-            "EXPLAIN QUERY PLAN SELECT job_id FROM jobs WHERE source=?", ("x",)))
-        assert "ix_jobs_source" in plan, plan
 
 
 class TestCompanies:

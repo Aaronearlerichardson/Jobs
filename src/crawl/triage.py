@@ -57,13 +57,13 @@ Gates, per configured track, in order:
                labels and score, so it enters the ranking like a crawled
                row and the crawl never re-scores it.
 
-A row is judged against EVERY track that reads it (a roster row: the
-tracks whose store_tag covers its company; a feed's row, which has no
-company: the tracks whose `sources` switch reads its family,
-config.FEEDS); it surfaces into the union of the tracks it passed
-(jobs.track is a set). A feed's row is judged as a company of unknown
-mission (never watched, never scored or written) and has no detail page to
-fetch, so it is judged on the text the feed gave. The per-
+A row is judged against EVERY track that reads it (track_reads: a store
+board's row by the tracks whose store_tag covers its company; a feed's row
+by the tracks whose `sources` switch reads its family, config.FEEDS); it
+surfaces into the union of the tracks it passed (jobs.track is a set). A
+feed's row belongs to its feed's roster row, which carries config.FEED_TIER
+(never scored, never off-mission) and has no detail page to fetch, so it is
+judged on the text the feed gave. The per-
 track record ("local-tech=geo;remote-neural=title") is kept in
 triage_detail so a false drop is debuggable; triage_status carries the
 one row verdict the funnel counts.
@@ -168,19 +168,33 @@ def roster_tracks(tracks: Iterable[RuntimeTrack] | None = None) -> list[RuntimeT
             if t.sources.store or config.feed_families(t)]
 
 
-def _feed_only(company: CompanyRow) -> bool:
-    """True for the stand-in company of a feed's row (no roster id)."""
-    return company.get("id") is None
+def track_reads(t: RuntimeTrack, company: CompanyRow) -> bool:
+    """Whether track `t` reads `company`'s rows -- the one applicability rule
+    (triage's judging, harvest's scoped pull). A row's family is its ats when
+    that is a config.FEEDS key, else "store" (config.row_family). `t` reads
+    "store" rows when its `sources.store` is on, a tag-scoped track
+    (store_tag) only those carrying the tag, and a feed family f when
+    config.feed_families(t) holds f.
 
-
-def _track_applies(t: RuntimeTrack, company: CompanyRow, job: JobRow) -> bool:
-    """Whether track `t` reads `job`: a feed's row if `t` reads its family;
-    else a roster row if `t` reads the store, and a tag-scoped track
-    (store_tag) only reads companies carrying it."""
-    if source := job.get("source"):
-        return source.split(":")[0] in config.feed_families(t)
+    >>> from src.config.profile_schema import TrackSources
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), store_tag="sweep",
+    ...                  sources=TrackSources(aggregators=True))
+    >>> track_reads(t, {"ats": "lever", "tags": "sweep"}), track_reads(t, {"ats": "lever"})
+    (True, False)
+    >>> track_reads(t, {"ats": "remoteok"}) == ("remoteok" in config.feed_families(t))
+    True
+    """
+    family = config.row_family(company.get("ats"))
+    if family != "store":
+        return family in config.feed_families(t)
     tag = t.store_tag
     return t.sources.store and (not tag or tags.has(company.get("tags"), tag))
+
+
+def _has_body(row: JobRow, company: CompanyRow) -> bool:
+    """Whether the row's text is all there will be: it has a body, or no
+    detail fetch could add one (a feed's row)."""
+    return bool((row.get("description") or "").strip()) or not _needs_detail(row, company)
 
 
 # --------------------------------------------------------------------------- #
@@ -223,7 +237,7 @@ async def ensure_mission(db: store.Writer, company: CompanyRow,
     (None, None) when scoring is unavailable -- which reads as unknown,
     not off-mission, everywhere downstream."""
     tier, score = company.get("mission_tier"), company.get("mission_score")
-    if tier or score is not None or _feed_only(company):
+    if tier or score is not None:
         return tier, score
     if config.is_multi_division(company.get("name")):
         return None, None                       # the gate ignores it anyway
@@ -334,7 +348,7 @@ def row_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, cutoff: str) 
     given up -- see _geo_verdict."""
     title = job.get("title") or ""
     desc = job.get("description") or ""
-    has_body = bool(desc.strip()) or _feed_only(company)
+    has_body = _has_body(job, company)
     if not gates.is_technical_role(title, t):
         return "title"
     deferred = False
@@ -367,7 +381,7 @@ async def judge(db: store.Writer, company: CompanyRow, jobs: list[JobRow], track
     Mission is decided once here (`db`, a store.Writer, keeps it); the
     per-track keyword focus is applied around each track's pass over the
     rows, off the loop."""
-    read = {t.track: [j for j in jobs if _track_applies(t, company, j)] for t in tracks}
+    read = {t.track: jobs if track_reads(t, company) else [] for t in tracks}
     out: dict[str, dict[str, str]] = {j["job_id"]: {} for j in jobs}
     if not any(read.values()):
         return out
@@ -432,9 +446,8 @@ def _fetcher_shape(row: JobRow, company: CompanyRow) -> FetchedJob:
 
 
 def _needs_detail(row: JobRow, company: CompanyRow) -> bool:
-    """needs_detail for a stored row; never for a feed's, whose feed gave
-    all there is."""
-    return not _feed_only(company) and needs_detail(_fetcher_shape(row, company))
+    """needs_detail for a stored row."""
+    return needs_detail(_fetcher_shape(row, company))
 
 
 async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: float | None = None,
@@ -455,16 +468,13 @@ async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: fl
 
 def _by_company(conn: sqlite3.Connection, rows: list[JobRow]
                 ) -> tuple[dict[int, list[JobRow]], dict[int, CompanyRow | None]]:
-    """Rows grouped by company (a feed's row, which has none, alone under its negated row id), plus the roster row for each; a
-    feed's row gets a stand-in with only the name its feed gave.
+    """Rows grouped by company, plus the roster row for each.
 
     Both gate phases work per company, not per row: the mission gate is a
     company-level verdict and hydration is per host.
     """
-    groups = ops.group_by_company(rows, alone="id")
-    return groups, {cid: store.get_company(conn, cid) if cid > 0 else
-                    cast(CompanyRow, {"name": rs[0].get("company_name") or ""})
-                    for cid, rs in groups.items()}
+    groups = ops.group_by_company(rows)
+    return groups, {cid: store.get_company(conn, cid) for cid in groups}
 
 
 async def _judged(db: store.Writer, companies: dict[int, CompanyRow], groups: dict[int, list[JobRow]],
@@ -683,11 +693,11 @@ async def _body_gates(db: store.Writer, companies: dict[int, CompanyRow], surviv
     left_rows: list[tuple[CompanyRow, JobRow]] = []
     # The survivor rows carry company_id themselves, so the same grouping
     # helper works here without rebuilding the (company, row) pairs.
-    groups = ops.group_by_company([r for _, r, _ in survivors.values()], alone="id")
+    groups = ops.group_by_company([r for _, r, _ in survivors.values()])
     async for c, r, status, detail, surfaced in _judged(db, companies, groups,
                                                         tracks, mission_scorer,
                                                         cutoff):
-        if status == OK and ((r.get("description") or "").strip() or _feed_only(c)):
+        if status == OK and _has_body(r, c):
             final[r["job_id"]] = (c, r, surfaced, detail)
         elif status in (OK, DEFER):
             summary["left"] += 1
@@ -869,8 +879,10 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
               probe_fn: ProbeFn = probe_job_open,
               now: datetime | None = None, requeue: bool = False,
               requeue_apply: bool = False,
-              prefer: Collection[str] = ()) -> Mapping[str, object]:
-    """Triage every pending row in the store. Returns the summary dict
+              prefer: Collection[str] = (),
+              company_ids: Collection[int] | None = None) -> Mapping[str, object]:
+    """Triage every pending row in the store (only those of `company_ids`
+    when given, a targeted run's). Returns the summary dict
     (also printed): harvested/pending N, then a count per gate, hydrated,
     scored, surfaced, and how many rows are left pending.
 
@@ -904,7 +916,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
     db_path = db_path or config.STORE_DB_PATH
     tracks = roster_tracks(tracks)
     async with store.Writer(db_path) as db:
-        rows = await db.run(store.triage_pending, limit=limit)
+        rows = await db.run(store.triage_pending, company_ids, limit=limit)
         bar = "=" * 70
         print(f"\n{bar}\n  [TRIAGE] harvested rows -> gates -> hydrate -> score "
               f"- {datetime.now():%Y-%m-%d %H:%M}")

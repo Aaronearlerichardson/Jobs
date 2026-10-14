@@ -987,11 +987,23 @@ def realign_job_names(conn: sqlite3.Connection) -> int:
     2
     >>> sorted(r[0] for r in conn.execute("SELECT DISTINCT company_name FROM jobs"))
     ['Acme']
+
+    A feed's row keeps the employer its posting names (board_employers has
+    no feed rows):
+
+    >>> sync_feed_companies(conn)
+    >>> f = conn.execute("SELECT id FROM companies WHERE ats='remoteok'").fetchone()[0]
+    >>> _ = conn.execute("INSERT INTO jobs (job_id, company_id, company_name) "
+    ...                  "VALUES ('f1', ?, 'Zed')", (f,))
+    >>> realign_job_names(conn)
+    0
+    >>> conn.execute("SELECT company_name FROM jobs WHERE job_id='f1'").fetchone()[0]
+    'Zed'
     """
     renamed = conn.execute(
         "UPDATE jobs SET company_name=(SELECT employer_name FROM board_employers b "
         "WHERE b.company_id=jobs.company_id) WHERE company_id IN "
-        "(SELECT id FROM companies) AND company_name IS NOT "
+        "(SELECT company_id FROM board_employers) AND company_name IS NOT "
         "(SELECT employer_name FROM board_employers b WHERE b.company_id=jobs.company_id)"
     ).rowcount
     if renamed:
@@ -1166,6 +1178,48 @@ def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
         "ORDER BY mission_score DESC, local_job_count DESC",
         (CAPTURE_ATS, json.dumps(["board-dead", "no-board-found", "duplicate"]))).fetchall()
     return [c for c in map(as_company, rows) if _name_key(c.get("name") or "") not in blocked]
+
+
+# SQL for "this row is a boardlike employer, not a feed's roster row": the one
+# predicate every op that scores, re-resolves, renames, prunes or links
+# employers puts in its WHERE (feed rows are harvested, triaged and ranked only).
+NOT_FEED = f"COALESCE(source, '') != '{config.FEED_TIER}'"
+
+
+def sync_feed_companies(conn: sqlite3.Connection) -> None:
+    """Make every FEEDS instance (config.feed_instances) a roster row, as the
+    harvester's start of each pass: ats = the family, slug = the instance,
+    `active` = the family's `on` flag, and source and mission tier both
+    config.FEED_TIER (is_active_mission reads it as active, so triage never
+    scores the row). A row whose instance left config is deactivated; config
+    stays the source of truth.
+
+    >>> from src.store.schema import connect
+    >>> from unittest import mock
+    >>> conn = connect(":memory:")
+    >>> sync_feed_companies(conn)
+    >>> row = conn.execute("SELECT name, active, source, mission_tier FROM companies_effective "
+    ...                    "WHERE ats='remoteok' AND slug='remoteok'").fetchone()
+    >>> tuple(row) == ("remoteok feed", int(config.FEEDS["remoteok"]["on"]),
+    ...                config.FEED_TIER, config.FEED_TIER)
+    True
+    >>> with mock.patch.object(config, "feed_instances", lambda: []):
+    ...     sync_feed_companies(conn)
+    >>> conn.execute("SELECT COUNT(*) FROM companies WHERE source=? AND active=1",
+    ...              (config.FEED_TIER,)).fetchone()[0]
+    0
+    """
+    instances = config.feed_instances()
+    for i in instances:
+        upsert_company(conn, {"name": i.name, "ats": i.family, "slug": i.slug,
+                              "source": config.FEED_TIER, "active": int(i.on),
+                              "mission_tier": config.FEED_TIER})
+    keys = {(i.family, i.slug) for i in instances}
+    for r in conn.execute("SELECT id, ats, slug FROM companies WHERE source=? AND active=1",
+                          (config.FEED_TIER,)).fetchall():
+        if (r["ats"], r["slug"]) not in keys:
+            conn.execute("UPDATE companies SET active=0 WHERE id=?", (r["id"],))
+    _commit(conn)
 
 
 # Consecutive calendar days a board may carry the harvester's own

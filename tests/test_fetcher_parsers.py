@@ -716,12 +716,12 @@ class TestGetroAttribution:
                               "board": self.BOARD, "page_url": ""}}
 
     def test_links_to_the_roster_row_owning_the_board(self, db):
-        cid = store.upsert_company(db, {"name": "Acme Analytics Inc",
-                                        "ats": "greenhouse",
-                                        "slug": "acmeanalytics", "active": 1})
+        store.upsert_company(db, {"name": "Acme Analytics Inc",
+                                  "ats": "greenhouse",
+                                  "slug": "acmeanalytics", "active": 1})
         job = self._job("Acme Analytics", self.GH_URL)
         kept = apply.attribute_employers(db, [job])
-        assert kept == [job] and job["company_id"] == cid
+        assert kept == [job] and "company_id" not in job, "the feed stays the origin"
         assert len(store.get_companies(db, active_only=False)) == 1
 
     def test_a_copy_the_roster_crawl_already_stored_is_dropped(self, db):
@@ -743,15 +743,14 @@ class TestGetroAttribution:
                               "url": self.GH_URL})
         job = self._job("Acme Analytics", self.GH_URL)
         assert apply.attribute_employers(db, [job]) == [job]
-        assert job["company_id"] == cid
+        assert "company_id" not in job
 
-    def test_links_by_name_when_the_apply_link_names_no_ats(self, db):
-        cid = store.upsert_company(db, {"name": "Orbit Health", "ats": "custom",
-                                        "careers_url": "https://orbit.health/jobs",
-                                        "active": 1})
+    def test_matches_by_name_when_the_apply_link_names_no_ats(self, db):
+        store.upsert_company(db, {"name": "Orbit Health", "ats": "custom",
+                                  "careers_url": "https://orbit.health/jobs",
+                                  "active": 1})
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst")
         apply.attribute_employers(db, [job])
-        assert job["company_id"] == cid
         assert len(store.get_companies(db, active_only=False)) == 1
 
     def test_an_unknown_employer_is_queued_for_review(self, db):
@@ -763,7 +762,6 @@ class TestGetroAttribution:
         assert row["source"] == f"getro:{self.BOARD}"
         assert row["careers_url"] == "https://orbit.health"
         assert row["review"] == "pending"
-        assert job["company_id"] == row["id"]
         assert store.get_company(db, row["id"])["active"] == 0
         assert store.get_companies(db) == []
         assert not store.is_confirmed_company(db, "Orbit Health")

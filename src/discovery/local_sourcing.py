@@ -666,6 +666,12 @@ def _to_score(conn: sqlite3.Connection, rescore_all: bool) -> list[tuple[Company
     >>> _ = conn.execute("UPDATE companies SET employer_id = 1 WHERE name LIKE 'A%'")
     >>> [(c["name"], own) for c, own in _to_score(conn, False)]
     [('A (lever)', False), ('B', False)]
+
+    A feed's roster row is never scored, even by `rescore_all`:
+
+    >>> store.sync_feed_companies(conn)
+    >>> sorted(c["name"] for c, _ in _to_score(conn, True))
+    ['A (lever)', 'B']
     """
     rows = conn.execute(
         "SELECT e.*, k.own FROM companies_effective e JOIN ("
@@ -674,7 +680,8 @@ def _to_score(conn: sqlite3.Connection, rescore_all: bool) -> list[tuple[Company
         "  ORDER BY COALESCE(e.total_job_count, 0) DESC, e.id) AS rn"
         " FROM companies_effective e JOIN (SELECT id, (mission_tier IS NOT NULL"
         "  OR mission_score IS NOT NULL) AS own FROM companies) o ON o.id = e.id"
-        " WHERE COALESCE(e.ats, '') != '' AND CASE WHEN ? THEN e.active = 1"
+        f" WHERE COALESCE(e.ats, '') != '' AND {store.NOT_FEED}"
+        "  AND CASE WHEN ? THEN e.active = 1"
         "  ELSE COALESCE(e.mission_tier, '') = '' END) k ON k.id = e.id"
         " WHERE k.own OR k.rn = 1"
         " ORDER BY e.mission_score DESC, e.local_job_count DESC", (rescore_all,)).fetchall()

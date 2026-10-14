@@ -163,11 +163,11 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
         tenant).
     """
     with track_store(t, conn) as conn:
-        pairs = conn.execute("""
+        pairs = conn.execute(f"""
             WITH k AS (SELECT DISTINCT company_id, norm_title(title) AS t,
                               city_key(location) AS l
-                       FROM open_jobs WHERE company_id IS NOT NULL
-                         AND city_key(location) != '')
+                       FROM open_jobs WHERE city_key(location) != ''
+                         AND company_id IN (SELECT id FROM companies WHERE {store.NOT_FEED}))
             SELECT a.company_id AS x, b.company_id AS y, COUNT(*) AS n
             FROM k a JOIN k b ON a.t = b.t AND a.l = b.l AND a.company_id < b.company_id
             GROUP BY 1, 2 HAVING n >= ?""", (min_shared,)).fetchall()

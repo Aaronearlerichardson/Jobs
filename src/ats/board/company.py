@@ -28,6 +28,7 @@ from urllib.parse import unquote
 from lxml import etree
 
 from src import config
+from src.ats.feeds import FETCH
 from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
@@ -67,7 +68,14 @@ def needs_detail(job: FetchedJob) -> bool:
     >>> needs_detail({"description": "d", "ats": "workday", "url": url,
     ...               "location": "Durham, NC"})
     False
+
+    A feed's posting never does: the feed gave all there is.
+
+    >>> needs_detail({"description": "", "ats": "remoteok"})
+    False
     """
+    if config.row_family(job.get("ats")) != "store":
+        return False
     board = _board_of(job)
     return board.needs_detail(job) if board else not job.get("description")
 
@@ -198,13 +206,23 @@ async def fetch_company(company: BoardCoords, loc_re: LocationRE | None = None,
                         validate: bool = False, employer: str = "") -> list[FetchedJob]:
     """A store row's board pulled through its platform's engine
     (`Board.whole_board`), as the company named `employer` where known;
-    [] for a platform no spec fetches.
+    [] for a platform no spec fetches. A feed's row (config.row_family)
+    runs its instance's fetcher (ats.feeds.FETCH) with that instance's
+    config.FEEDS arguments instead; [] once config dropped the instance.
 
     `loc_re=None` pulls the whole board; pass NC_RE for a pull scoped to
     the profile's locality (the local track's default). A `validate` pull
     confirms a candidate board and counts its local postings on the
     pager's own page budget, not config.BOARD_MAX_ROWS.
     """
+    if config.row_family(company.get("ats")) != "store":
+        feed = config.feed_instance(company.get("ats"), company.get("slug"))
+        if feed is None:
+            return []
+        jobs = await FETCH[feed.family](**feed.kwargs)
+        for j in jobs:
+            j.setdefault("ats", feed.family)
+        return jobs
     board = board_for(company.get("ats"))
     return await board.whole_board(company, loc_re, validate, employer) if board else []
 
@@ -212,12 +230,15 @@ async def fetch_company(company: BoardCoords, loc_re: LocationRE | None = None,
 def board_origin(company: BoardCoords) -> str | None:
     """The host a store row's board is read from, which one walk visits
     at a time (the harvest pull, triage's hydration): its engine's
-    `origin`, else its ATS name (an origin not settled yet, or no engine).
+    `origin`, else its ATS name (an origin not settled yet, or no engine;
+    a feed's row, its family).
 
     >>> board_origin({"ats": "icims", "slug": "careers-acme"})
     'https://careers-acme.icims.com'
     >>> board_origin({"ats": "workday"})
     'workday'
+    >>> board_origin({"ats": "rss", "slug": "Some Feed"})
+    'rss'
     """
     board = board_for(company.get("ats"))
     if board is not None:
