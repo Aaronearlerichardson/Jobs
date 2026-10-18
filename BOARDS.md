@@ -1,6 +1,6 @@
 # Board health
 
-_5/6 platforms healthy · checked 2026-10-17 10:52 UTC · [how this works](tools/check_boards.py)_
+_5/6 platforms healthy · checked 2026-10-18 11:17 UTC · [how this works](tools/check_boards.py)_
 
 One request per platform against a public sample board, with the keyword filter widened so the number reflects the BOARD rather than any particular search profile.
 
