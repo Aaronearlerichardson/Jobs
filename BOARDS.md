@@ -1,6 +1,6 @@
 # Board health
 
-_5/6 platforms healthy · checked 2026-10-31 12:43 UTC · [how this works](tools/check_boards.py)_
+_4/6 platforms healthy · checked 2026-11-01 13:33 UTC · [how this works](tools/check_boards.py)_
 
 One request per platform against a public sample board, with the keyword filter widened so the number reflects the BOARD rather than any particular search profile.
 
@@ -8,10 +8,10 @@ One request per platform against a public sample board, with the keyword filter 
 |---|---|---|---:|---|
 | ✅ | `ashby` | Vanta | 79 | ok |
 | ✅ | `bamboohr` | EMS Biomedical | 104 | ok |
-| ✅ | `greenhouse` | Databricks | 901 | ok |
+| ✅ | `greenhouse` | Databricks | 904 | ok |
 | ✅ | `lever` | Veeva | 892 | ok |
-| ✅ | `rippling` | Blackrock Neurotech | 7 | ok |
 | ⚠️ | `kula` | Precision Neuroscience | 0 | reachable but returned 0 (floor 1) |
+| ❌ | `rippling` | Blackrock Neurotech | 0 | [!] Rippling Blackrock Neurotech: 404 Client Error: Not Found for url: https://api.rippling.com/platform/api/ats/v1/board/blackrockneurotech/jobs |
 
 **✅ ok** — endpoint alive, response parsed, postings returned.  
 **⚠️ degraded** — reachable and parsed, but fewer postings than expected: an empty board, or a silent shape change worth checking.  
