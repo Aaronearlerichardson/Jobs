@@ -1,17 +1,17 @@
 # Board health
 
-_4/6 platforms healthy · checked 2026-11-01 13:33 UTC · [how this works](tools/check_boards.py)_
+_4/6 platforms healthy · checked 2026-11-03 14:26 UTC · [how this works](tools/check_boards.py)_
 
 One request per platform against a public sample board, with the keyword filter widened so the number reflects the BOARD rather than any particular search profile.
 
 | | Platform | Sample board | Postings | Detail |
 |---|---|---|---:|---|
-| ✅ | `ashby` | Vanta | 79 | ok |
+| ✅ | `ashby` | Vanta | 81 | ok |
 | ✅ | `bamboohr` | EMS Biomedical | 104 | ok |
-| ✅ | `greenhouse` | Databricks | 904 | ok |
-| ✅ | `lever` | Veeva | 892 | ok |
+| ✅ | `greenhouse` | Databricks | 912 | ok |
+| ✅ | `rippling` | Blackrock Neurotech | 6 | ok |
 | ⚠️ | `kula` | Precision Neuroscience | 0 | reachable but returned 0 (floor 1) |
-| ❌ | `rippling` | Blackrock Neurotech | 0 | [!] Rippling Blackrock Neurotech: 404 Client Error: Not Found for url: https://api.rippling.com/platform/api/ats/v1/board/blackrockneurotech/jobs |
+| ❌ | `lever` | Veeva | 0 | [!] Lever Veeva: HTTPSConnectionPool(host='api.lever.co', port=443): Read timed out. (read timeout=20) |
 
 **✅ ok** — endpoint alive, response parsed, postings returned.  
 **⚠️ degraded** — reachable and parsed, but fewer postings than expected: an empty board, or a silent shape change worth checking.  
