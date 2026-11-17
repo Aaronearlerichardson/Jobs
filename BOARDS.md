@@ -1,17 +1,17 @@
 # Board health
 
-_5/6 platforms healthy · checked 2026-11-16 15:58 UTC · [how this works](tools/check_boards.py)_
+_4/6 platforms healthy · checked 2026-11-17 16:10 UTC · [how this works](tools/check_boards.py)_
 
 One request per platform against a public sample board, with the keyword filter widened so the number reflects the BOARD rather than any particular search profile.
 
 | | Platform | Sample board | Postings | Detail |
 |---|---|---|---:|---|
 | ✅ | `ashby` | Vanta | 80 | ok |
-| ✅ | `bamboohr` | EMS Biomedical | 105 | ok |
-| ✅ | `greenhouse` | Databricks | 890 | ok |
-| ✅ | `lever` | Veeva | 859 | ok |
+| ✅ | `bamboohr` | EMS Biomedical | 106 | ok |
+| ✅ | `greenhouse` | Databricks | 895 | ok |
 | ✅ | `rippling` | Blackrock Neurotech | 6 | ok |
 | ⚠️ | `kula` | Precision Neuroscience | 0 | reachable but returned 0 (floor 1) |
+| ❌ | `lever` | Veeva | 0 | [!] Lever Veeva: HTTPSConnectionPool(host='api.lever.co', port=443): Read timed out. (read timeout=20) |
 
 **✅ ok** — endpoint alive, response parsed, postings returned.  
 **⚠️ degraded** — reachable and parsed, but fewer postings than expected: an empty board, or a silent shape change worth checking.  
