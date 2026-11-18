@@ -1,14 +1,14 @@
 # Board health
 
-_4/6 platforms healthy · checked 2026-11-17 16:10 UTC · [how this works](tools/check_boards.py)_
+_4/6 platforms healthy · checked 2026-11-18 15:47 UTC · [how this works](tools/check_boards.py)_
 
 One request per platform against a public sample board, with the keyword filter widened so the number reflects the BOARD rather than any particular search profile.
 
 | | Platform | Sample board | Postings | Detail |
 |---|---|---|---:|---|
-| ✅ | `ashby` | Vanta | 80 | ok |
-| ✅ | `bamboohr` | EMS Biomedical | 106 | ok |
-| ✅ | `greenhouse` | Databricks | 895 | ok |
+| ✅ | `ashby` | Vanta | 77 | ok |
+| ✅ | `bamboohr` | EMS Biomedical | 108 | ok |
+| ✅ | `greenhouse` | Databricks | 897 | ok |
 | ✅ | `rippling` | Blackrock Neurotech | 6 | ok |
 | ⚠️ | `kula` | Precision Neuroscience | 0 | reachable but returned 0 (floor 1) |
 | ❌ | `lever` | Veeva | 0 | [!] Lever Veeva: HTTPSConnectionPool(host='api.lever.co', port=443): Read timed out. (read timeout=20) |
