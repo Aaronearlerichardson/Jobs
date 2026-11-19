@@ -1,0 +1,21 @@
+[
+ {
+  "id": "hibob_liquidia_05ee8195-b8d",
+  "title": "Senior Clinical Trial Associate",
+  "url": "https://liquidia.careers.hibob.com/jobs",
+  "location": "USA - Hybrid",
+  "description": "Job description redacted for testing.",
+  "posted_at": "2026-07-17",
+  "company": "Acme"
+ },
+ {
+  "id": "hibob_liquidia_b501c19b-640",
+  "title": "Senior Director, Medical Writing",
+  "url": "https://liquidia.careers.hibob.com/jobs",
+  "location": "USA - Remote",
+  "description": "Another redacted description.",
+  "posted_at": "2026-08-21",
+  "remote_hint": "hibob:workspaceType",
+  "company": "Acme"
+ }
+]

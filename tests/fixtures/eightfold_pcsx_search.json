@@ -1,0 +1,77 @@
+{
+ "status": 200,
+ "error": {
+  "message": "",
+  "body": ""
+ },
+ "data": {
+  "positions": [
+   {
+    "id": 1443153815392,
+    "displayJobId": "332948",
+    "name": "Systems Engineer, Mid-level",
+    "locations": [
+     "Sterling, VA, US",
+     "Denver, CO, US"
+    ],
+    "standardizedLocations": [
+     "Sterling, VA, US",
+     "Denver, CO, US"
+    ],
+    "postedTs": 1791158400,
+    "solrScore": null,
+    "stars": 0,
+    "department": "Systems Engineering",
+    "creationTs": 1790726400,
+    "isHot": 0,
+    "workLocationOption": "onsite",
+    "locationFlexibility": null,
+    "atsJobId": "332948",
+    "positionUrl": "/careers/job/1443153815392"
+   },
+   {
+    "id": 1443153778442,
+    "displayJobId": "332843",
+    "name": "Network Engineer Intern - Summer 2027",
+    "locations": [
+     "High Point, NC, US"
+    ],
+    "standardizedLocations": [
+     "High Point, NC, US"
+    ],
+    "postedTs": 1791158400,
+    "solrScore": null,
+    "stars": 0,
+    "department": "Intern/Co-op - Technical",
+    "creationTs": 1790640000,
+    "isHot": 0,
+    "workLocationOption": "onsite",
+    "locationFlexibility": null,
+    "atsJobId": "332843",
+    "positionUrl": "/careers/job/1443153778442"
+   },
+   {
+    "id": 1443153816177,
+    "displayJobId": "333025",
+    "name": "Project Manager",
+    "locations": [
+     "Colorado Springs, CO, US"
+    ],
+    "standardizedLocations": [
+     "Colorado Springs, CO, US"
+    ],
+    "postedTs": 1791158400,
+    "solrScore": null,
+    "stars": 0,
+    "department": "Project Management",
+    "creationTs": 1790812800,
+    "isHot": 0,
+    "workLocationOption": "remote",
+    "locationFlexibility": null,
+    "atsJobId": "333025",
+    "positionUrl": "/careers/job/1443153816177"
+   }
+  ],
+  "count": 1758
+ }
+}

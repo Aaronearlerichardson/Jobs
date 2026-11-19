@@ -1,0 +1,178 @@
+{
+ "jobPostings": [
+  {
+   "clientNamespace": "aifire",
+   "jobBoardId": 4,
+   "jobPostingId": 44800,
+   "jobReqId": 2978,
+   "jobTitle": "Safety Specialist",
+   "jobDescription": "\nSafety Specialist\nAbout the Role\nWe are seeking a proactive and motivated Safety Specialist to join our Environmental Health &amp; Safety (EHS) team. This role is responsible for supporting the planning, implementation, and maintenance of safety initiatives within an assigned region as well as comp",
+   "hasVirtualLocation": false,
+   "postingStartTimestampUTC": "2026-10-05T04:00:00+00:00",
+   "postingExpiryTimestampUTC": null,
+   "isEvergreen": false,
+   "reapplyPeriodDays": null,
+   "postingLocations": [
+    {
+     "formattedAddress": "Salt Lake City, UT, USA",
+     "locationId": 15,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "UT",
+     "cityName": "Salt Lake City",
+     "coordinates": "lat:40.7605601;lng:-111.8881397"
+    },
+    {
+     "formattedAddress": "Albuquerque, NM, USA",
+     "locationId": 513,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "NM",
+     "cityName": "Albuquerque",
+     "coordinates": "lat:35.0843859;lng:-106.650422"
+    },
+    {
+     "formattedAddress": "Phoenix, AZ, USA",
+     "locationId": 75,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "AZ",
+     "cityName": "Phoenix",
+     "coordinates": "lat:33.4482948;lng:-112.0725488"
+    }
+   ],
+   "postingAppliedStatus": {
+    "jobPostingId": 44800,
+    "hasApplied": false,
+    "canApplyAgain": true
+   },
+   "searchScore": 0
+  },
+  {
+   "clientNamespace": "aifire",
+   "jobBoardId": 4,
+   "jobPostingId": 44791,
+   "jobReqId": 2385,
+   "jobTitle": "Fire Sprinkler Technician",
+   "jobDescription": "Become a Shared Owner of Impact Fire!!!\n$38.00 an hour to $50.00 an hour plus performance bonus potential!$10,000 sign-on bonus based on experience!\nRelocation Assistance is available for qualified candidates\nResponsible for inspection, installation, and repair of Wet, Dry, Pre-action, Deluge and Fo",
+   "hasVirtualLocation": false,
+   "postingStartTimestampUTC": "2026-10-05T04:00:00+00:00",
+   "postingExpiryTimestampUTC": null,
+   "isEvergreen": false,
+   "reapplyPeriodDays": null,
+   "postingLocations": [
+    {
+     "formattedAddress": "Enfield, CT 06082, USA",
+     "locationId": 451,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "CT",
+     "cityName": "Enfield",
+     "coordinates": "lat:42.0027181;lng:-72.5441445"
+    },
+    {
+     "formattedAddress": "Massachusetts, USA",
+     "locationId": 46,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "MA",
+     "cityName": null,
+     "coordinates": "lat:42.4072107;lng:-71.3824374"
+    },
+    {
+     "formattedAddress": "Suffield, CT, USA",
+     "locationId": 489,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "CT",
+     "cityName": "Suffield",
+     "coordinates": "lat:41.9915062;lng:-72.70177409999999"
+    },
+    {
+     "formattedAddress": "Manchester, CT, USA",
+     "locationId": 488,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "CT",
+     "cityName": "Manchester",
+     "coordinates": "lat:41.7759301;lng:-72.52150089999999"
+    },
+    {
+     "formattedAddress": "Connecticut, USA",
+     "locationId": 86,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "CT",
+     "cityName": null,
+     "coordinates": "lat:41.6032207;lng:-73.087749"
+    },
+    {
+     "formattedAddress": "Springfield, MA, USA",
+     "locationId": 59,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "MA",
+     "cityName": "Springfield",
+     "coordinates": "lat:42.1013104;lng:-72.58927419999999"
+    },
+    {
+     "formattedAddress": "Windsor, CT, USA",
+     "locationId": 487,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "CT",
+     "cityName": "Windsor",
+     "coordinates": "lat:41.8525984;lng:-72.64370219999999"
+    }
+   ],
+   "postingAppliedStatus": {
+    "jobPostingId": 44791,
+    "hasApplied": false,
+    "canApplyAgain": true
+   },
+   "searchScore": 0
+  },
+  {
+   "clientNamespace": "aifire",
+   "jobBoardId": 4,
+   "jobPostingId": 44786,
+   "jobReqId": 2722,
+   "jobTitle": "Fire Sprinkler Assistant Project Manager",
+   "jobDescription": "Launch your career in construction project management while learning a specialized, high-demand trade. Our Fire Sprinkler Projects Group is seeking an Assistant Project Manager who is motivated, detail-oriented, and eager to grow. In this hands-on role, you&rsquo;ll work alongside experienced Projec",
+   "hasVirtualLocation": false,
+   "postingStartTimestampUTC": "2026-10-05T04:00:00+00:00",
+   "postingExpiryTimestampUTC": null,
+   "isEvergreen": false,
+   "reapplyPeriodDays": null,
+   "postingLocations": [
+    {
+     "formattedAddress": "Massachusetts, USA",
+     "locationId": 46,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "MA",
+     "cityName": null,
+     "coordinates": "lat:42.4072107;lng:-71.3824374"
+    },
+    {
+     "formattedAddress": "Southborough, MA, USA",
+     "locationId": 250,
+     "locationType": 2,
+     "isoCountryCode": "US",
+     "stateCode": "MA",
+     "cityName": "Southborough",
+     "coordinates": "lat:42.3056501;lng:-71.5245087"
+    }
+   ],
+   "postingAppliedStatus": {
+    "jobPostingId": 44786,
+    "hasApplied": false,
+    "canApplyAgain": true
+   },
+   "searchScore": 0
+  }
+ ],
+ "maxCount": 189,
+ "offset": 0,
+ "count": 3
+}

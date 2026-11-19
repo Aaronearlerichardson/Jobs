@@ -21,9 +21,16 @@ webapp.build/
 webapp.dist/
 webapp.onefile-build/
 JobCrawlerUI.exe
+harvest.build/
+harvest.dist/
+harvest.onefile-build/
+JobHarvester.exe
 job-crawler-ui
 job-crawler-linux
 job-crawler-macos
+# Nuitka's --report=, which CI uploads as an artifact and a local build
+# writes into the checkout (*.report.xml is ~1 MB of module inventory).
+*.report.xml
 
 # Python cruft
 __pycache__/
@@ -49,6 +56,7 @@ data/
 .cache/
 .junie/
 coverage.xml
+coverage.json
 .coverage
 htmlcov/
 boards_status.json

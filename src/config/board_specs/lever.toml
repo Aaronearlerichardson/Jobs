@@ -1,0 +1,40 @@
+sweep = true
+prunable = true
+guess = true
+
+[[detect]]
+host = "lever.co"
+re = ['(?i)jobs\.lever\.co/([a-z0-9_-]+)']
+
+[canary]
+name = "Veeva"
+handle = "veeva"
+
+[discovery]
+search = [[3, "jobs.lever.co"]]
+hint = [[3, "lever"]]
+
+[job_ref]
+re = 'lever\.co/([A-Za-z0-9_.-]+)/([0-9a-fA-F-]{20,})'
+
+[listing]
+url = "https://api.lever.co/v0/postings/{slug}?mode=json"
+
+[listing.fields]
+id = { format = "lv_{slug}_{id}" }
+title = "text"
+url = "hostedUrl"
+location = { merge = { primary = "categories.location", extras = { first = [
+    "categories.allLocations",
+    "allLocations"
+] } } }
+description = "descriptionPlain"
+posted_at = "createdAt"
+remote_hint = { const = "lever:workplaceType", when = { eq = ["workplaceType", "remote"] } }
+department = "categories.team"
+
+[detail]
+url = "https://api.lever.co/v0/postings/{slug}/{jid}"
+
+[detail.fields]
+description = "descriptionPlain"

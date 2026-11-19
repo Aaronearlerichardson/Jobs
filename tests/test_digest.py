@@ -1,0 +1,446 @@
+"""The emailed digest is a push, not a page: it must carry only what is new
+enough and good enough to interrupt someone, and must stay silent otherwise.
+
+Offline by construction — `_send_gmail` is monkeypatched in every test, so no
+SMTP socket is ever opened.
+"""
+
+import os
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from src import config
+import src.digest.render as digest
+import src.match.locality as locality
+from src.ops import maintenance as ops
+import src.store as store
+
+
+TODAY = datetime.now().strftime("%Y-%m-%d")
+YESTERDAY = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+@pytest.fixture
+def track(local_track):
+    """The local track with a known digest floor, so the assertions do not
+    depend on whichever profile is loaded."""
+    return local_track.model_copy(update={"digest_min_fit": 0.4, "notify": False})
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    """Capture what would have been emailed. Returns the (subject, plain,
+    html) list — empty means nothing was sent."""
+    out = []
+
+    def _fake(subject, plain, html):
+        out.append((subject, plain, html))
+        return True
+
+    monkeypatch.setattr(digest, "_send_gmail", _fake)
+    return out
+
+
+@pytest.fixture
+def hometown(monkeypatch):
+    """A locality nobody's profile configures, so the apply-band tests do
+    not depend on which profile.toml is loaded."""
+    monkeypatch.setattr(locality, "NC_RE", re.compile(r"\bHometown\b", re.I))
+    return "Hometown, ZZ"
+
+
+@pytest.fixture
+def report_dir():
+    """Where written digests land: the tmp dir conftest's autouse fixture
+    points config.REPORT_DIR at."""
+    return config.REPORT_DIR
+
+
+def row(job_id, fit=0.9, first_seen=TODAY, **over):
+    r = {"job_id": job_id, "company_name": "Acme", "title": f"Role {job_id}",
+         "url": f"https://acme.io/{job_id}", "location": "Anywhere, XX",
+         "resume_fit_score": fit, "first_seen": first_seen,
+         "fit_reason": "reason"}
+    r.update(over)
+    return r
+
+
+def followup(job_id, due=TODAY, **over):
+    r = {"job_id": job_id, "company_name": "Acme", "title": f"Chase {job_id}",
+         "url": f"https://acme.io/{job_id}", "followup_at": due,
+         "disposition": "applied", "contact": "Recruiter"}
+    r.update(over)
+    return r
+
+
+class TestApplyBand:
+    """The mid-fit local band is where the interviews came from, so it has
+    to survive every gate that would hide it: the fit floor, the geo
+    bucket, and the user's own decisions."""
+
+    def test_keeps_only_local_undecided_open_rows_in_band(self, hometown):
+        ranked = [
+            row("in", fit=0.55, location=hometown),
+            row("edge_low", fit=0.40, location=hometown),
+            row("edge_high", fit=0.70, location=hometown),
+            row("too_good", fit=0.85, location=hometown),
+            row("too_weak", fit=0.39, location=hometown),
+            row("remote", fit=0.55, location="Remote - US"),
+            row("elsewhere", fit=0.55),
+            row("saved", fit=0.55, location=hometown, disposition="saved"),
+            row("closed", fit=0.55, location=hometown, status="closed"),
+            row("unscored", fit=None, location=hometown),
+        ]
+        picked = [j["job_id"] for j in digest.apply_band_rows(ranked)]
+        assert picked == ["in", "edge_low"]
+
+    def test_sorted_best_fit_first_and_capped(self, hometown):
+        ranked = [row(f"j{i}", fit=0.40 + i * 0.02, location=hometown)
+                  for i in range(14)]
+        picked = digest.apply_band_rows(ranked)
+        assert len(picked) == digest.APPLY_BAND_LIMIT
+        fits = [j["resume_fit_score"] for j in picked]
+        assert fits == sorted(fits, reverse=True)
+        assert picked[0]["job_id"] == "j13"
+
+    def test_leaves_out_rows_that_repeat_an_application(self, hometown):
+        ranked = [row("repost", fit=0.55, location=hometown),
+                  row("level", fit=0.50, location=hometown),
+                  row("fresh", fit=0.45, location=hometown)]
+        ranked[0].update(company_name="Acme", title="Algorithm Engineer")
+        ranked[1].update(company_name="Acme", title="Senior Algorithm Engineer")
+        ranked[2].update(company_name="Acme", title="Data Engineer")
+        look = store.prior_lookup([{"job_id": "done", "company_name": "Acme",
+                                    "title": "Algorithm Engineer",
+                                    "disposition": "applied"}])
+        assert [j["job_id"] for j in digest.apply_band_rows(ranked, prior=look)] == ["fresh"]
+
+    def test_empty_input_is_fine(self, hometown):
+        assert digest.apply_band_rows(None) == []
+        assert digest.apply_band_rows([]) == []
+
+
+class TestWriteRankedDigest:
+    def test_apply_band_section_follows_the_pipeline(self, track, hometown,
+                                                     report_dir):
+        pipeline = [{"disposition": "applied", "company_name": "Acme",
+                     "title": "Applied Role", "url": "https://acme.io/p",
+                     "status": "open"}]
+        ranked = [row("top", fit=0.9, location=hometown),
+                  row("band", fit=0.5, location=hometown)]
+        text = digest.write_ranked_digest(
+            ranked, track, pipeline=pipeline).read_text(encoding="utf-8")
+        assert text.index("## Your pipeline") < text.index("## Apply band")
+        band = text[text.index("## Apply band"):text.index("**2 open job(s)**")]
+        assert "Role band" in band and "Role top" not in band
+
+    def test_followups_section_lists_what_is_due(self, track, report_dir):
+        text = digest.write_ranked_digest(
+            [], track, followups=[followup("f1")]).read_text(encoding="utf-8")
+        assert "## Follow-ups due" in text
+        assert "Chase f1" in text and "Recruiter" in text
+
+    def test_sections_are_skipped_when_empty(self, track, hometown, report_dir):
+        text = digest.write_ranked_digest(
+            [row("top", fit=0.9, location=hometown)], track
+        ).read_text(encoding="utf-8")
+        assert "## Apply band" not in text
+        assert "## Follow-ups due" not in text
+
+    def test_a_collapsed_row_shows_its_similar_postings_count(
+            self, track, report_dir):
+        # store.ranked_jobs(collapse=True) stamps a survivor with dup_count;
+        # the main table must surface it, same as the apply band would if
+        # the survivor scored inside that band.
+        solo = row("solo", fit=0.9)
+        grouped = row("grouped", fit=0.6, dup_count=3)
+        text = digest.write_ranked_digest(
+            [solo, grouped], track).read_text(encoding="utf-8")
+        assert "[Role grouped](https://acme.io/grouped) (3 similar postings)" in text
+        assert "[Role solo](https://acme.io/solo) (3 similar postings)" not in text
+        assert "(3 similar postings)" not in text[:text.index("Role grouped")]
+
+
+class TestNewRankedRows:
+    def test_keeps_only_rows_first_seen_since(self, track):
+        ranked = [row("fresh"), row("stale", first_seen=YESTERDAY)]
+        picked = [j["job_id"] for j in digest.new_ranked_rows(ranked, track)]
+        assert picked == ["fresh"]
+
+    def test_new_since_can_reach_back(self, track):
+        ranked = [row("fresh"), row("stale", first_seen=YESTERDAY)]
+        picked = [j["job_id"] for j in
+                  digest.new_ranked_rows(ranked, track, new_since=YESTERDAY)]
+        assert picked == ["fresh", "stale"]
+
+    def test_drops_rows_under_the_floor(self, track):
+        ranked = [row("good", fit=0.41), row("weak", fit=0.39)]
+        picked = [j["job_id"] for j in digest.new_ranked_rows(ranked, track)]
+        assert picked == ["good"]
+
+    def test_unscored_rows_never_qualify(self, track):
+        assert digest.new_ranked_rows([row("null", fit=None)], track) == []
+
+
+class TestSendRankedDigest:
+    def test_sends_only_the_new_rows(self, track, sent):
+        ranked = [row("fresh"), row("stale", first_seen=YESTERDAY),
+                  row("weak", fit=0.1)]
+        assert digest.send_ranked_digest(ranked, track) is True
+        subject, plain, html = sent[0]
+        assert "1 new match(es)" in subject
+        assert track.label.upper() in subject
+        assert "Role fresh" in plain and "Role fresh" in html
+        assert "Role stale" not in plain
+        assert "Role weak" not in plain
+
+    def test_silent_when_nothing_is_new(self, track, sent, capsys):
+        assert digest.send_ranked_digest(
+            [row("stale", first_seen=YESTERDAY)], track) is False
+        assert sent == []
+        assert "skipping email" in capsys.readouterr().out
+
+    def test_watch_hits_alone_still_send(self, track, sent):
+        hits = [({"name": "Watched Co"},
+                 {"title": "Any Role", "url": "https://w.co/1",
+                  "location": "Anywhere"}, False)]
+        assert digest.send_ranked_digest([], track, watch_hits=hits) is True
+        _, plain, _ = sent[0]
+        assert "Watched Co" in plain
+        assert "0 new job(s)" in plain
+
+    def test_announce_emails_a_fresh_watch_hit_without_a_ranked_row(self, track, sent):
+        hit = ({"name": "Watched Co"},
+               {"title": "Any Role", "url": "https://w.co/1", "location": "Anywhere",
+                "first_seen": "2026-10-05T13:00:00"}, False)
+        t = track.model_copy(update={"email": True})
+        since = "2026-10-05T12:00:00"
+        old = (hit[0], {**hit[1], "first_seen": "2026-10-01T00:00:00"}, False)
+        assert digest.announce([], t, since, watch_hits=[old]) == 0 and not sent
+        assert digest.announce([], t, since, watch_hits=[hit]) == 1
+        assert "Watched Co" in sent[0][1]
+
+    def test_pipeline_section_carries_only_fresh_closures(self, track, sent):
+        pipeline = [
+            {"disposition": "applied", "company_name": "Acme",
+             "title": "Closed Today", "url": "https://acme.io/a",
+             "status": "closed", "closed_at": TODAY},
+            {"disposition": "applied", "company_name": "Acme",
+             "title": "Closed Before", "url": "https://acme.io/b",
+             "status": "closed", "closed_at": YESTERDAY},
+            {"disposition": "saved", "company_name": "Acme",
+             "title": "Still Open", "url": "https://acme.io/c",
+             "status": "open", "closed_at": None},
+        ]
+        digest.send_ranked_digest([row("fresh")], track, pipeline=pipeline)
+        _, plain, _ = sent[0]
+        assert "Closed Today" in plain
+        assert "Closed Before" not in plain
+        assert "Still Open" not in plain
+
+    def test_apply_band_rides_along_with_new_rows(self, track, sent, hometown):
+        ranked = [row("fresh", fit=0.9, location=hometown),
+                  row("band", fit=0.5, first_seen=YESTERDAY, location=hometown)]
+        assert digest.send_ranked_digest(ranked, track) is True
+        _, plain, html = sent[0]
+        assert "## Apply band" in plain and "Apply band" in html
+        assert "Role band" in plain and "Role band" in html
+        # The band row is not new, so it stays out of the new-match table.
+        assert "1 new match(es)" in sent[0][0]
+
+    def test_followups_ride_along_with_new_rows(self, track, sent):
+        assert digest.send_ranked_digest(
+            [row("fresh")], track, followups=[followup("f1")]) is True
+        _, plain, html = sent[0]
+        assert "## Follow-ups due" in plain and "Chase f1" in plain
+        assert "Chase f1" in html
+
+    def test_followups_alone_do_not_trigger_a_send(self, track, sent):
+        assert digest.send_ranked_digest(
+            [], track, followups=[followup("f1")]) is False
+        assert sent == []
+
+    def test_reports_failure_when_the_send_fails(self, track, monkeypatch):
+        monkeypatch.setattr(digest, "_send_gmail",
+                            lambda *a, **k: False)
+        assert digest.send_ranked_digest([row("fresh")], track) is False
+
+
+class TestToast:
+    def test_off_by_default(self, track):
+        assert digest.toast(track, 3, "x.md") is False
+
+    def test_no_toast_without_new_rows(self, track):
+        assert digest.toast(track.model_copy(update={"notify": True}), 0, "x.md") is False
+
+    def test_missing_package_degrades_silently(self, track, monkeypatch):
+        import builtins
+        real_import = builtins.__import__
+
+        def _blocked(name, *a, **k):
+            if name.startswith("winotify"):
+                raise ImportError("no winotify")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", _blocked)
+        assert digest.toast(track.model_copy(update={"notify": True}), 3, "x.md") is False
+
+
+class TestTrackKeys:
+    def test_engine_defaults_expose_the_digest_keys(self, cfg):
+        for t in cfg.UI_TRACKS.values():
+            assert isinstance(t.digest_min_fit, float)
+            assert isinstance(t.notify, bool)
+
+    def test_profile_can_override_the_floor(self, cfg):
+        built = cfg._build_ui_tracks(
+            {"x": {"engine": "local", "digest_min_fit": 0.75, "notify": True}})
+        assert built["x"].digest_min_fit == 0.75
+        assert built["x"].notify is True
+
+
+# --------------------------------------------------------------------------- #
+#  Golden renders
+# --------------------------------------------------------------------------- #
+#
+# Every digest shape rendered from one fixed input set under a frozen clock,
+# compared byte-for-byte (after newline normalisation) with the files under
+# tests/fixtures/digest/. Regenerate them ONLY for a deliberate format change:
+#
+#   DIGEST_GOLDEN_REGEN=1 python -m pytest tests/test_digest.py -k Golden
+#
+# The track's id/label are overridden so the renders do not depend on which
+# profile.toml is loaded.
+
+GOLDEN_DIR = Path(__file__).parent / "fixtures" / "digest"
+GOLDEN_TODAY = "2026-09-10"
+
+
+class _FrozenClock(datetime):
+    """datetime with `now()` pinned to GOLDEN_TODAY; everything else inherited."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 9, 10, 7, 30, 0)
+
+
+@pytest.fixture
+def golden_clock(monkeypatch):
+    monkeypatch.setattr(digest, "datetime", _FrozenClock)
+    return GOLDEN_TODAY
+
+
+@pytest.fixture
+def golden_track(track):
+    return track.model_copy(update={"id": "golden", "label": "Golden"})
+
+
+def golden_inputs(hometown):
+    """One input set that exercises every branch of every section: NEW /
+    aged / stale / undated rows, an unscored row, a saved row (in the
+    ranking, out of the band), open and closed pipeline rows, a follow-up
+    with and without a contact, a scored and an unscored watch hit."""
+    T = GOLDEN_TODAY
+    ranked = [
+        row("r1", fit=0.91, location=hometown, first_seen="2026-09-01",
+            posted_at="2026-09-04", combined_score=0.8, mission_tier="A"),
+        row("r2", fit=0.55, location=hometown, first_seen=T,
+            posted_at="2026-07-01"),
+        row("r3", fit=None, location="Remote - US", first_seen=T,
+            fit_reason=""),
+        row("r4", fit=0.62, location=hometown, first_seen="2026-08-01",
+            posted_at="2026-07-01"),
+        row("r5", fit=0.45, location=hometown, first_seen=T,
+            disposition="saved"),
+    ]
+    pipeline = [
+        {"disposition": "applied", "disposition_at": "2026-09-02T10:00",
+         "company_name": "Acme", "title": "Applied Role",
+         "url": "https://acme.io/p1", "status": "open",
+         "disposition_note": "referral"},
+        {"disposition": "interviewing", "disposition_at": "2026-08-20",
+         "company_name": "Beta", "title": "Closed Today",
+         "url": "https://beta.io/p2", "status": "closed", "closed_at": T},
+        {"disposition": "applied", "disposition_at": "2026-08-01",
+         "company_name": "Gamma", "title": "Closed Before",
+         "url": "https://gamma.io/p3", "status": "closed",
+         "closed_at": "2026-09-09"},
+    ]
+    followups = [followup("f1", due=T),
+                 followup("f2", due="2026-09-08", contact=None)]
+    watch_hits = [
+        ({"name": "Watched Co"},
+         {"title": "Watched Role", "url": "https://w.co/1",
+          "location": hometown}, True),
+        ({"name": "Listed Co"},
+         {"title": "Listed Role", "url": "https://l.co/2",
+          "location": None}, False),
+    ]
+    return ranked, pipeline, followups, watch_hits
+
+
+def _check_golden(name, text):
+    path = GOLDEN_DIR / name
+    text = text.replace("\r\n", "\n")
+    if os.environ.get("DIGEST_GOLDEN_REGEN"):
+        path.write_text(text, encoding="utf-8", newline="\n")
+    assert text == path.read_text(encoding="utf-8"), f"{name} drifted"
+
+
+class TestGolden:
+    def test_written_ranked_digest(self, golden_track, hometown, report_dir,
+                                   golden_clock):
+        ranked, pipeline, followups, hits = golden_inputs(hometown)
+        path = digest.write_ranked_digest(
+            ranked, golden_track, watch_hits=hits, pipeline=pipeline,
+            followups=followups)
+        assert path == report_dir / f"golden_{golden_clock}.md"
+        _check_golden("ranked.md", path.read_text(encoding="utf-8"))
+
+    def test_written_ranked_digest_bare(self, golden_track, hometown,
+                                        report_dir, golden_clock):
+        path = digest.write_ranked_digest([], golden_track)
+        _check_golden("ranked_bare.md", path.read_text(encoding="utf-8"))
+
+    def test_ranked_email(self, golden_track, hometown, sent, golden_clock):
+        ranked, pipeline, followups, hits = golden_inputs(hometown)
+        assert digest.send_ranked_digest(
+            ranked, golden_track, watch_hits=hits, pipeline=pipeline,
+            followups=followups) is True
+        subject, plain, html = sent[0]
+        assert subject == f"[GOLDEN] 2 new match(es) - {golden_clock}"
+        _check_golden("ranked_email.md", plain)
+        _check_golden("ranked_email.html", html)
+
+
+class TestEveryDigestWriterCarriesTheTriageFunnel:
+    """maintenance.rewrite_digest is the one digest writer (status sync,
+    deep verify, the harvest pass and the crawl)."""
+
+    @staticmethod
+    def _text(report_dir, t):
+        [path] = report_dir.glob(f"{t.id}_*.md")
+        return path.read_text(encoding="utf-8")
+
+    def test_rewrite_digest_writes_the_triage_section(
+            self, db, company, add_job, local_track, report_dir, capsys):
+        job_id = add_job("gh_acme_1", fit=0.9, track=local_track.track)
+        store.record_triage(db, job_id, "ok", "local-tech=ok")
+        store.upsert_job(db, {"job_id": "gh_acme_2", "title": "Dropped"})
+        store.record_triage(db, "gh_acme_2", "geo", "local-tech=geo")
+
+        ranked = ops.rewrite_digest(db, local_track, top_n=1, heading="top:")
+
+        assert [j["job_id"] for j in ranked] == [job_id]
+        assert "top:" in capsys.readouterr().out
+        text = self._text(report_dir, local_track)
+        assert "## Harvest triage, last 7 days" in text
+        assert "| ok " in text and "| geo " in text
+
+    def test_no_triage_rows_means_no_section(self, db, local_track,
+                                             report_dir):
+        assert ops.rewrite_digest(db, local_track) == []
+        assert "Harvest triage" not in self._text(report_dir, local_track)

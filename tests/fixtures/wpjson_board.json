@@ -1,0 +1,39 @@
+{
+ "max_num_pages": 1,
+ "posts": [
+  {
+   "ID": 4100,
+   "post_title": "Metals Post Processing Technician, 2nd Shift",
+   "post_date": "2026-08-25 22:25:15",
+   "permalink": "https://www.restor3d.com/career/metals-post-processing-technician-2nd-shift/",
+   "link": {
+    "title": "Learn More",
+    "url": "https://j.brt.mv/PortalViewRequirement.do?reqGK=27781034",
+    "target": "_blank"
+   },
+   "location": {
+    "city": "Durham",
+    "state": "North Carolina",
+    "state_abbreviation": "",
+    "postal_code": "27709"
+   }
+  },
+  {
+   "ID": 4094,
+   "post_title": "Quality Assurance and Quality Control Inspector",
+   "post_date": "2026-08-10 22:25:14",
+   "permalink": "https://www.restor3d.com/career/quality-assurance-and-quality-control-inspector/",
+   "link": {
+    "title": "Learn More",
+    "url": "https://j.brt.mv/PortalViewRequirement.do?reqGK=27780539",
+    "target": "_blank"
+   },
+   "location": {
+    "city": "Durham",
+    "state": "North Carolina",
+    "state_abbreviation": "",
+    "postal_code": "27709"
+   }
+  }
+ ]
+}

@@ -1,0 +1,138 @@
+"""Config-driven posting gates.
+
+The last two pieces of track behavior that used to live as code in the track
+modules — the technical-title regex and the exclude tables — resolved
+per-track from configuration instead:
+
+  * `is_technical_role(title, t)` compiles `t.tech_title_regex`
+    (profile.toml [tracks.*], engine defaults in
+    src/config/profile_schema.py): the cheap positive gate that keeps
+    nurses/sales/admin titles away from any LLM scoring spend.
+  * `exclude_reason(..., track_id=...)` reads the [exclude.<track_id>]
+    tables (config.EXCLUDE_BY_TRACK) at call time — no hardcoded track key,
+    so any user-defined track gets its own exclusion vocabulary. An absent
+    or empty table makes the gate a no-op.
+
+There are two exclusion gates in this package, and they stay two on
+purpose. `filters._excluded` is the PROFILE-wide one: fragments from
+[exclude] phrases/title_phrases, matched as plain substrings against text
+`is_relevant` has already scrubbed, answering yes/no. `exclude_reason`
+here is the PER-TRACK one: single terms from [exclude.<id>], matched on
+word boundaries (so "scribe" does not fire inside "describe"), scrubbing
+only for the defense stage, and answering WITH the term that did it —
+because a posting dropped by a track needs to be debuggable in
+triage_detail, while a posting that simply is not relevant does not.
+
+Merging them would mean picking one of each pair of answers and silently
+changing which postings survive. What they do share is the matcher:
+every vocabulary walk in both goes through `filters.first_hit`.
+"""
+
+from __future__ import annotations
+
+import re
+from functools import lru_cache
+
+from src import config
+from src.config import RuntimeTrack
+from src.config.profile_schema import TrackExclude
+from src.match.filters import (BOUNDED, SHORT_EXCLUDE, first_hit,
+                               scrub_boilerplate, token_in)
+
+
+@lru_cache(maxsize=32)
+def _title_re(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern, re.I)
+
+
+def is_technical_role(title: str | None, t: RuntimeTrack) -> bool:
+    """Cheap positive title gate for track `t` (a config.UI_TRACKS entry)."""
+    return bool(_title_re(t.tech_title_regex).search(title or ""))
+
+
+@lru_cache(maxsize=32)
+def _exclude_tables(track_id: str) -> dict[str, tuple[str, ...]]:
+    """The [exclude.<track_id>] vocabulary, shaped for exclude_reason().
+    Cached per track id — EXCLUDE_BY_TRACK is a load-time constant."""
+    exc = getattr(config, "EXCLUDE_BY_TRACK", {}).get(track_id) or TrackExclude()
+    return {name: tuple(getattr(exc, name)) for name in TrackExclude.model_fields}
+
+
+def exclude_reason(title: str | None, description: str = "", allow_defense: bool = False, *,
+                   track_id: str) -> str | None:
+    """Return a short reason string if the posting must be dropped, else
+    None. Vocabulary comes from profile.toml [exclude.<track_id>].
+
+    `allow_defense` skips the defense/military-radar exclusion ONLY —
+    role-quality excludes (coordinator/scribe/data-entry) always apply. Set
+    for WATCHED companies: watching a defense-adjacent employer means "I
+    want its technical roles anyway".
+
+    clinical_titles/clinical_markers: a title that names a hands-on
+    clinical-service occupation ("CT Technologist", "Medical Lab
+    Scientist", "Nurse Practitioner...") passes the free tech_title_regex
+    gate on a word it shares with engineering roles by coincidence
+    ("technologist", "scientist", "quality" are all in the engine default)
+    and would otherwise pay for hydration and a Claude fit call for
+    nothing. clinical_titles is title-only (BOUNDED), like title_tokens,
+    because the occupation is what the title announces; clinical_markers
+    is checked against the fuller `text` (title + description) so a hit
+    anywhere spares the drop — "Research Technician" and "Clinical Data
+    Scientist" keep scoring even though "technician" / "nurse" alone would
+    otherwise match, and a description that names the research/data/
+    engineering angle later still saves a title that looked clinical-only
+    at harvest time.
+
+    Notes:
+        Added 2026-09-18: those titles were 88 of 113 scored rows in that
+        day's Duke Health pass, every one scored 0.00-0.05.
+    """
+    tables = _exclude_tables(track_id)
+    title_l = (title or "").lower()
+    text = f"{title or ''} {description}".lower()
+
+    # BOUNDED so "scribe" doesn't fire on "describe", "data entry" doesn't
+    # fire mid-word. These used to be three hand-written `\b...\b` regexes
+    # built per call; an exclude phrase that ended in punctuation could
+    # therefore never match at all, since `\b` has nothing to anchor to.
+    hit = first_hit(tables["role_phrases"], text, BOUNDED)
+    if hit:
+        return f"role: {hit}"
+    hit = first_hit(tables["title_tokens"], title_l, BOUNDED)
+    if hit:
+        return f"role-title: {hit.upper()}"
+
+    hit = first_hit(tables["clinical_titles"], title_l, BOUNDED)
+    if hit and not first_hit(tables["clinical_markers"], text, BOUNDED):
+        return f"clinical-service: {hit}"
+
+    if not allow_defense and (tables["defense_strong"]
+                              or tables["defense_weak"]):
+        # EEO/benefits boilerplate scrub first: "military or veteran status"
+        # must never read as a defense signal. STRONG terms are unambiguous
+        # (one hit excludes); WEAK terms are words health postings use
+        # innocently, so TWO DISTINCT weak hits are required. SHORT_EXCLUDE
+        # rather than BOUNDED: these are plural-prone nouns, so "weapon"
+        # must still reach "weapons".
+        scrubbed = scrub_boilerplate(text)
+        hit = first_hit(tables["defense_strong"], scrubbed, SHORT_EXCLUDE)
+        if hit:
+            return f"defense: {hit}"
+        weak = [d for d in tables["defense_weak"]
+                if token_in(d, scrubbed, SHORT_EXCLUDE)]
+        if len(weak) >= 2:
+            return f"defense: {'+'.join(weak[:3])}"
+        # Military RF-radar: only exclude "radar" in a defense context
+        # ("rf" is a bounded token, so "RF/microwave" counts and "perf"
+        # does not). Not from the profile: this is the shape of the false
+        # positive (radar appears in automotive, weather and imaging
+        # postings), not a vocabulary choice.
+        if "radar" in scrubbed and first_hit(
+                ("military", "defense", "defence", "weapon", "warfare", "missile", "rf"),
+                scrubbed, SHORT_EXCLUDE):
+            return "defense: military radar"
+
+    hit = first_hit(tables["nonclinical"], text, BOUNDED)
+    if hit:
+        return f"non-clinical: {hit}"
+    return None

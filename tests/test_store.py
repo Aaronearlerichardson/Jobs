@@ -1,7 +1,46 @@
 """The SQLite store: schema, company/job upserts, the open/closed
-lifecycle, dispositions, and track membership."""
+lifecycle, dispositions, crawl dormancy, and track membership."""
 
-import core.store as store
+import json
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import get_args, get_type_hints
+
+import pytest
+from pydantic import ValidationError
+
+from src import config
+from src.ats.board import BOARDS
+import src.match.locality as locality
+import src.store as store
+from src.rows import (BoardCoords, CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn, JobRow,
+                      RankedJob)
+from src.store.employers import write_mission
+from src.store.migrate import MIGRATIONS_DIR, _statements, migrate
+from src.claude import fit as claude_fit
+from src.claude.fit import disposition_examples_block
+
+
+def _held_types(hint):
+    """The classes an annotation admits, `None` aside."""
+    return [t for t in get_args(hint) or (hint,) if t is not type(None)]
+
+
+def _sample_row(model):
+    """One value of each column's type: a row that sets every key `model` names."""
+    sample = {int: 3, float: 0.5, str: "x", bool: True}
+    return {col: sample[_held_types(hint)[0]] for col, hint in get_type_hints(model).items()}
+
+
+def _restore_dormancy(conn):
+    """Give a current store the columns migration 0013 dropped, so a test
+    can rewind it to an older version and replay the migrations."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(companies)")}
+    for col in ("crawl_state", "empty_streak", "last_crawled_at", "next_crawl_at"):
+        if col not in have:
+            conn.execute(f"ALTER TABLE companies ADD COLUMN {col} TEXT")
 
 
 class TestSchema:
@@ -12,37 +51,506 @@ class TestSchema:
     def test_jobs_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
         assert {"resume_fit_score", "track", "remote_eligible",
-                "neural_signal"} <= cols
+                "anchor_signal"} <= cols
 
-    def test_migrations_are_idempotent(self, db):
-        # A second connect() over the same schema must not raise.
-        store._ensure_columns(db)
+    def test_a_fresh_store_is_stamped_with_the_latest_migration(self, db):
+        latest = len(list(MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")))
+        assert db.execute("PRAGMA user_version").fetchone()[0] == latest >= 1
+
+    def test_the_packaged_build_ships_the_migrations(self):
+        # The .sql files are data Nuitka cannot infer from imports.
+        build = (Path(__file__).parent.parent / "build_app.py").read_text(encoding="utf-8")
+        assert '("src/store/migrations", "src/store/migrations")' in build
+
+    def test_open_jobs_reads_a_missing_status_as_open(self, db, company, add_job):
+        for job_id, status in (("gh_acme_open", "open"), ("gh_acme_closed", "closed"),
+                               ("gh_acme_null", None)):
+            add_job(job_id)
+            db.execute("UPDATE jobs SET status=? WHERE job_id=?", (status, job_id))
+        assert {r[0] for r in db.execute("SELECT job_id FROM open_jobs")} \
+            == {"gh_acme_open", "gh_acme_null"}
+
+    def test_company_open_stats_counts_open_rows_and_their_best_fit(
+            self, db, company, add_job):
+        add_job("gh_acme_1", fit=0.4)
+        add_job("gh_acme_2", fit=0.9)
+        add_job("gh_acme_3", fit=0.99)
+        store.set_job_status(db, "gh_acme_3", "closed")
+        assert tuple(db.execute("SELECT open_jobs, best_fit FROM company_open_stats "
+                                "WHERE company_id=?", (company,)).fetchone()) == (2, 0.9)
+
+    @pytest.mark.parametrize("query", [
+        "SELECT * FROM jobs WHERE disposition IS NOT NULL ORDER BY disposition_at DESC",
+        "SELECT * FROM jobs WHERE followup_at <= 'x' AND disposition IN ('applied')",
+        "SELECT company_id, open_jobs, best_fit FROM company_open_stats",
+        "SELECT job_id FROM open_jobs WHERE COALESCE(last_seen, first_seen, '') < 'x'",
+    ])
+    def test_the_open_and_disposition_reads_use_their_partial_indexes(self, db, query):
+        plan = " ".join(str(r[3]) for r in db.execute("EXPLAIN QUERY PLAN " + query))
+        assert "USING INDEX ix_jobs_" in plan, plan
+
+    def test_a_version_1_store_gains_the_views_and_indexes(self, tmp_path):
+        path = tmp_path / "v1.db"
+        conn = store.connect(path)
+        _restore_dormancy(conn)
+        for stmt in ("DROP VIEW company_open_stats", "DROP VIEW open_jobs",
+                     "DROP INDEX ix_jobs_disposition", "DROP INDEX ix_jobs_open_company",
+                     "DROP INDEX ix_jobs_open_seen", "PRAGMA user_version = 1"):
+            conn.execute(stmt)
+        conn.commit()
+        conn.close()
+        conn = store.connect(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] >= 2
+        assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")} \
+            == {"open_jobs", "company_open_stats", "board_employers", "live_jobs",
+                "companies_effective"}
+
+    def test_a_version_2_store_gets_its_employers_from_the_tag_and_replays_safely(
+            self, tmp_path):
+        path = tmp_path / "v2.db"
+        conn = store.connect(path)
+        _restore_dormancy(conn)
+        for stmt in ("DROP VIEW companies_effective", "DROP TRIGGER companies_employer_moved",
+                     "ALTER TABLE companies DROP COLUMN review",
+                     "ALTER TABLE companies DROP COLUMN watch",
+                     "DROP TRIGGER companies_employer_new", "DROP TRIGGER companies_employer_gone",
+                     "DROP TRIGGER companies_employer_renamed", "DROP VIEW board_employers",
+                     "DROP VIEW live_jobs", "DROP INDEX ix_companies_employer",
+                     "ALTER TABLE companies DROP COLUMN employer_id", "DROP TABLE employers",
+                     "DROP INDEX ix_jobs_live_stats",
+                     "DROP INDEX ix_jobs_dup", "ALTER TABLE jobs DROP COLUMN dup_of",
+                     "PRAGMA user_version = 2"):
+            conn.execute(stmt)
+        for name, held in (("Small", "local,employer:x"), ("Big", "employer:x"), ("Solo", None)):
+            conn.execute("INSERT INTO companies (name, tags) VALUES (?, ?)", (name, held))
+        conn.executemany("INSERT INTO jobs (job_id, company_id, company_name) VALUES (?, ?, ?)",
+                         [("s1", 1, "Small"), ("b1", 2, "Big"), ("b2", 2, "Big")])
+        conn.commit()
+        conn.close()
+        for _ in range(2):          # the second pass replays a store already migrated
+            conn = store.connect(path)
+            assert [tuple(r) for r in conn.execute(
+                "SELECT c.name, e.name, c.tags FROM companies c "
+                "JOIN employers e ON e.id = c.employer_id ORDER BY c.id")]                 == [("Small", "Big", "local"), ("Big", "Big", None), ("Solo", "Solo", None)]
+            assert conn.execute("SELECT company_name FROM jobs WHERE job_id='s1'").fetchone()[0] == "Big"
+            assert conn.execute("SELECT COUNT(*) FROM employers").fetchone()[0] == 2
+            _restore_dormancy(conn)
+            conn.execute("PRAGMA user_version = 2")
+            conn.commit()
+            conn.close()
+
+    def test_a_version_4_store_gets_employer_facts_and_keeps_what_differs_per_board(
+            self, tmp_path):
+        path = tmp_path / "v4.db"
+        conn = store.connect(path)
+        _restore_dormancy(conn)
+        for stmt in ("DROP VIEW companies_effective", "DROP TRIGGER companies_employer_moved",
+                     "ALTER TABLE companies DROP COLUMN review",
+                     "ALTER TABLE companies DROP COLUMN watch",
+                     "ALTER TABLE employers DROP COLUMN mission_tier",
+                     "ALTER TABLE employers DROP COLUMN mission_score",
+                     "ALTER TABLE employers DROP COLUMN mission_reason",
+                     "ALTER TABLE employers DROP COLUMN review",
+                     "ALTER TABLE employers DROP COLUMN watch", "PRAGMA user_version = 4"):
+            conn.execute(stmt)
+        for name, tier, score, held in (("A", "core", 0.9, "local,watch"),
+                                        ("B", "other", 0.1, "local,pending-review"),
+                                        ("C", "core", 0.9, "sweep,watch"),
+                                        ("D", None, None, None)):
+            conn.execute("INSERT INTO companies (name, mission_tier, mission_score, tags, active) "
+                         "VALUES (?, ?, ?, ?, 1)", (name, tier, score, held))
+        conn.execute("UPDATE companies SET employer_id = 1 WHERE id IN (2, 3)")
+        conn.commit()
+        conn.close()
+        today = [("A", "core", 0.9, 1, "confirmed", 1), ("B", "other", 0.1, 0, "pending", 0),
+                 ("C", "core", 0.9, 1, "confirmed", 1), ("D", None, None, 1, "confirmed", 0)]
+        for _ in range(2):          # the second pass replays a store already migrated
+            conn = store.connect(path)
+            assert [tuple(r) for r in conn.execute(
+                "SELECT name, mission_tier, mission_score, active, review, watch "
+                "FROM companies_effective ORDER BY id")] == today
+            assert conn.execute("SELECT mission_tier, review, watch FROM employers "
+                                "WHERE id = 1").fetchone()[:] == ("core", None, 1)
+            assert [r[0] for r in conn.execute(      # only B differs from its employer
+                "SELECT name FROM companies WHERE mission_tier IS NOT NULL OR review IS NOT NULL "
+                "OR watch IS NOT NULL")] == ["B"]
+            assert not conn.execute("SELECT 1 FROM companies WHERE tags LIKE '%watch%' "
+                                    "OR tags LIKE '%pending%'").fetchone()
+            _restore_dormancy(conn)
+            conn.execute("PRAGMA user_version = 4")
+            conn.commit()
+            conn.close()
+        conn = store.connect(path)      # a board moved to an employer that holds it differently
+        conn.execute("UPDATE companies SET employer_id = 4 WHERE name = 'C'")
+        assert [tuple(r) for r in conn.execute(
+            "SELECT mission_tier, mission_score, review, watch FROM companies_effective "
+            "WHERE name = 'C'")] == [("core", 0.9, "confirmed", 1)]
+
+    def test_a_version_5_store_loses_the_synthesized_tags_and_replays_safely(self, tmp_path):
+        path = tmp_path / "v5.db"
+        conn = store.connect(path)
+        _restore_dormancy(conn)
+        for name, kw in (("A", {"tags": "local", "watch": 1}),
+                         ("B", {"tags": "sweep", "review": "pending"}), ("C", {})):
+            store.upsert_company(conn, {"name": name, **kw})
+        view = next(s for s in _statements((MIGRATIONS_DIR / "0005_employer_facts.sql").read_text())
+                    if "CREATE VIEW companies_effective" in s)
+        for stmt in ("DROP VIEW companies_effective", view, "PRAGMA user_version = 5"):
+            conn.execute(stmt)
+        conn.execute("UPDATE companies SET tags = 'sweep,watch,pending-review' WHERE name = 'C'")
+        conn.commit()
+        facts = "SELECT name, active, review, watch FROM companies_effective ORDER BY id"
+        before = [tuple(r) for r in conn.execute(facts)]
+        assert [r[0] for r in conn.execute("SELECT tags FROM companies_effective ORDER BY id")] \
+            == ["local,watch", "sweep,pending-review", "sweep,watch,pending-review"]
+        conn.close()
+        for _ in range(2):          # the second pass replays a store already migrated
+            conn = store.connect(path)
+            assert [tuple(r) for r in conn.execute(facts)] == before
+            for table in ("companies_effective", "companies"):
+                assert [r[0] for r in conn.execute(f"SELECT tags FROM {table} ORDER BY id")] \
+                    == ["local", "sweep", "sweep"]
+            _restore_dormancy(conn)
+            conn.execute("PRAGMA user_version = 5")
+            conn.commit()
+            conn.close()
+
+    def test_the_job_input_model_names_only_jobs_columns(self, db):
+        cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
+        assert set(JobIn.__annotations__) <= cols
+
+    def test_a_version_7_store_gets_its_multi_part_handles_and_replays_safely(self, tmp_path):
+        path = tmp_path / "v7.db"
+        conn = store.connect(path)
+        _restore_dormancy(conn)
+        view = next(s for s in _statements((MIGRATIONS_DIR / "0006_view_own_tags.sql").read_text())
+                    if "CREATE VIEW companies_effective" in s)
+        for stmt in ("DROP VIEW companies_effective", "DROP INDEX ix_companies_board_handle",
+                     "ALTER TABLE companies DROP COLUMN handle", view, "PRAGMA user_version = 7"):
+            conn.execute(stmt)
+        conn.executemany("INSERT INTO companies (name, ats, slug, wd_tenant, wd_pod, wd_site) "
+                         "VALUES (?, ?, ?, ?, ?, ?)",
+                         [("A", "workday", None, "acme", 5, "External"),
+                          ("B", "workday", None, "b", None, None),
+                          ("C", "lever", "c", "stale", 1, "s")])
+        conn.commit()
+        deprecated = "SELECT wd_tenant, wd_pod, wd_site FROM companies ORDER BY id"
+        before = [tuple(r) for r in conn.execute(deprecated)]
+        conn.close()
+        for _ in range(2):          # the second pass replays a store already migrated
+            conn = store.connect(path)
+            assert [tuple(r) for r in conn.execute(deprecated)] == before
+            assert [r[0] for r in conn.execute("SELECT handle FROM companies_effective ORDER BY id")] \
+                == ["acme|5|External", "b||", None]
+            rows = [store.as_company(r) for r in conn.execute(
+                "SELECT * FROM companies_effective ORDER BY id")]
+            wd = BOARDS["workday"]      # the very handle string the old columns joined to
+            assert wd.handle(rows[0]) == "|".join(map(str, before[0]))
+            assert (wd.split(rows[0]["handle"]), wd.handle(rows[1])) == (("acme", 5, "External"), None)
+            _restore_dormancy(conn)
+            conn.execute("PRAGMA user_version = 7")
+            conn.commit()
+            conn.close()
+
+    def test_the_company_row_model_is_exactly_the_companies_columns(self, db):
+        cols = {r[1] for r in db.execute("PRAGMA table_info(companies_effective)")}
+        assert set(CompanyRow.__annotations__) == cols
+        table = {r[1] for r in db.execute("PRAGMA table_info(companies)")}
+        assert table - cols == {"wd_tenant", "wd_pod", "wd_site"}   # deprecated by 0008
+        assert set(CompanyIn.__annotations__) < set(CompanyRow.__annotations__)
+        writer, reader = get_type_hints(CompanyIn), get_type_hints(CompanyRow)
+        assert all(writer[k] == reader[k] for k in writer), "CompanyIn and CompanyRow disagree"
+        assert CompanyRow.__required_keys__ == set(CompanyRow.__annotations__)
+        assert set(get_args(HandleColumn)) <= cols
+        assert set(BoardCoords.__annotations__) == {"ats", *get_args(HandleColumn)}
+
+    def test_the_job_row_models_are_the_jobs_columns(self, db):
+        cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
+        assert set(JobRow.__annotations__) == cols | {"remote_hint"}
+        joined = {"mission_tier", "mission_score", "company_watch", "combined_score",
+                  "dup_count", "dup_job_ids", "dup_urls"}
+        assert set(RankedJob.__annotations__) == cols | joined
+        row, ranked = get_type_hints(JobRow), get_type_hints(RankedJob)
+        assert all(ranked[c] == row[c] for c in cols), "RankedJob and JobRow disagree"
+
+    @pytest.mark.parametrize("table, model", [("companies", CompanyRow), ("jobs", JobIn),
+                                              ("jobs", JobRow)])
+    def test_a_row_model_types_each_column_as_the_table_declares_it(self, db, table, model):
+        declared = {r[1]: r[2] for r in db.execute(f"PRAGMA table_info({table})")}
+        affinity = {"INTEGER": int, "TEXT": str, "REAL": float}
+        for col, hint in get_type_hints(model).items():
+            if col not in declared:      # JobRow's one key that is no column
+                continue
+            assert all(issubclass(t, affinity[declared[col]]) for t in _held_types(hint)), \
+                f"{table}.{col} is {declared[col]}, the model says {hint}"
+
+    def test_the_fit_columns_are_what_the_scorer_produces(self):
+        keys = FitColumns.__optional_keys__
+        assert set(keys) == set(claude_fit.FitResult(score=0.5).as_columns())
+        assert {"fit_" + a for a in claude_fit.AXES} <= keys
+        assert set(store._SCORE_COLS) == keys
+
+    def test_migrating_a_current_store_changes_nothing(self, db):
+        before = db.execute("SELECT group_concat(sql) FROM sqlite_master").fetchone()[0]
+        migrate(db)
+        assert db.execute("SELECT group_concat(sql) FROM sqlite_master").fetchone()[0] == before
+
+    @staticmethod
+    def _unversioned_store(path):
+        """A store from before versioning: old column names, no crawl or
+        triage columns, no blocklist table."""
+        raw = sqlite3.connect(path)
+        raw.executescript("""
+            CREATE TABLE companies (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,
+                ats TEXT, slug TEXT, nc_job_count INTEGER, hq_location TEXT, tags TEXT);
+            CREATE TABLE jobs (id INTEGER PRIMARY KEY, job_id TEXT UNIQUE NOT NULL,
+                company_id INTEGER, title TEXT, neural_signal TEXT, mission TEXT,
+                tech_bar_score REAL, status TEXT DEFAULT 'open');
+            INSERT INTO companies (name, ats, slug, nc_job_count, tags)
+                VALUES ('Acme', 'lever', 'acme', 7, 'nc_local,neural,watch');
+            INSERT INTO jobs (job_id, company_id, title, neural_signal, mission)
+                VALUES ('j1', 1, 'T', 'bci', 'x');""")
+        raw.commit()
+        raw.close()
+
+    def test_a_store_from_before_versioning_is_adopted_with_its_data(self, tmp_path):
+        path = tmp_path / "old.db"
+        self._unversioned_store(path)
+        conn = store.connect(path)
+        cols = lambda t: {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}
+        assert {"local_job_count", "last_nonempty_at", "last_harvested_at"} <= cols("companies")
+        assert not {"crawl_state", "empty_streak"} & cols("companies")
+        assert not {"nc_job_count", "hq_location"} & cols("companies")
+        assert {"anchor_signal", "triage_status", "outcome_reason"} <= cols("jobs")
+        assert not {"neural_signal", "mission", "tech_bar_score"} & cols("jobs")
+        assert tuple(conn.execute("SELECT local_job_count, tags FROM companies_effective").fetchone()) \
+            == (7, "local,sweep")
+        assert conn.execute("SELECT anchor_signal FROM jobs").fetchone()[0] == "bci"
+        assert conn.execute("SELECT COUNT(*) FROM name_blocklist").fetchone()[0] == 0
+        assert {"ix_jobs_url", "ix_jobs_triage"} <= {
+            r[1] for r in conn.execute("PRAGMA index_list(jobs)")}
+        assert conn.execute("PRAGMA user_version").fetchone()[0] >= 1
+
+    def test_concurrent_first_opens_of_an_old_store_all_succeed(self, tmp_path):
+        path = tmp_path / "old.db"
+        self._unversioned_store(path)
+        with ThreadPoolExecutor(6) as pool:
+            conns = list(pool.map(lambda _: store.connect(path), range(6)))
+        assert {c.execute("PRAGMA user_version").fetchone()[0] for c in conns} \
+            == {len(list(MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")))}
+
+    def test_url_lookup_is_indexed(self, db):
+        """upsert_job probes `url` for every NEW row. Unindexed, that probe
+        is a full scan of a table whose rows carry whole job descriptions
+        (0.23s each on the 240 MB live store), and it runs INSIDE the batch
+        transaction -- so one 183-job board held the single write lock for
+        ~40s and every other writer, the web UI included, died against
+        BUSY_TIMEOUT_S with "database is locked" (2026-09-10 harvest logs).
+        """
+        plan = " ".join(str(r[3]) for r in db.execute(
+            "EXPLAIN QUERY PLAN SELECT job_id, title FROM jobs "
+            "WHERE url=? AND +company_id IS ?", ("x", 1)))
+        assert "SCAN" not in plan, f"unindexed url probe: {plan}"
+        assert "ix_jobs_url" in plan, plan
 
 
 class TestCompanies:
     def test_tags_merge_on_upsert(self, db):
         store.upsert_company(db, {"name": "X", "ats": "greenhouse",
-                                  "slug": "x", "tags": "neural"})
-        store.upsert_company(db, {"name": "X", "tags": "nc_local"})
-        assert store.get_companies(db, tag="neural")[0]["tags"] == "nc_local,neural"
+                                  "slug": "x", "tags": "sweep"})
+        store.upsert_company(db, {"name": "X", "tags": "local"})
+        assert store.get_companies(db, tag="sweep")[0]["tags"] == "local,sweep"
 
-    def test_watch_tag_roundtrip(self, db):
-        store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})
-        assert store.set_company_tag(db, "w", "watch") == "watch"   # case-insensitive
-        row = store.get_companies(db, active_only=False)[0]
-        import scrapers.ops as ops
-        assert ops._is_watched(row) and ops._whole_board(row)
-        assert store.set_company_tag(db, "W", "watch", add=False) == ""
-        assert store.set_company_tag(db, "Nope", "watch") is None
+    def test_watch_flag_roundtrip(self, db):
+        cid = store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})
+        store.set_watch(db, cid, True)
+        row = store.get_company(db, cid)
+        assert row["watch"] == 1 and row["tags"] is None
+        store.set_watch(db, cid, False)
+        assert not store.get_company(db, cid)["watch"]
+
+
+class TestCompanyReaders:
+    def test_every_reader_of_company_rows_returns_every_column(self, db):
+        """CompanyRow is total (a subscript is checked), so each reader that
+        returns one must select every column."""
+        cid = store.upsert_company(db, {"name": "Acme", "ats": "lever", "slug": "acme",
+                                        "active": 1, "local_job_count": 2,
+                                        "total_job_count": 4})
+        store.upsert_company(db, store.mark_pending({"name": "Queued", "ats": "lever",
+                                                     "slug": "queued"}))
+        every = set(CompanyRow.__annotations__)
+        readers = {"get_company": [store.get_company(db, cid)],
+                   "get_companies": store.get_companies(db, active_only=False),
+                   "pending_companies": store.pending_companies(db),
+                   "harvestable_companies": store.harvestable_companies(db)}
+        assert all(rows for rows in readers.values()), readers
+        assert {(name, frozenset(r)) for name, rows in readers.items() for r in rows} \
+            == {(name, frozenset(every)) for name in readers}
+
+
+class TestJobReaders:
+    def test_every_reader_of_job_rows_returns_every_column(self, db, add_job):
+        """JobRow is total (a subscript is checked), so each reader that
+        returns one must select every column."""
+        add_job("gh_acme_1", track=None)
+        add_job("gh_acme_2")
+        store.set_disposition(db, "gh_acme_2", "applied")
+        store.update_pipeline_fields(db, "gh_acme_2", followup_at="2000-01-01")
+        readers = {
+            "triage_pending": store.triage_pending(db),
+            "get_pipeline": store.get_pipeline(db),
+            "followups_due": store.followups_due(db),
+            "set_disposition": [store.set_disposition(db, "gh_acme_1", "saved")[0]],
+            "update_pipeline_fields": [store.update_pipeline_fields(db, "gh_acme_1",
+                                                                    contact="x")[0]],
+            "_resolve_job": store.pipeline._resolve_job(db, "gh_acme_1")}
+        assert all(rows for rows in readers.values()), readers
+        every = set(JobRow.__annotations__) - {"remote_hint"}
+        assert {(name, frozenset(r)) for name, rows in readers.items() for r in rows} \
+            == {(name, frozenset(every)) for name in readers}
+
+    def test_ranked_jobs_returns_the_ranked_job_keys(self, db, add_job):
+        add_job("gh_acme_1", fit=0.5)
+        every, dup = set(RankedJob.__annotations__), {"dup_count", "dup_job_ids", "dup_urls"}
+        got = {"default": store.ranked_jobs(db),
+               "with a description": store.ranked_jobs(db, with_description=True),
+               "uncollapsed": store.ranked_jobs(db, collapse=False)}
+        assert all(rows for rows in got.values()), got
+        assert {name: {frozenset(r) for r in rows} for name, rows in got.items()} == {
+            "default": {frozenset(every - {"description"})},
+            "with a description": {frozenset(every)},
+            "uncollapsed": {frozenset(every - dup - {"description"})}}
+
+
+class TestUpsertColumns:
+    def test_upsert_stores_every_column_the_input_model_names(self, db):
+        row = _sample_row(CompanyIn)
+        store.upsert_company(db, row)
+        stored = dict(db.execute("SELECT * FROM companies_effective").fetchone())
+        # an `ats` clears the miss pair (see upsert_company), so it is not compared
+        # ... and the two employer facts are applied, not stored as given
+        assert {c: v for c, v in row.items()
+                if c not in ("miss_reason", "miss_at", "review", "watch")}.items() <= stored.items()
+        assert (stored["review"], stored["watch"]) == ("confirmed", 1)
+
+
+class TestStoredTypes:
+    """SQLite keeps whatever it is handed (a declared type is only an
+    affinity), so the casts behind CompanyRow and JobIn hold only while the
+    writers store what the models say. This audits what OUR writers store;
+    a store written by older code is not covered."""
+
+    STORAGE = {"INTEGER": "integer", "TEXT": "text", "REAL": "real"}
+
+    def _audit(self, db, table, model):
+        declared = {r[1]: r[2] for r in db.execute(f"PRAGMA table_info({table})")}
+        for col in get_type_hints(model):
+            if col not in declared:
+                continue
+            held = {r[0] for r in db.execute(f"SELECT DISTINCT typeof({col}) FROM {table}")}
+            assert held <= {self.STORAGE[declared[col]], "null"}, (table, col, held)
+
+    def test_the_company_writers_store_each_column_as_declared(self, db):
+        cid = store.upsert_company(db, _sample_row(CompanyIn))
+        store.mark_harvested(db, cid, 2)
+        store.record_miss(db, "Missed", "no-board-found")
+        self._audit(db, "companies", CompanyRow)
+
+    def test_the_job_writers_store_each_column_as_declared(self, db):
+        cid = store.upsert_company(db, {"name": "Acme"})
+        assert store.upsert_job(db, {**_sample_row(JobIn), "job_id": "j1", "company_id": cid})
+        store.record_triage(db, "j1", "ok", "t=ok", tracks=["t"], description="d",
+                            geo_mode="onsite", scores=_sample_row(FitColumns))
+        store.set_disposition(db, "j1", "applied", note="n")
+        store.update_pipeline_fields(db, "j1", followup_at="2026-01-01", contact="c",
+                                     referral=True, outcome_reason="other")
+        store.mark_desc_checked(db, "j1")
+        store.record_probe_outcome(db, "j1", verified=False)
+        store.set_job_status(db, "j1", "closed")
+        self._audit(db, "jobs", JobIn)
+        self._audit(db, "jobs", JobRow)
+
+
+class TestImportCompanies:
+    @staticmethod
+    def _load(conn, tmp_path, rows):
+        path = tmp_path / "roster.json"
+        path.write_text(json.dumps(rows), encoding="utf-8")
+        return store.import_companies(conn, path)
+
+    def test_an_export_loads_into_another_store(self, db, tmp_path):
+        store.upsert_company(db, store.mark_pending({
+            "name": "Acme", "ats": "lever", "slug": "acme", "tags": "sweep", "watch": 1,
+            "mission_score": 1}))
+        store.export_companies(db, tmp_path / "out.json")
+        other = store.connect(":memory:")
+        assert store.import_companies(other, tmp_path / "out.json") == 1
+        assert other.execute("SELECT name, ats, slug, tags, mission_score, review, watch "
+                             "FROM companies_effective").fetchone()[:] \
+            == ("Acme", "lever", "acme", "sweep", 1.0, "pending", 1)
+
+    def test_an_old_export_with_fact_tokens_loads_as_the_facts(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "Old", "tags": "local,watch,pending-review"}])
+        assert db.execute("SELECT tags, review, watch FROM companies_effective"
+                          ).fetchone()[:] == ("local", "pending", 1)
+        assert db.execute("SELECT tags FROM companies").fetchone()[0] == "local"
+        with pytest.raises(ValidationError):
+            self._load(db, tmp_path, [{"name": "Bad", "review": "maybe"}])
+
+    @pytest.mark.parametrize("row, loc, kind", [
+        ({"ats": "lever"}, (1,), "value_error"),
+        ({"name": ""}, (1, "name"), "string_too_short"),
+        ({"name": "B", "bogus": 1}, (1, "bogus"), "extra_forbidden"),
+        ({"name": "B", "total_job_count": 5.5}, (1, "total_job_count"), "int_from_float"),
+        ({"name": "B", "notes": 123}, (1, "notes"), "string_type"),
+    ])
+    def test_a_bad_row_is_named_and_nothing_is_written(self, db, tmp_path, row, loc, kind):
+        with pytest.raises(ValidationError) as err:
+            self._load(db, tmp_path, [{"name": "Good"}, row])
+        errors = [(e["loc"][:len(loc)], e["type"]) for e in err.value.errors()]
+        assert errors[:1] == [(loc, kind)]
+        assert db.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 0
+
+    def test_every_bad_row_is_listed_at_once(self, db, tmp_path):
+        with pytest.raises(ValidationError) as err:
+            self._load(db, tmp_path, [{"name": "A"}, {"ats": "lever"},
+                                      {"name": "B", "bogus": 1}])
+        assert [e["loc"] for e in err.value.errors()] == [(1,), (2, "bogus")]
+
+    def test_a_null_active_loads_as_the_column_default(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "A", "active": None}])
+        assert db.execute("SELECT active FROM companies").fetchone()[0] == 1
+
+    def test_numeric_strings_and_whole_floats_load_as_integers(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "A", "total_job_count": "5", "local_job_count": 5.0}])
+        assert db.execute("SELECT total_job_count, local_job_count FROM companies"
+                          ).fetchone()[:] == (5, 5)
+
+    def test_the_id_is_accepted_and_ignored(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "A", "id": 99, "crawl_state": "dormant"}])
+        assert db.execute("SELECT id FROM companies").fetchone()[0] == 1
 
 
 class TestDedupe:
-    def test_mark_seen_dedupes(self, db):
-        store.mark_seen(db, {"id": "j1", "company": "X", "title": "t",
-                             "url": "u", "location": "Remote"},
-                        track="remote-neural")
-        assert not store.is_new(db, "j1")
-        assert store.is_new(db, "j2")
+    def test_upsert_then_exists(self, db):
+        # The sweep runner's dedupe is job_exists on the unified table; the
+        # old is_new/mark_seen shim over these two was inlined 2026-09-10.
+        store.upsert_job(db, {"job_id": "j1", "company_name": "X",
+                              "title": "t", "url": "u", "location": "Remote",
+                              "track": "remote-neural"})
+        assert store.job_exists(db, "j1")
+        assert not store.job_exists(db, "j2")
+
+    def test_a_null_fit_column_keeps_the_stored_score(self, db):
+        # A dedupe-only re-upsert (no fit keys) must not clobber a score
+        # written by an earlier --fit run: upsert_job COALESCEs.
+        store.upsert_job(db, {"job_id": "j1", "title": "t",
+                              "resume_fit_score": 0.7})
+        store.upsert_job(db, {"job_id": "j1", "title": "t",
+                              "resume_fit_score": None})
+        assert db.execute("SELECT resume_fit_score FROM jobs WHERE job_id='j1'"
+                          ).fetchone()[0] == 0.7
 
 
 class TestClosedLifecycle:
@@ -79,6 +587,19 @@ class TestClosedLifecycle:
         db.commit()
         store.sync_job_statuses(db, company, snap, track="local-tech")
         assert status_of("linkedin_aaa")["status"] == "closed"
+
+    def test_stale_alias_of_a_stored_posting_closes(self, db, company, add_job,
+                                                    status_of):
+        # phenom_R-1 (a retired id scheme, retitled since) shares its URL
+        # with the live gh_acme_2 row: the URL no longer shields it.
+        snap = self._seed(add_job)
+        add_job("phenom_R-1", "ML Eng", 0.5, url="https://acme.io/gh_acme_2")
+        db.execute("UPDATE jobs SET first_seen='2020-01-01T00:00:00', "
+                   "last_seen='2020-01-01T00:00:00' WHERE job_id='phenom_R-1'")
+        db.commit()
+        store.sync_job_statuses(db, company, snap, track="local-tech")
+        assert status_of("phenom_R-1")["status"] == "closed"
+        assert status_of("gh_acme_2")["status"] == "open"
 
     def test_reappearance_reopens(self, db, company, add_job, status_of):
         snap = self._seed(add_job)
@@ -125,6 +646,51 @@ class TestClosedLifecycle:
         assert status_of("gh_acme_new")["status"] == "open"
         assert status_of("linkedin_bbb")["status"] == "open"   # external: title match
 
+    def test_a_capped_snapshot_reopens_but_never_closes_a_first_miss(
+            self, db, company, add_job, status_of):
+        # A board over its page cap serves an unstable window of itself, so
+        # one pass's absence is no evidence: nothing closes.
+        snap = self._seed(add_job)
+        store.set_job_status(db, "gh_acme_2", "closed")
+        assert store.sync_job_statuses(db, company, snap, track="local-tech",
+                                       capped=True) == (1, 0)
+        assert status_of("gh_acme_1")["status"] == "open"
+        assert status_of("gh_acme_2")["status"] == "open"
+
+    def test_a_capped_snapshot_never_closes_even_a_second_miss(
+            self, db, company, add_job, status_of):
+        # Before 2026-09-18 gh_acme_3 (missed two passes running: seen
+        # 09-14, then absent from a 09-15-harvested snapshot too) would
+        # have closed on its second miss while gh_acme_1 (missed once,
+        # right after being seen) stayed open. Replaced outright: STILL
+        # capped makes a second miss no more trustworthy than a first (a
+        # chronically over-budget board can miss the same row twice by the
+        # draw of which window it read), so neither closes now.
+        snap = self._seed(add_job)
+        add_job("gh_acme_3", "Data Scientist", 0.6)
+        db.execute("UPDATE jobs SET harvested_at='2026-09-15T09:00:00'")
+        db.execute("UPDATE jobs SET last_seen='2026-09-15T09:00:05' "
+                   "WHERE job_id='gh_acme_1'")
+        db.execute("UPDATE jobs SET last_seen='2026-09-14T09:00:05' "
+                   "WHERE job_id='gh_acme_3'")
+        db.commit()
+        assert store.sync_job_statuses(db, company, snap, track="local-tech",
+                                       capped=True) == (0, 0)
+        assert status_of("gh_acme_1")["status"] == "open"
+        assert status_of("gh_acme_3")["status"] == "open"
+
+    def test_an_uncapped_snapshot_still_closes_on_the_first_miss(
+            self, db, company, add_job, status_of):
+        # The ordinary rule, unaffected by `capped`: a board-native row
+        # absent from an UNCAPPED, board-authoritative snapshot closes on
+        # this, its first, miss.
+        add_job("gh_acme_vanished", "Data Engineer")
+        snap = [{"id": "gh_acme_other", "title": "Other",
+                "url": "https://acme.io/gh_acme_other"}]
+        assert store.sync_job_statuses(db, company, snap, track="local-tech",
+                                       capped=False) == (0, 1)
+        assert status_of("gh_acme_vanished")["status"] == "closed"
+
 
 class TestRanking:
     def test_closed_excluded_but_readmittable(self, db, company, add_job):
@@ -140,6 +706,204 @@ class TestRanking:
     def test_combined_score_punishes_imbalance(self):
         assert store.combined_score(0.9, 0.2) < store.combined_score(0.5, 0.5)
         assert store.combined_score(0.5, None) is None
+
+
+    def test_combined_score_ranks_the_geometric_mean_not_the_fit_alone(
+            self, db, add_job):
+        # 0.9 fit at a 0.2-mission employer (0.42) ranks below 0.5/0.5 (0.50).
+        weak = store.upsert_company(db, {"name": "Weak", "mission_score": 0.2})
+        solid = store.upsert_company(db, {"name": "Solid", "mission_score": 0.5})
+        add_job("gh_weak", fit=0.9, company_id=weak, company_name="Weak")
+        add_job("gh_solid", fit=0.5, company_id=solid, company_name="Solid")
+        ids = lambda **kw: [r["job_id"] for r in store.ranked_jobs(
+            db, track="local-tech", **kw)]
+        assert ids() == ["gh_solid", "gh_weak"]
+        assert ids(rank_by="fit") == ["gh_weak", "gh_solid"]
+
+    def test_unscored_rows_sort_last_and_ties_keep_insertion_order(
+            self, db, company, add_job):
+        add_job("gh_acme_none")
+        add_job("gh_acme_a", fit=0.5)
+        add_job("gh_acme_b", fit=0.5)
+        add_job("gh_acme_top", fit=0.9)
+        ids = [r["job_id"] for r in store.ranked_jobs(db, track="local-tech")]
+        assert ids[-1] == "gh_acme_none"
+        assert ids.index("gh_acme_a") < ids.index("gh_acme_b")
+
+    def test_a_raising_location_matcher_fails_the_query_and_leaves_no_state(
+            self, db, add_job):
+        class Boom:
+            def search(self, text):
+                raise RuntimeError("matcher failed")
+        add_job("gh_acme_1", fit=0.5)
+        with pytest.raises(RuntimeError, match="matcher failed"):
+            store.ranked_jobs(db, track="local-tech", location_re=Boom())
+        assert store.ranked_jobs(db, track="local-tech")
+
+
+    def test_rows_omit_the_description_unless_asked(self, db, company, add_job):
+        add_job("gh_acme_1", fit=0.5, description="a long body")
+        (lean,) = store.ranked_jobs(db, track="local-tech")
+        (full,) = store.ranked_jobs(db, track="local-tech", with_description=True)
+        assert "description" not in lean and full["description"] == "a long body"
+        assert {k: v for k, v in full.items() if k != "description"} == lean
+
+
+class TestCollapse:
+    """ranked_jobs(collapse=True) (the default) folds postings that are the
+    SAME opening at the SAME employer -- same company, same normalised
+    title -- down to the best-scoring row, stamped with dup_count/
+    dup_job_ids/dup_urls (see store.jobs._RANK_SQL). 133
+    company+title groups covered 442 open tracked rows in the 2026-09-17
+    store; nothing here deletes or merges a row, it only reshapes what one
+    ranked_jobs() call returns."""
+
+    def test_best_scoring_row_survives_with_the_right_dup_count(
+            self, db, company, add_job):
+        add_job("gh_acme_1", "Data Engineer", fit=0.4)
+        add_job("gh_acme_2", "Data Engineer", fit=0.9)
+        add_job("gh_acme_3", "Data Engineer", fit=0.6)
+        rows = store.ranked_jobs(db, track="local-tech")
+        assert [r["job_id"] for r in rows] == ["gh_acme_2"]
+        assert rows[0]["dup_count"] == 3
+        # Best-next-first: 0.6 before 0.4.
+        assert rows[0]["dup_job_ids"] == ("gh_acme_3", "gh_acme_1")
+        assert rows[0]["dup_urls"] == (
+            "https://acme.io/gh_acme_3", "https://acme.io/gh_acme_1")
+
+    def test_different_companies_same_title_never_collapse(
+            self, db, company, add_job):
+        beta = store.upsert_company(db, {"name": "Beta", "ats": "greenhouse",
+                                         "slug": "beta"})
+        add_job("gh_acme_1", "Data Engineer", fit=0.5)
+        add_job("gh_beta_1", "Data Engineer", fit=0.9, company_id=beta,
+                company_name="Beta", url="https://beta.io/gh_beta_1")
+        ids = {r["job_id"] for r in store.ranked_jobs(db, track="local-tech")}
+        assert ids == {"gh_acme_1", "gh_beta_1"}
+
+    def test_boards_of_one_employer_collapse_across_companies(
+            self, db, company, add_job):
+        beta, how = store.add_board(db, {"name": "Acme", "ats": "ashby", "slug": "beta"})
+        assert how == "sibling"
+        add_job("gh_acme_1", "Data Engineer", fit=0.5)
+        add_job("gh_beta_1", "Data Engineer", fit=0.9, company_id=beta,
+                company_name="Beta", url="https://beta.io/gh_beta_1")
+        rows = store.ranked_jobs(db, track="local-tech")
+        assert [r["job_id"] for r in rows] == ["gh_beta_1"]
+        assert rows[0]["dup_job_ids"] == ("gh_acme_1",)
+
+    def test_whitespace_and_case_only_title_differences_collapse(
+            self, db, company, add_job):
+        add_job("gh_acme_1", "Data   Engineer", fit=0.5)
+        add_job("gh_acme_2", "data engineer", fit=0.9)
+        rows = store.ranked_jobs(db, track="local-tech")
+        assert [r["job_id"] for r in rows] == ["gh_acme_2"]
+        assert rows[0]["dup_count"] == 2
+
+    def test_limit_applies_after_collapsing_not_before(
+            self, db, company, add_job):
+        # Two duplicate pairs plus a singleton: limit=2 must return 2
+        # VISIBLE (post-collapse) rows, not 2 raw rows trimmed first and
+        # then folded down to fewer.
+        add_job("gh_acme_1", "Data Engineer", fit=0.95)
+        add_job("gh_acme_2", "Data Engineer", fit=0.90)
+        add_job("gh_acme_3", "Platform Engineer", fit=0.85)
+        add_job("gh_acme_4", "Platform Engineer", fit=0.80)
+        add_job("gh_acme_5", "ML Engineer", fit=0.50)
+        rows = store.ranked_jobs(db, track="local-tech", limit=2)
+        assert [r["job_id"] for r in rows] == ["gh_acme_1", "gh_acme_3"]
+
+    def test_collapse_false_returns_every_row_uncollapsed(
+            self, db, company, add_job):
+        add_job("gh_acme_1", "Data Engineer", fit=0.9)
+        add_job("gh_acme_2", "Data Engineer", fit=0.4)
+        rows = store.ranked_jobs(db, track="local-tech", collapse=False)
+        assert {r["job_id"] for r in rows} == {"gh_acme_1", "gh_acme_2"}
+        assert all("dup_count" not in r for r in rows)
+
+    def test_null_company_id_falls_back_to_company_name(self, db):
+        # LinkedIn captures / jsonld sweep hits / manual --add carry no
+        # company_id (see sync_job_statuses) but usually do carry a name.
+        store.upsert_job(db, {"job_id": "ext_1", "title": "Data Engineer",
+                              "company_name": "Acme Inc", "track": "local-tech",
+                              "resume_fit_score": 0.5,
+                              "url": "https://a.example/1"})
+        store.upsert_job(db, {"job_id": "ext_2", "title": "data engineer",
+                              "company_name": "ACME INC", "track": "local-tech",
+                              "resume_fit_score": 0.9,
+                              "url": "https://a.example/2"})
+        rows = store.ranked_jobs(db, track="local-tech")
+        assert [r["job_id"] for r in rows] == ["ext_2"]
+        assert rows[0]["dup_count"] == 2
+
+    def test_rows_with_neither_company_id_nor_name_never_collapse(self, db):
+        # Falling back to a shared blank key would wrongly merge every
+        # nameless row in the store; each keys off its own job_id instead.
+        for jid in ("ext_a", "ext_b"):
+            store.upsert_job(db, {"job_id": jid, "title": "Data Engineer",
+                                  "track": "local-tech",
+                                  "resume_fit_score": 0.5,
+                                  "url": f"https://a.example/{jid}"})
+        ids = {r["job_id"] for r in store.ranked_jobs(db, track="local-tech")}
+        assert ids == {"ext_a", "ext_b"}
+
+
+class TestRemoteAdmission:
+    """A location-scoped ranking rescues out-of-area rows only from
+    companies it trusts. The watch flag is one such signal, but it is
+    hand-set and lags the data — 8 starred companies produced a third of all
+    good-fit rows while 20 unstarred ones had produced at least one, and a
+    remote research-engineer posting at fit 0.94 fell out of the ranking for
+    want of a star. `remote_mission_floor` adds the judged signal.
+    """
+
+    def _seed(self, db, add_job, elsewhere, mission=None, watch=False):
+        cid = store.upsert_company(db, {"name": "Acme", "mission_score": mission})
+        if watch:
+            store.set_watch(db, cid, True)
+        add_job("gh_acme_local", fit=0.5)
+        add_job("gh_acme_remote", fit=0.9, location=elsewhere,
+                geo_mode="remote")
+
+    def _ranked(self, db, floor=0.85):
+        return [r["job_id"] for r in store.ranked_jobs(
+            db, track="local-tech", location_re=locality.NC_RE,
+            allow_geo_modes={"remote"}, remote_mission_floor=floor)]
+
+    def test_core_mission_remote_is_admitted_without_a_star(
+            self, db, company, add_job, elsewhere):
+        self._seed(db, add_job, elsewhere, mission=0.9)
+        assert self._ranked(db) == ["gh_acme_remote", "gh_acme_local"]
+
+    def test_below_the_floor_stays_out(self, db, company, add_job, elsewhere):
+        self._seed(db, add_job, elsewhere, mission=0.5)
+        assert self._ranked(db) == ["gh_acme_local"]
+
+    def test_unscored_company_stays_out(self, db, company, add_job, elsewhere):
+        # No judgement recorded is not a judgement in the company's favour.
+        self._seed(db, add_job, elsewhere, mission=None)
+        assert self._ranked(db) == ["gh_acme_local"]
+
+    def test_watch_admits_whatever_the_score(self, db, company, add_job,
+                                            elsewhere):
+        self._seed(db, add_job, elsewhere, mission=0.05, watch=True)
+        assert "gh_acme_remote" in self._ranked(db)
+
+    def test_no_floor_disables_the_admission(self, db, company, add_job,
+                                             elsewhere):
+        self._seed(db, add_job, elsewhere, mission=0.99)
+        assert self._ranked(db, floor=None) == ["gh_acme_local"]
+
+    def test_conglomerates_qualify_only_by_watch(self, db, company, add_job,
+                                                 elsewhere, monkeypatch):
+        # A conglomerate's corporate mission score describes a parent, not
+        # the division that is hiring, so it can't buy a geo exception.
+        monkeypatch.setattr(config, "is_multi_division",
+                            lambda n: (n or "").strip().lower() == "acme")
+        self._seed(db, add_job, elsewhere, mission=0.99)
+        assert self._ranked(db) == ["gh_acme_local"]
+        store.set_watch(db, store.company_id_by_name(db, "Acme"), True)
+        assert "gh_acme_remote" in self._ranked(db)
 
 
 class TestDispositions:
@@ -194,10 +958,187 @@ class TestDispositions:
         self._seed(add_job)
         store.set_disposition(db, "gh_acme_200", "dismissed", note="wrong archetype")
         store.set_disposition(db, "gh_acme_300", "applied")
-        from core.fit import disposition_examples_block
         block = disposition_examples_block(db, 3)
         assert 'PURSUED: "Data Engineer"' in block
         assert "wrong archetype" in block
+
+    def test_bookkeeping_dismissals_never_teach_the_scorer(self, db, add_job):
+        # A dead posting and a sibling of a role already applied to say
+        # nothing about fit; a location dismissal does, and says why.
+        self._seed(add_job)
+        store.set_disposition(db, "gh_acme_100", "dismissed", note="dead link", reason="closed")
+        store.set_disposition(db, "gh_acme_200", "dismissed", note="applied to the other",
+                              reason="sibling")
+        store.set_disposition(db, "gh_acme_300", "dismissed", reason="location")
+        block = disposition_examples_block(db, 3)
+        assert "DISMISSED" in block and "location" in block
+        assert "dead link" not in block and "applied to the other" not in block
+
+
+class TestPipelineTracking:
+    """Everything an application needs AFTER 'applied': when to chase it,
+    who to chase, whether a referral carried it, why it ended, and which
+    kind of application actually converts."""
+
+    def _applied(self, db, add_job, job_id="p1", **kw):
+        add_job(job_id, **kw)
+        store.set_disposition(db, job_id, "applied")
+        return job_id
+
+    def _col(self, db, job_id, col):
+        return db.execute(f"SELECT {col} FROM jobs WHERE job_id=?",
+                          (job_id,)).fetchone()[col]
+
+    # --- applied_at ---------------------------------------------------- #
+
+    def test_applying_stamps_the_apply_date(self, db, add_job):
+        self._applied(db, add_job)
+        assert self._col(db, "p1", "applied_at")
+
+    def test_a_decision_that_is_not_an_application_stamps_nothing(self, db,
+                                                                  add_job):
+        add_job("p1")
+        store.set_disposition(db, "p1", "saved")
+        assert self._col(db, "p1", "applied_at") is None
+
+    def test_later_dispositions_keep_the_first_apply_date(self, db, add_job):
+        # The whole point of a separate column: disposition_at moves with
+        # every re-mark, so it cannot answer "how long has this been out?".
+        self._applied(db, add_job)
+        first = self._col(db, "p1", "applied_at")
+        store.set_disposition(db, "p1", "interviewing")
+        store.set_disposition(db, "p1", "rejected")
+        store.set_disposition(db, "p1", "applied")
+        assert self._col(db, "p1", "applied_at") == first
+        assert self._col(db, "p1", "disposition_at") != first
+
+    # --- update_pipeline_fields ---------------------------------------- #
+
+    def test_tracking_fields_persist(self, db, add_job):
+        self._applied(db, add_job)
+        row, err = store.update_pipeline_fields(
+            db, "p1", followup_at="2026-09-08", contact="Dana R",
+            referral=True, outcome_reason="no-response")
+        assert err is None
+        assert row["followup_at"] == "2026-09-08"
+        assert row["contact"] == "Dana R"
+        assert row["referral"] == 1
+        assert row["outcome_reason"] == "no-response"
+
+    def test_a_blank_clears_rather_than_storing_an_empty_string(self, db,
+                                                                add_job):
+        self._applied(db, add_job)
+        store.update_pipeline_fields(db, "p1", contact="Dana R")
+        row, _ = store.update_pipeline_fields(db, "p1", contact="   ")
+        assert row["contact"] is None
+
+    def test_an_unlisted_column_is_refused_not_written(self, db, add_job):
+        self._applied(db, add_job, fit=0.9)
+        row, err = store.update_pipeline_fields(db, "p1", resume_fit_score=0.0)
+        assert row is None and "resume_fit_score" in err
+        assert self._col(db, "p1", "resume_fit_score") == 0.9
+
+    def test_disposition_cannot_be_written_through_this_path(self, db, add_job):
+        self._applied(db, add_job)
+        _, err = store.update_pipeline_fields(db, "p1", disposition="dismissed")
+        assert err and self._col(db, "p1", "disposition") == "applied"
+
+    def test_an_outcome_outside_the_vocabulary_is_refused(self, db, add_job):
+        self._applied(db, add_job)
+        _, err = store.update_pipeline_fields(db, "p1", outcome_reason="ghosted")
+        assert err and "outcome_reason" in err
+        assert self._col(db, "p1", "outcome_reason") is None
+
+    def test_unknown_job_errors(self, db):
+        row, err = store.update_pipeline_fields(db, "nope", contact="Dana R")
+        assert row is None and err
+
+    # --- conversion_report --------------------------------------------- #
+
+    def _applications(self, db, add_job):
+        """Two mid-band onsite applications, one still interviewing and one
+        rejected AFTER an interview; one high-band remote application that
+        was never answered."""
+        for jid, fit, geo in (("mid1", 0.41, "onsite"), ("mid2", 0.54, "onsite"),
+                              ("hi1", 0.82, "remote")):
+            add_job(jid, fit=fit, geo_mode=geo)
+        store.set_disposition(db, "mid1", "interviewing")
+        store.set_disposition(db, "mid2", "rejected")
+        store.update_pipeline_fields(db, "mid2",
+                                     outcome_reason="rejected-interview")
+        store.set_disposition(db, "hi1", "rejected")
+        store.update_pipeline_fields(db, "hi1", outcome_reason="no-response")
+
+    def _report(self, db):
+        return {(r["band"], r["geo_mode"]): r
+                for r in store.conversion_report(db)}
+
+    def test_report_slices_by_fit_band_and_geo(self, db, add_job):
+        self._applications(db, add_job)
+        rep = self._report(db)
+        # Ordered low band to high, so the table reads as a ladder.
+        assert list(rep) == [("mid", "onsite"), ("high", "remote")]
+        assert rep[("mid", "onsite")]["applications"] == 2
+        assert rep[("high", "remote")]["applications"] == 1
+
+    def test_an_interview_still_counts_after_the_rejection(self, db, add_job):
+        # Without this, every conversion number would decay to zero as
+        # applications resolve — which is exactly the number that shows a
+        # mid-fit onsite role converting better than a top-scored remote one.
+        self._applications(db, add_job)
+        rep = self._report(db)
+        assert rep[("mid", "onsite")]["interviews"] == 2
+        assert rep[("mid", "onsite")]["interview_rate"] == 1.0
+        assert rep[("high", "remote")]["interviews"] == 0
+        assert rep[("high", "remote")]["interview_rate"] == 0.0
+
+    def test_only_applications_reach_the_report(self, db, add_job):
+        add_job("s1", fit=0.9)
+        add_job("d1", fit=0.9)
+        store.set_disposition(db, "s1", "saved")
+        store.set_disposition(db, "d1", "dismissed")
+        assert store.conversion_report(db) == []
+
+    def test_an_unscored_application_is_banded_separately(self, db, add_job):
+        add_job("u1", geo_mode="onsite")           # no resume_fit_score
+        store.set_disposition(db, "u1", "applied")
+        assert list(self._report(db)) == [("unscored", "onsite")]
+
+    # --- followups_due -------------------------------------------------- #
+
+    def test_only_arrived_dates_on_live_applications_come_due(self, db,
+                                                              add_job):
+        for jid in ("due", "future", "dead"):
+            self._applied(db, add_job, jid)
+        store.update_pipeline_fields(db, "due", followup_at="2026-01-01")
+        store.update_pipeline_fields(db, "future", followup_at="2099-01-01")
+        store.update_pipeline_fields(db, "dead", followup_at="2026-01-01")
+        store.set_disposition(db, "dead", "rejected")
+        assert [r["job_id"] for r in
+                store.followups_due(db, "2026-06-01")] == ["due"]
+
+    def test_an_application_with_no_date_is_never_due(self, db, add_job):
+        self._applied(db, add_job)
+        assert store.followups_due(db, "2099-01-01") == []
+
+    def test_interviewing_rows_are_still_chased(self, db, add_job):
+        self._applied(db, add_job)
+        store.set_disposition(db, "p1", "interviewing")
+        store.update_pipeline_fields(db, "p1", followup_at="2026-01-01")
+        assert len(store.followups_due(db, "2026-06-01")) == 1
+
+    # --- the scorer's few-shot block ------------------------------------ #
+
+    def test_outcome_reason_rides_along_to_the_few_shot_block(self, db,
+                                                              add_job):
+        add_job("p1", "Imaging Scientist")
+        store.set_disposition(db, "p1", "rejected", note="no headcount")
+        store.update_pipeline_fields(db, "p1",
+                                     outcome_reason="rejected-interview")
+        block = disposition_examples_block(db, 3)
+        assert "Imaging Scientist" in block
+        assert "rejected-interview" in block
+        assert "no headcount" in block
 
 
 class TestTrackMembership:
@@ -226,3 +1167,478 @@ class TestTrackMembership:
 
     def test_join_tracks_is_canonical(self):
         assert store.join_tracks({"b", "a"}) == "a,b"
+
+
+class TestMisses:
+    """Candidates that failed to become companies are kept, with a reason —
+    and must stay invisible to every crawl path."""
+
+    def test_miss_rows_never_reach_the_crawl(self, db):
+        store.upsert_company(db, {"name": "Live Co", "ats": "lever",
+                                  "slug": "live", "active": 1})
+        before = len(store.get_companies(db, active_only=True))
+        for name, reason in [("Advarra", "ats-unsupported:ukg"),
+                             ("Chiesi USA", "no-local-jobs"),
+                             ("Cognito Therapeutics", "no-local-jobs")]:
+            assert store.record_miss(db, name, reason, ats="greenhouse")
+        assert len(store.get_companies(db, active_only=True)) == before
+        assert len(store.get_companies(db, active_only=False)) == before + 3
+
+    def test_a_miss_never_deactivates_a_working_company(self, db):
+        store.upsert_company(db, {"name": "Live Co", "ats": "lever",
+                                  "slug": "live", "active": 1})
+        assert store.record_miss(db, "Live Co", "fetch-error:ReadTimeout") is False
+        assert store.get_companies(db, active_only=True)[0]["name"] == "Live Co"
+
+    def test_resolving_a_miss_clears_the_reason(self, db):
+        store.record_miss(db, "Liquidia", "ats-unsupported:hibob")
+        store.upsert_company(db, {"name": "Liquidia", "ats": "hibob",
+                                  "slug": "liquidia", "active": 1})
+        row = store.get_companies(db, active_only=True)[0]
+        assert row["miss_reason"] is None and row["miss_at"] is None
+
+    def test_counts_aggregate_on_the_family_not_the_qualifier(self, db):
+        store.record_miss(db, "a", "ats-unsupported:ukg")
+        store.record_miss(db, "b", "ats-unsupported:taleo")
+        store.record_miss(db, "c", "no-board-found")
+        assert store.miss_counts(db) == [("ats-unsupported", 2),
+                                         ("no-board-found", 1)]
+
+    def test_created_at_survives_a_reprobe_that_moves_last_probed(self, db):
+        store.upsert_company(db, {"name": "X", "ats": "lever", "slug": "x"})
+        row = db.execute("SELECT created_at, last_probed FROM companies").fetchone()
+        store.upsert_company(db, {"name": "X", "mission_score": 0.5})
+        after = db.execute("SELECT created_at, last_probed FROM companies").fetchone()
+        assert after["created_at"] == row["created_at"]
+        assert after["last_probed"] >= row["last_probed"]
+        assert store.roster_growth(db, days=7) == 1
+
+
+class TestMarkHarvested:
+    """The dead-board promotion cycle mark_harvested runs on the row's
+    miss_reason. Its doctest has the soft-fail and ordinary-empty passes;
+    tests/test_harvest.py has the wiring through harvest_board."""
+
+    def test_a_nonempty_pass_stamps_last_nonempty_at(self, db, company):
+        store.mark_harvested(db, company, 5)
+        row = store.get_company(db, company)
+        assert row["total_job_count"] == 5 and row["last_nonempty_at"]
+
+    def test_repeat_soft_failure_does_not_move_miss_at(self, db, company):
+        t1, t2 = datetime(2026, 1, 1), datetime(2026, 1, 2)
+        store.mark_harvested(db, company, 0, soft_fail=True, now=t1)
+        store.mark_harvested(db, company, 0, soft_fail=True, now=t2)
+        assert store.get_company(db, company)["miss_at"] == t1.isoformat()
+
+    def test_a_nonempty_pass_clears_the_harvest_miss(self, db, company):
+        store.mark_harvested(db, company, 0, soft_fail=True)
+        store.mark_harvested(db, company, 3)
+        row = store.get_company(db, company)
+        assert (row["miss_reason"], row["miss_at"]) == (None, None)
+
+    def test_three_days_of_soft_failure_promotes_to_board_dead(self, db,
+                                                                company):
+        t1 = datetime(2026, 1, 1)
+        store.mark_harvested(db, company, 0, soft_fail=True, now=t1)
+        dead_after = store.companies.HARVEST_DEAD_AFTER_DAYS
+        promoted = store.mark_harvested(
+            db, company, 0, soft_fail=True,
+            now=t1 + timedelta(days=dead_after))
+        assert promoted == "board-dead:greenhouse", "named after the row's ats"
+        row = store.get_company(db, company)
+        assert row["miss_reason"] == promoted
+        assert row["active"] == 0, \
+            "so reresolve_misses (active=0 only) can pick it back up"
+
+    def test_promotion_leaves_another_miss_family_untouched(self, db, company):
+        db.execute("UPDATE companies SET miss_reason='ats-unsupported:ukg' "
+                   "WHERE id=?", (company,))
+        assert store.mark_harvested(db, company, 0, soft_fail=True) is None
+        row = store.get_company(db, company)
+        assert row["miss_reason"] == "ats-unsupported:ukg"
+
+class TestUpsertJobUrlRekey:
+    """A posting that arrives under a NEW job_id scheme (company ats/tenant
+    change, fetcher id-format change) must re-key its existing row, not
+    duplicate it — the 2026-08-28 store held 17 URL pairs like Duke's
+    sf__<slug> -> sf_<tenant>_<num> and Keebler's custom_* -> rippling_*,
+    each double-ranking and double-spending deep-verify."""
+
+    _URL = "https://acme.io/jobs/42"
+
+    def _job(self, job_id, title="Medical Lab Scientist"):
+        return {"job_id": job_id, "company_name": "Acme", "title": title,
+                "url": self._URL, "location": "Durham, NC",
+                "track": "local-tech"}
+
+    def test_same_url_and_title_rekeys_the_existing_row(self, db):
+        assert store.upsert_job(db, self._job("sf__old-slug")) is True
+        db.execute("UPDATE jobs SET disposition='saved' WHERE job_id='sf__old-slug'")
+        first_seen = db.execute("SELECT first_seen FROM jobs").fetchone()[0]
+
+        assert store.upsert_job(db, self._job("sf_tenant_123")) is False
+        rows = db.execute("SELECT job_id, disposition, first_seen FROM jobs "
+                          "WHERE url=?", (self._URL,)).fetchall()
+        assert len(rows) == 1, "the re-ingest must not duplicate the row"
+        assert rows[0]["job_id"] == "sf_tenant_123"
+        assert rows[0]["disposition"] == "saved", \
+            "the user's decision must survive the re-key"
+        assert rows[0]["first_seen"] == first_seen
+
+    def test_different_title_on_a_shared_url_stays_a_separate_row(self, db):
+        # Some custom boards give several distinct postings one landing URL.
+        store.upsert_job(db, self._job("c_1", title="Data Engineer"))
+        store.upsert_job(db, self._job("c_2", title="Research Scientist"))
+        n = db.execute("SELECT COUNT(*) FROM jobs WHERE url=?",
+                       (self._URL,)).fetchone()[0]
+        assert n == 2
+
+
+class TestDedupCompaniesRenamesJobs:
+    """jobs.company_name is the grouping/display key, so a company merge
+    has to rename the moved rows too — the 2026-09-01 dedup merged "Red
+    Hat" into "Red Hat (IBM subsidiary, RTP HQ)" and the ranking kept
+    showing both names."""
+
+    def _wd(self, name, **extra):
+        return {"name": name, "ats": "workday", "handle": "redhat|5|jobs", **extra}
+
+    def test_merged_rows_take_the_kept_company_name(self, db):
+        keep = store.upsert_company(db, self._wd("Red Hat (IBM subsidiary)",
+                                                 mission_tier="other"))
+        dup = store.upsert_company(db, self._wd("Red Hat"))
+        store.upsert_job(db, {"job_id": "wd_redhat_1", "company_id": dup,
+                              "company_name": "Red Hat", "title": "SWE",
+                              "url": "https://r/1"})
+        store.upsert_job(db, {"job_id": "wd_redhat_2", "company_id": keep,
+                              "company_name": "Red Hat (IBM subsidiary, RTP HQ)",
+                              "title": "SRE", "url": "https://r/2"})
+        assert store.dedup_companies(db) == 1
+        names = {r[0] for r in db.execute("SELECT company_name FROM jobs")}
+        assert names == {"Red Hat (IBM subsidiary)"}
+        ids = {r[0] for r in db.execute("SELECT company_id FROM jobs")}
+        assert ids == {keep}
+
+
+class TestCompanyByBoard:
+    """Discovery asks the roster whether a freshly resolved BOARD is already
+    tracked before inserting the name it resolved from, so "SAS" cannot land
+    beside "SAS Institute" on the same iCIMS slug (three such re-adds on
+    2026-09-01: SAS, Veeva Systems, NVIDIA AI)."""
+
+    def test_finds_the_same_board_under_another_name(self, db):
+        store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
+                                  "slug": "globalcareers-sas"})
+        hit = store.company_by_board(db, {"name": "SAS", "ats": "icims",
+                                          "slug": "globalcareers-sas"})
+        assert hit and hit["name"] == "SAS Institute"
+
+    def test_workday_triple_is_the_key(self, db):
+        store.upsert_company(db, {"name": "NVIDIA", "ats": "workday",
+                                  "handle": "nvidia|5|NVIDIAExternalCareerSite"})
+        same = {"ats": "workday", "handle": "nvidia|5|NVIDIAExternalCareerSite"}
+        other_site = dict(same, handle="nvidia|5|Internal")
+        assert store.company_by_board(db, same)["name"] == "NVIDIA"
+        assert store.company_by_board(db, other_site) is None
+
+    def test_no_board_means_no_match(self, db):
+        store.upsert_company(db, {"name": "Stub", "active": 0})
+        assert store.company_by_board(db, {"name": "Stub 2"}) is None
+
+
+class TestCompanyByHost:
+    """The manual capture path files a saved page under the roster row whose
+    careers_url owns the page's host, so a bot-challenged or JS-only board
+    feeds an EXISTING company instead of minting one from the page text."""
+
+    def test_exact_host_beats_a_sibling_domain(self, db):
+        store.upsert_company(db, {"name": "Acme Corp", "active": 0,
+                                  "careers_url": "https://www.acme.org/"})
+        store.upsert_company(db, {"name": "Acme Health", "active": 0,
+                                  "careers_url": "https://jobs.acme.org/"})
+        assert store.company_by_host(db, "https://jobs.acme.org/jobs/1")["name"] == \
+            "Acme Health"
+        assert store.company_by_host(db, "https://careers.acme.org/")["name"] == \
+            "Acme Corp"
+
+    def test_url_shaped_slug_counts_as_a_host(self, db):
+        store.upsert_company(db, {"name": "Widget Co", "ats": "phenom",
+                                  "slug": "widgets.example.com"})
+        assert store.company_by_host(db, "https://widgets.example.com/job/1")["name"] == \
+            "Widget Co"
+
+    def test_shared_ats_host_needs_the_tenant_path(self, db):
+        store.upsert_company(db, {"name": "Beta", "careers_url":
+                                  "https://apply.workable.com/beta/"})
+        assert store.company_by_host(db, "https://apply.workable.com/beta/j/ABC123/")["name"] == "Beta"
+        assert store.company_by_host(db, "https://apply.workable.com/gamma/") is None
+        # A sibling-domain match on a shared host would claim every tenant.
+        assert store.company_by_host(db, "https://jobs.workable.com/") is None
+
+    def test_www_prefix_and_case_do_not_matter(self, db):
+        store.upsert_company(db, {"name": "Acme", "careers_url": "https://WWW.Acme.org/careers"})
+        assert store.company_by_host(db, "https://acme.org/x")["name"] == "Acme"
+
+    def test_capture_only_rows_have_a_board_identity(self, db):
+        row = {"name": "Saved", "ats": store.CAPTURE_ATS,
+               "careers_url": "https://jobs.saved.org/"}
+        store.upsert_company(db, row)
+        assert store.board_key(row) == (store.CAPTURE_ATS, "https://jobs.saved.org")
+        dup = store.company_by_board(db, dict(row, name="Saved Inc"))
+        assert dup and dup["name"] == "Saved"
+
+class TestDedupJobs:
+    """Same company + same URL modulo query string + same title is one
+    posting: iCIMS served SAS's postings as `?in_iframe=1` and
+    `?hub=9&in_iframe=1` under two id namespaces (12 pairs, 2026-09-01),
+    and upsert_job's exact-URL re-key could not see through the query."""
+
+    _BASE = "https://careers-sas.icims.com/jobs/42453/software-developer/job"
+
+    def _job(self, job_id, query, title="Software Developer", company_id=None):
+        return {"job_id": job_id, "company_id": company_id,
+                "company_name": "SAS", "title": title,
+                "url": f"{self._BASE}?{query}", "location": "Cary, NC",
+                "track": "local-tech"}
+
+    def test_query_variants_collapse_and_keep_the_dispositioned_row(
+            self, db, company):
+        store.upsert_job(db, self._job("icims_careers-sas_42453",
+                                       "in_iframe=1", company_id=company))
+        store.upsert_job(db, self._job("icims_globalcareers-sas_42453",
+                                       "hub=9&in_iframe=1", company_id=company))
+        db.execute("UPDATE jobs SET disposition='applied' "
+                   "WHERE job_id='icims_globalcareers-sas_42453'")
+        assert store.dedup_jobs(db) == 1
+        rows = db.execute("SELECT job_id, disposition FROM jobs").fetchall()
+        assert [(r["job_id"], r["disposition"]) for r in rows] == \
+            [("icims_globalcareers-sas_42453", "applied")]
+
+    def test_earliest_row_wins_among_equals(self, db, company):
+        store.upsert_job(db, self._job("icims_a_42453", "in_iframe=1",
+                                       company_id=company))
+        store.upsert_job(db, self._job("icims_b_42453", "hub=9&in_iframe=1",
+                                       company_id=company))
+        db.execute("UPDATE jobs SET first_seen='2020-01-01T00:00:00' "
+                   "WHERE job_id='icims_b_42453'")
+        assert store.dedup_jobs(db) == 1
+        assert [r[0] for r in db.execute("SELECT job_id FROM jobs")] ==             ["icims_b_42453"]
+
+    def test_distinct_titles_on_one_url_stay_separate(self, db, company):
+        store.upsert_job(db, self._job("a", "x=1", title="Data Engineer",
+                                       company_id=company))
+        store.upsert_job(db, self._job("b", "x=2", title="Research Scientist",
+                                       company_id=company))
+        assert store.dedup_jobs(db) == 0
+
+    def test_distinct_requisitions_on_a_shared_landing_url_stay_separate(
+            self, db, company):
+        # Greenhouse companies whose stored URL is one careers landing page
+        # (…/careers?gh_jid=N): same title under two requisition numbers is
+        # two postings (a second office, a re-opened req), not a duplicate.
+        base = "https://butterflynetwork.com/careers"
+        for jid, q in (("gh_butterflynetwork_76211920", "gh_jid=76211920"),
+                       ("gh_butterflynetwork_76221680", "gh_jid=76221680")):
+            store.upsert_job(db, {"job_id": jid, "company_id": company,
+                                  "company_name": "Butterfly",
+                                  "title": "Staff Engineer, Digital Verification",
+                                  "url": f"{base}?{q}", "track": "local-tech"})
+        assert store.dedup_jobs(db) == 0
+
+    def test_unlinked_rows_are_left_alone(self, db):
+        # No company_id: nothing to scope the merge by, so never touched.
+        store.upsert_job(db, self._job("a", "x=1"))
+        store.upsert_job(db, self._job("b", "x=2"))
+        assert store.dedup_jobs(db) == 0
+
+
+
+class TestReviewQueue:
+    """Nothing an automated path discovers joins the roster by itself. One
+    pasted page produced 15 names that were never employers ("Oncology",
+    "Job Location", "Who You Are"); the resolver spent about a thousand HTTP
+    requests on them and turned four into ACTIVE roster rows with real
+    boards. They land here instead, uncrawled, until a person rules."""
+
+    def _queue(self, db, name="Guess", **over):
+        row = {"name": name, "ats": "greenhouse", "slug": name.lower(),
+               "source": "paste"}
+        row.update(over)
+        return store.upsert_company(db, store.mark_pending(row))
+
+    def test_candidates_are_listed_newest_first(self, db):
+        self._queue(db, "Older")
+        self._queue(db, "Newer")
+        assert [c["name"] for c in store.pending_companies(db)] == \
+            ["Newer", "Older"]
+
+    def test_candidates_are_never_crawled(self, db):
+        self._queue(db)
+        assert store.get_companies(db, active_only=True) == []
+        assert [c["name"] for c in store.get_companies(db, active_only=False)] \
+            == ["Guess"]
+
+    def test_a_miss_row_is_not_a_candidate(self, db):
+        # Misses are inactive too, but nobody is being asked about them.
+        store.record_miss(db, "Nope", "no-board-found")
+        assert store.pending_companies(db) == []
+
+    def test_confirm_drops_the_tag_and_starts_the_crawl(self, db):
+        cid = self._queue(db, "Real Co", tags="local")
+        row = store.confirm_company(db, cid)
+        assert (row["tags"], row["active"]) == ("local", 1)
+        assert [c["name"] for c in store.get_companies(db)] == ["Real Co"]
+        assert store.pending_companies(db) == []
+
+    def test_confirm_parks_an_off_mission_candidate(self, db):
+        # Confirming says "this IS the employer", not "crawl it whatever its
+        # mission" -- config.is_active_mission still decides that.
+        cid = self._queue(db, "Off Mission",
+                          mission_tier="not-a-configured-tier")
+        assert store.confirm_company(db, cid)["active"] == 0
+        assert store.pending_companies(db) == []
+
+    def test_an_explicit_verdict_is_written_without_consulting_the_rule(
+            self, db, monkeypatch):
+        # The store writes the caller's decision; it only falls back to
+        # config.is_active_mission when no verdict was passed. Patched on
+        # the config PACKAGE, which is where the rule lives now -- it used
+        # to sit in src/claude/api.py, which is what made the store import
+        # the LLM layer to default one column.
+        monkeypatch.setattr(config, "is_active_mission",
+                            lambda *a, **k: 1 / 0)
+        cid = self._queue(db, "Decided", mission_tier="not-a-configured-tier")
+        assert store.confirm_company(db, cid, active=1)["active"] == 1
+        cid2 = self._queue(db, "Parked")
+        assert store.confirm_company(db, cid2, active=0)["active"] == 0
+
+    def test_reject_deletes_the_row_its_jobs_and_blocks_the_name(self, db):
+        cid = self._queue(db, "Job Location")
+        store.upsert_job(db, {"job_id": "jl1", "company_id": cid,
+                              "company_name": "Job Location", "title": "T"})
+        assert store.reject_company(db, cid, "a JD section heading") \
+            == "Job Location"
+        assert store.get_companies(db, active_only=False) == []
+        assert not store.job_exists(db, "jl1")
+        assert store.blocked_name_keys(db) == {"joblocation"}
+
+    def test_the_blocklist_is_keyed_by_the_normalized_name(self, db):
+        store.block_name(db, "Who You Are", "JD section header")
+        store.block_name(db, "who-you-are!", "seen again")
+        assert store.blocked_name_keys(db) == {"whoyouare"}
+
+    def test_only_a_reviewed_row_reads_as_a_confirmed_company(self, db):
+        cid = self._queue(db, "Real Co")
+        assert store.is_confirmed_company(db, "Real Co") is False
+        store.confirm_company(db, cid)
+        assert store.is_confirmed_company(db, "real co") is True
+        assert store.is_confirmed_company(db, "Never Seen") is False
+
+
+class TestConcurrentWriters:
+    """SQLite admits ONE writer. The harvester runs eleven."""
+
+    def test_a_stalled_machine_never_costs_a_whole_board(self, tmp_path):
+        """Eleven threads batching at once must not lose a write.
+
+        On 2026-09-11 eighteen harvest boards died with "database is
+        locked" and dropped 12,674 already-fetched postings. The machine
+        was saturated, not the database -- HTTP throughput in the same
+        minute fell from 493 GETs to 35 -- and every lost board had waited
+        out the full 30s busy timeout.
+
+        The timeout is shrunk here rather than the machine slowed: same
+        branch, no wall-clock dependence. Without store's write lock this
+        loses most of the boards.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        db = tmp_path / "jobs.db"
+        conn = store.connect(db)
+        ids = [store.upsert_company(conn, {
+            "name": f"Co{b}", "ats": "greenhouse", "slug": f"co{b}",
+            "active": 1, "tags": "local"}) for b in range(8)]
+        conn.close()
+
+        failures = []
+
+        def board(b, rows=60):
+            conn = store.connect(db)
+            conn.execute("PRAGMA busy_timeout=1")
+            try:
+                with store.batch(conn):
+                    for i in range(rows):
+                        store.upsert_job(conn, {
+                            "job_id": f"c{b}-j{i}", "company_id": ids[b],
+                            "company_name": f"Co{b}", "title": f"Eng {i}",
+                            "url": f"https://x.test/{b}/{i}"})
+            except Exception as e:                      # noqa: BLE001
+                failures.append(f"{type(e).__name__}: {e}")
+            finally:
+                conn.close()
+
+        with ThreadPoolExecutor(max_workers=11) as ex:
+            list(as_completed([ex.submit(board, b) for b in range(8)]))
+
+        assert not failures, failures
+        conn = store.connect(db)
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 8 * 60
+        conn.close()
+
+
+class TestPlanBoardVerdict:
+    """A plan's verdict is the EMPLOYER's: the write lands there, so a
+    board's own override must never be promoted to the whole employer."""
+
+    def test_a_replaced_board_with_an_override_inherits_the_employers_verdict(self, db):
+        a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a"})
+        write_mission(db, a, mission_tier="core", mission_score=0.9, mission_reason="the lab")
+        db.commit()
+        b, _ = store.add_board(db, {"name": "Acme", "ats": "workday",
+                                    "handle": "acme|5|ext"})
+        store.set_board_mission(db, b, "other", 0.1, "the hospital division")
+        db.execute("UPDATE companies SET miss_reason='board-dead' WHERE id=?", (b,))
+        plan = store.plan_board(db, {"name": "Acme", "ats": "ashby", "slug": "z"})
+        assert (plan.action, plan.row["id"]) == ("replace", b)
+        assert plan.verdict == ("core", 0.9, "the lab")
+        assert not plan.needs_score
+
+    def test_an_employer_with_no_verdict_needs_a_score_whatever_a_board_holds(self, db):
+        a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a"})
+        store.set_board_mission(db, a, "other", 0.1)
+        plan = store.plan_board(db, {"name": "Acme", "ats": "ashby", "slug": "z"})
+        assert plan.action == "sibling" and plan.verdict is None and plan.needs_score
+
+
+class TestCompanyIndexMemo:
+    """_company_index is held per connection for the run, and a write through
+    this connection or another one drops it."""
+
+    def test_a_write_through_this_or_another_connection_invalidates_it(self, tmp_path):
+        one, other = store.connect(tmp_path / "s.db"), store.connect(tmp_path / "s.db")
+        index = store.companies._company_index
+        store.upsert_company(one, {"name": "A", "careers_url": "https://jobs.a.org/"})
+        held = index(one)
+        assert index(one) is held
+        store.upsert_company(one, {"name": "B", "careers_url": "https://jobs.b.org/"})
+        assert store.company_by_host(one, "https://jobs.b.org/")["name"] == "B"
+        store.upsert_company(other, {"name": "C", "careers_url": "https://jobs.c.org/"})
+        assert store.company_by_host(one, "https://jobs.c.org/")["name"] == "C"
+        assert index(one) is not held
+        one.close()
+        other.close()
+
+    def test_uncommitted_writes_are_never_held(self, db):
+        with pytest.raises(RuntimeError):
+            with store.batch(db):
+                store.upsert_company(db, {"name": "D", "careers_url": "https://jobs.d.org/"})
+                assert store.company_by_host(db, "https://jobs.d.org/")["name"] == "D"
+                raise RuntimeError
+        assert store.company_by_host(db, "https://jobs.d.org/") is None
+
+    def test_the_employer_of_equal_name_keys_is_the_lowest_id(self, db):
+        store.upsert_company(db, {"name": "A.C.M.E"})
+        store.upsert_company(db, {"name": "ACME"})
+        first = db.execute("SELECT employer_id FROM companies WHERE name='A.C.M.E'").fetchone()[0]
+        plan = store.plan_board(db, {"name": "acme!", "ats": "ashby", "slug": "acme"})
+        assert plan.employer_id == first

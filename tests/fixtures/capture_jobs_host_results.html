@@ -1,0 +1,32 @@
+<!-- A hosted career site on the employer's own jobs.<org> host that answers
+     plain requests with a bot challenge (HTTP 403, "Just a moment..."), so
+     only a browser save reaches the crawler. Public URL shapes of that kind
+     of site: search at /search/jobs and /search/jobs/in/<city>, postings at
+     /jobs/<8-digit id>-<slug>. RECONSTRUCTED from those URL shapes only --
+     the results markup itself could not be inspected and is illustrative. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Search Jobs | Acme Health Careers</title>
+<link rel="canonical" href="https://jobs.acmehealth.org/search/jobs">
+</head>
+<body>
+<nav><a href="/search/jobs">Search Jobs</a> <a href="/locations">Locations</a> <a href="/pages/talent-network">Talent Network</a></nav>
+<div class="search-results">
+<div class="job-card">
+<h2><a href="/jobs/15659622-data-platform-engineer">Data Platform Engineer</a></h2>
+<div class="job-card__meta"><span class="job-card__location">Morrisville, NC</span> <span>Full Time</span> <span>Day</span> <span>Job ID 163541</span></div>
+</div>
+<div class="job-card">
+<h2><a href="/jobs/15660103-clinical-informatics-analyst">Clinical Informatics Analyst</a></h2>
+<div class="job-card__meta"><span class="job-card__location">Chapel Hill, NC</span> <span>Full Time</span> <span>Job ID 163602</span></div>
+</div>
+<div class="job-card">
+<h2><a href="/jobs/15660210-registered-nurse-icu">Registered Nurse - ICU</a></h2>
+<div class="job-card__meta"><span class="job-card__location">Raleigh, NC</span> <span>Full Time</span> <span>Night</span></div>
+</div>
+</div>
+<a class="pager" href="/search/jobs?page=2">Next page</a>
+</body>
+</html>

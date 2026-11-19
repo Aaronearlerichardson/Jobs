@@ -1,0 +1,201 @@
+"""Description backfill: the missing JD text of stored rows, from each
+company's own board."""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterable
+from datetime import datetime, timedelta
+from typing import NotRequired, TypedDict, cast
+
+from src import store
+from src.ats.board import company as company_fetch
+from src.config import RuntimeTrack
+from src.net.parallel import fan_out
+from src.ops.maintenance import (_t, board_index, board_match,
+                                 group_by_company, track_writer)
+from src.rows import CompanyRow, FetchedJob
+
+
+class StaleRow(TypedDict):
+    """A stored row `stale_body_rows` selects (`columns` always names job_id,
+    title and url; company_id only when asked)."""
+    job_id: str
+    title: str | None
+    url: str | None
+    company_id: NotRequired[int | None]
+    desc_checked_at: str | None
+
+
+def stale_body_rows(conn: sqlite3.Connection, where: str,
+                    columns: str = "job_id, title, url", min_len: int = 200,
+                    retry_days: int = 3, limit: int | None = None,
+                    label: str = "description(s)") -> list[StaleRow]:
+    """Stored rows with no usable body yet, minus the ones a recent attempt
+    already failed on, and the header line saying so.
+
+    `where` is the extra predicate that picks one backfill's population
+    (company-linked rows); the rest -- too short to score,
+    not closed, not attempted inside `retry_days` -- is the same question
+    every backfill asks. Both of them had written it out, and they had
+    already diverged: one read `desc_checked_at` off a sqlite3.Row and the
+    other off a dict, which is the sort of difference that survives
+    because neither copy is ever read beside the other.
+
+    `retry_days=0` retries everything. The skip count is reported, not
+    hidden: "0 of 4 backfilled" with no explanation was undiagnosable from
+    the session log.
+
+    >>> conn = store.connect(":memory:")
+    >>> for j in ("a", "b", "c"):
+    ...     _ = store.upsert_job(conn, {"job_id": j, "title": j, "company_id": 1})
+    >>> store.mark_desc_checked(conn, "c")
+    >>> [r["job_id"] for r in stale_body_rows(conn, "company_id IS NOT NULL", limit=1)]
+      backfilling 1 description(s)... (1 skipped: failed in the last 3d)
+    ['a']
+    >>> store.mark_desc_checked(conn, "a"); store.mark_desc_checked(conn, "b")
+    >>> stale_body_rows(conn, "company_id IS NOT NULL")
+      backfilling 0 description(s)... (3 skipped: failed in the last 3d)
+    []
+    """
+    cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
+              if retry_days else "9999")
+    # One row per selected job, each carrying the skip count; one row of
+    # NULLs with it when nothing is selected.
+    got = conn.execute(
+        f"WITH pool AS MATERIALIZED (SELECT {columns}, desc_checked_at FROM open_jobs "
+        f"WHERE {where} AND length(COALESCE(description,'')) < ?) "
+        "SELECT p.*, s.n AS _skipped FROM "
+        "(SELECT COUNT(*) AS n FROM pool WHERE COALESCE(desc_checked_at, '') >= ?) s "
+        "LEFT JOIN (SELECT * FROM pool WHERE COALESCE(desc_checked_at, '') < ? LIMIT ?) p",
+        (min_len, cutoff, cutoff, limit or -1)).fetchall()
+    skipped = got[0]["_skipped"]
+    rows = [cast(StaleRow, {k: r[k] for k in r.keys() if k != "_skipped"})
+            for r in got if r["job_id"] is not None]
+    print(f"  backfilling {len(rows)} {label}..."
+          + (f" ({skipped} skipped: failed in the last {retry_days}d)"
+             if skipped else ""))
+    return rows
+
+
+def save_body(conn: sqlite3.Connection, job_id: str, text: str | None) -> bool:
+    """Keep a fetched body, or stamp the failure. True when a body landed.
+
+    The stamp is not optional bookkeeping: an unstamped failure is
+    re-selected (and silently re-counted) by every later run, so a board
+    that has stopped answering costs a fetch per row forever. Three of the
+    four places that wrote this pair spelled the UPDATE out inline, beside
+    a store that already exported both halves.
+    """
+    if not text:
+        store.mark_desc_checked(conn, job_id)
+        return False
+    store.store_body(conn, job_id, text)
+    return True
+
+
+async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = None,
+                                      min_len: int = 200, t: RuntimeTrack | None = None,
+                                      retry_days: int = 3) -> int:
+    """One-shot: fill in full JD text for stored jobs missing it (any
+    company-linked row in some track whose description is shorter than
+    min_len chars — the default matches src.claude.fit.MIN_DESC_CHARS), via each company's
+    own ATS board: its URL first, the board pulled at most once per company
+    for the rows that leave no body. Safe to re-run: a row that failed within the last
+    `retry_days` days is skipped (its desc_checked_at stamp), so reruns
+    don't re-fetch every board to fail on the same vanished postings
+    (retry_days=0 retries everything).
+
+    Companies are fetched CONCURRENTLY (`max_workers`); each row is
+    hydrated through its company's engine (`company_fetch.hydrate_description`).
+
+    Notes:
+        This function once advertised max_workers=8 and walked one company
+        at a time. The 2026-09-11 web-UI run (session-20260911-162142) got
+        through ~1,878 of 43,600 rows in nineteen minutes, nine of them on
+        J&J MedTech alone, and was killed before it finished.
+
+        Company lines now print in COMPLETION order, not roster order —
+        `fan_out` yields as boards come back, and the sibling has always
+        printed that way. The counts either line adds up to are unchanged.
+
+        Only the fetching runs concurrently. Every jobs write goes through
+        the store.Writer, grouped per company in one batch so a 1,000-row
+        board takes the write lock once instead of a thousand times.
+
+        The per-row loop stays serial INSIDE each company: those rows share
+        one board pull and, when the board doesn't cover them, hit one
+        host's detail pages, which is exactly the traffic the fetchers'
+        own per-source pacing is written to bound.
+
+        Untracked rows are left out: a harvested row triage dropped at a
+        free gate never needs a body, and one still pending gets its body
+        from triage's capped hydration if it survives. The 2026-10-12 run
+        selected 47,465 rows, all but a handful title/geo/mission drops,
+        and its detail GETs got Arcadis (405) and Unifi (406) to block it.
+    """
+    t = _t(t)
+    async with track_writer(t) as db:
+        rows = await db.run(stale_body_rows, "company_id IS NOT NULL AND track IS NOT NULL",
+                            columns="job_id, title, url, company_id",
+                            min_len=min_len, retry_days=retry_days,
+                            limit=limit,
+                            label="description(s) via company board(s)")
+        groups: list[tuple[CompanyRow, list[StaleRow]]] = []
+        boardless: list[StaleRow] = []
+        for cid, rs in group_by_company(rows).items():
+            company = await db.run(store.get_company, cid)
+            if not company or not company.get("ats"):
+                # No board to fetch IS a failed attempt — stamp these rows too,
+                # or they are re-selected (and silently re-counted) every run
+                # while never even printing a company line.
+                boardless.extend(rs)
+                continue
+            groups.append((company, rs))
+        if boardless:
+            await db.batch(_save_bodies, [(r["job_id"], None) for r in boardless])
+
+        async def _bodies(group: tuple[CompanyRow, list[StaleRow]]) -> list[tuple[str, str | None]]:
+            """One company's fetching: each row hydrated from its own URL,
+            the board pulled (once) only for a row that left no body, and
+            matched by title. Returns [(job_id, description_or_None)] to
+            write.
+
+            Notes:
+                The board went first until 2026-10-07: a Workday listing
+                has no bodies, so its 146-page walk (Thermo Fisher) or
+                85 pages for one Amgen row bought a title match whose
+                body came from the same detail read the URL gives.
+            """
+            company, rs = group
+            index: dict[str, FetchedJob] | None = None
+            out: list[tuple[str, str | None]] = []
+            for r in rs:
+                desc = None
+                if r.get("url"):
+                    stub: FetchedJob = {"title": r["title"] or "", "url": r["url"],
+                                        "ats": company.get("ats"), "description": ""}
+                    await company_fetch.hydrate_description(stub, company)
+                    desc = stub.get("description")
+                if not desc:
+                    index = await board_index(company) if index is None else index
+                    match = await board_match(index, r["title"], tried=r.get("url"))
+                    desc = match.get("description") if match else None
+                out.append((r["job_id"], desc))
+            return out
+
+        n = 0
+        async for (company, rs), bodies in fan_out(
+                groups, _bodies,
+                lambda g: f"{g[0]['name']} board backfill",
+                max_workers, with_item=True):
+            n_matched = await db.batch(_save_bodies, bodies)
+            n += n_matched
+            print(f"    {company['name']:30} {len(rs):2} stale -> {n_matched:2} matched")
+    print(f"  {n} of {len(rows)} description(s) backfilled.")
+    return n
+
+
+def _save_bodies(conn: sqlite3.Connection, bodies: Iterable[tuple[str, str | None]]) -> int:
+    """save_body over (job_id, text) pairs; how many bodies landed."""
+    return sum(save_body(conn, job_id, text) for job_id, text in bodies)

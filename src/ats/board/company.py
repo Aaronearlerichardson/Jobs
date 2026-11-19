@@ -1,0 +1,288 @@
+"""
+Company-scoped fetching: ALL of a *mission-vetted* company's postings,
+optionally location-filtered, in one shape whatever the ATS; and the
+readers for one stored posting.
+
+The company was already vetted (mission scored at discovery time, stored in
+src/store/__init__.py), so the whole board is pulled with no relevance gate and the
+caller's own filter chain decides. `fetch_company` dispatches a store row
+to its platform's engine, `board.Board.whole_board`, which reads the
+`config.BOARDS` spec:
+
+    {"id", "title", "url", "location", "description", "ats",
+     ["posted_at"], ["remote_hint"]}
+
+`hydrate_description` fills one stored posting through the engine that
+reads its URL, else from the posting's own page (`job_page_meta`). The
+per-job open/closed probe is board/closure.py; the careers-page reader
+behind the `custom` spec is board/custom.py.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from urllib.parse import unquote
+
+from lxml import etree
+
+from src import config
+from src.ats.feeds import FETCH
+from src.match.locality import LocationRE
+from src.net import http
+from src.net.http import HEADERS, PLAIN_HEADERS
+from src.net.http import FETCH_ERRORS
+from src.net.util import clean_field, first, node_text, parse_markup
+from src.rows import BoardCoords, FetchedJob
+from . import jsonld
+from .engine import Board, board_for, board_for_url
+
+_log = logging.getLogger(__name__)
+
+
+def _board_of(job: FetchedJob) -> Board | None:
+    """The engine that reads `job`'s posting: its ATS's, when that one
+    reads the URL; else the one whose `job_ref` does; else its ATS's."""
+    board = board_for(job.get("ats"))
+    if board and board.owns_url(job.get("url")):
+        return board
+    return board_for_url(job.get("url")) or board
+
+
+def needs_detail(job: FetchedJob) -> bool:
+    """True when hydrate_description would fetch anything for `job`: no
+    body yet, or a body already but a location the listing never resolved
+    that the posting's engine can fill (`Board.needs_detail`). Shared by
+    crawl.hydrate.hydrate_rows and triage._hydrate, which both select rows to
+    fetch by this predicate rather than "no description" alone.
+
+    >>> needs_detail({"description": "", "ats": "greenhouse"})
+    True
+    >>> needs_detail({"description": "d", "ats": "greenhouse"})
+    False
+    >>> url = "https://acme.wd5.myworkdayjobs.com/en-US/Ext/job/x/Eng_R1"
+    >>> needs_detail({"description": "d", "ats": "workday", "url": url,
+    ...               "location": "2 Locations"})
+    True
+    >>> needs_detail({"description": "d", "ats": "workday", "url": url,
+    ...               "location": "Durham, NC"})
+    False
+
+    A feed's posting never does: the feed gave all there is.
+
+    >>> needs_detail({"description": "", "ats": "remoteok"})
+    False
+    """
+    if config.row_family(job.get("ats")) != "store":
+        return False
+    board = _board_of(job)
+    return board.needs_detail(job) if board else not job.get("description")
+
+
+async def hydrate_description(job: FetchedJob,
+                              company: BoardCoords | None = None) -> FetchedJob:
+    """Fetch, in place, whatever `needs_detail` says `job` still lacks,
+    through the posting's engine (`Board.hydrate`; `company`, the row's
+    store row, names its board), else from the posting's own page.
+    """
+    if not needs_detail(job):
+        return job
+    board = _board_of(job)
+    if board:
+        await board.hydrate(job, company)
+    # A posting no engine gave a body: its own page (a custom board's, a
+    # SuccessFactors site's).
+    if not job.get("description") and job.get("url"):
+        d = (await job_page_meta(job["url"]))[1]
+        if d:
+            job["description"] = d
+    return job
+
+
+async def job_page_meta(url: str) -> tuple[str, str]:
+    """(title, description) read off a job's own detail page, vendor-
+    agnostically: schema.org JSON-LD JobPosting first (hundreds of sites),
+    then page metadata for the title (og:title, then <title> minus a
+    " | site" suffix) and SuccessFactors Career-Site-Builder markup for the
+    description (data-careersite-propertyid='description', the SAP SF
+    frontends). Either field is '' on a miss. The title half exists for
+    URL-only manual adds, which otherwise stored an empty title that
+    nothing downstream could score or rank. A page refused with 403/405 is
+    asked again with a bare platform UA (`PLAIN_HEADERS`), which WAFs that
+    refuse a Chrome UA without Chrome's client hints accept. The page is
+    read off the loop (`_page_meta`)."""
+    try:
+        r = await http.send("GET", url, headers=HEADERS, allow_redirects=True)
+        if r.status_code in (403, 405):
+            r = await http.send("GET", url, allow_redirects=True, headers=PLAIN_HEADERS)
+    except FETCH_ERRORS as e:
+        _log.debug("page meta %s: %s", url, e)
+        return "", ""
+    return await asyncio.to_thread(_page_meta, r, url)
+
+
+def _page_meta(r: jsonld.Page, url: str) -> tuple[str, str]:
+    """job_page_meta's (title, description) off the fetched page `r`."""
+    try:
+        html = r.text
+    except (ValueError, LookupError) as e:
+        _log.debug("page meta %s: undecodable body: %s", url, e)
+        return "", ""
+    title = desc = ""
+    try:
+        p = next((jsonld.read_posting(o, url) for o in jsonld.extract_jsonld(html, url)
+                  if jsonld.is_jobposting(o)), None)
+        if p:
+            title = p["title"]
+            d = p["description"].strip()
+            if len(d) >= 120:
+                desc = d[:config.MAX_DESC_CHARS]
+    except Exception:   # hostile JSON-LD shapes: any field may be any type
+        _log.warning("page meta %s: JSON-LD unreadable", url, exc_info=True)
+    if title and desc:
+        return title, desc
+    try:
+        tree = parse_markup(html, url=url)
+        if not title:
+            og, te = first("//meta[@property='og:title']", tree), first("//title", tree)
+            raw = (og.get("content") if og is not None else "") or \
+                (node_text(te, " ", strip=False) if te is not None else "")
+            title = re.sub(r"\s+", " ", raw or "").split(" | ")[0].strip()
+        if not desc:
+            # The JD container, the first of these found: SuccessFactors'
+            # Career Site Builder property; a custom board's named container
+            # ('job-description'/'jobDescription', never a bare
+            # 'description' a short company tagline could match); last,
+            # SF's CLASSIC template's .jobDisplay, which carries a little
+            # page chrome.
+            containers = ("//*[@data-careersite-propertyid='description']",
+                          "//*[@data-careersite-propertyid='jobdescription']",
+                          "//*[contains(@class, 'job-description')]",
+                          "//*[contains(@class, 'jobDescription')]",
+                          "//*[contains(@class, 'jobDisplay')]")
+            hits = (first(path, tree) for path in containers)
+            el = next((e for e in hits if e is not None), None)
+            if el is not None:
+                d = node_text(el)
+                if len(d) >= 120:
+                    desc = d[:config.MAX_DESC_CHARS]
+    except (etree.LxmlError, ValueError) as e:
+        _log.warning("page meta %s: markup unreadable: %s", url, e)
+    return title, desc
+
+
+def title_from_url_slug(url: str | None) -> str:
+    """Last-resort title for a URL-only manual add: the path segment with
+    the most word tokens, digits and separators normalized. Two words
+    minimum, so an id-only path yields '' rather than nonsense.
+
+    >>> title_from_url_slug("https://careers.example.com/details/173531/sr_vision_software_engineer#apply")
+    'Sr Vision Software Engineer'
+    >>> title_from_url_slug("https://x.icims.com/jobs/42453/software-developer/job?in_iframe=1")
+    'Software Developer'
+    >>> title_from_url_slug("https://x.com/jobs/1970393556937343")
+    ''
+    """
+    path = re.sub(r"[?#].*$", "", url or "")
+    path = re.sub(r"^https?://[^/]+", "", path)
+    best: list[str] = []
+    for seg in path.split("/"):
+        seg = unquote(seg)
+        if re.search(r"\.[a-z]{2,5}$", seg, re.I):     # a file, not a slug
+            continue
+        words = [w for w in re.split(r"[-_+\s]+", seg)
+                 if re.search(r"[A-Za-z]", w)]
+        if len(words) > len(best):
+            best = words
+    if len(best) < 2:
+        return ""
+    return " ".join(w[:1].upper() + w[1:] for w in best)
+
+
+# --- dispatch ------------------------------------------------------------------ #
+
+async def fetch_company(company: BoardCoords, loc_re: LocationRE | None = None,
+                        validate: bool = False, employer: str = "") -> list[FetchedJob]:
+    """A store row's board pulled through its platform's engine
+    (`Board.whole_board`), as the company named `employer` where known;
+    [] for a platform no spec fetches. A feed's row (config.row_family)
+    runs its instance's fetcher (ats.feeds.FETCH) with that instance's
+    config.FEEDS arguments instead; [] once config dropped the instance.
+
+    `loc_re=None` pulls the whole board; pass NC_RE for a pull scoped to
+    the profile's locality (the local track's default). A `validate` pull
+    confirms a candidate board and counts its local postings on the
+    pager's own page budget, not config.BOARD_MAX_ROWS.
+    """
+    if config.row_family(company.get("ats")) != "store":
+        feed = config.feed_instance(company.get("ats"), company.get("slug"))
+        if feed is None:
+            return []
+        jobs = await FETCH[feed.family](**feed.kwargs)
+        for j in jobs:
+            j.setdefault("ats", feed.family)
+        return jobs
+    board = board_for(company.get("ats"))
+    return await board.whole_board(company, loc_re, validate, employer) if board else []
+
+
+def board_origin(company: BoardCoords) -> str | None:
+    """The host a store row's board is read from, which one walk visits
+    at a time (the harvest pull, triage's hydration): its engine's
+    `origin`, else its ATS name (an origin not settled yet, or no engine;
+    a feed's row, its family).
+
+    >>> board_origin({"ats": "icims", "slug": "careers-acme"})
+    'https://careers-acme.icims.com'
+    >>> board_origin({"ats": "workday"})
+    'workday'
+    >>> board_origin({"ats": "rss", "slug": "Some Feed"})
+    'rss'
+    """
+    board = board_for(company.get("ats"))
+    if board is not None:
+        origin = board.origin(company)
+        if origin:
+            return origin
+    return company.get("ats")
+
+
+# --- title sampling ------------------------------------------------------------ #
+
+async def sample_titles(company: BoardCoords, n: int = 6) -> list[str]:
+    """Up to `n` distinct posting titles from a store row's board, in board
+    order: what the mission scorer is shown of an employer it has only a
+    name for. [] when the board is unreadable, empty, or of an ATS with no
+    engine; never raises.
+
+    `company` carries the store's board columns (`src.ats.coords.columns`;
+    `from_hit` turns a resolver hit into them). The pull is listing-only: no
+    description, detail or location-rescue request is spent on a sample,
+    except where the posting pages are the listing (at most `n` of them).
+
+    Notes:
+        Until 2026-09-18 the sampler lived in src.discovery.local_sourcing
+        with hand-written requests for four ATS families and fell through to
+        [] for the other sixteen, 35% of the roster's boards: a company on
+        one was mission-scored from its name alone. "Studycast" (Rippling
+        board core-sound-imaging, a medical-imaging vendor's PACS product)
+        came back `other` / 0.05 as a study-education platform.
+    """
+    board = board_for(company.get("ats"))
+    try:
+        handle = board.handle(company) if board else None
+        jobs = await board.listing(handle, cheap=True, rescue_cap=n) if board and handle else []
+    except Exception:   # a sampler never raises; the engine's failures are many
+        _log.warning("title sample %s: board unreadable", company.get("slug"), exc_info=True)
+        return []
+    titles: list[str] = []
+    seen: set[str] = set()
+    for j in jobs:
+        title = clean_field(j.get("title"))
+        if title and title.lower() not in seen:
+            seen.add(title.lower())
+            titles.append(title)
+            if len(titles) >= n:
+                break
+    return titles

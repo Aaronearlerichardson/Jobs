@@ -9,18 +9,185 @@ cities, keywords, or track names.
 Nothing in the suite may touch the Claude API or the network.
 """
 
+import asyncio
+import contextlib
+import gc
+import inspect
+import json
+import logging
+import socket
 import sys
+import threading
+import time
+import traceback
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import requests
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:                      # importable as `pytest tests`
     sys.path.insert(0, str(ROOT))
 
-import config as _config                           # noqa: E402
-import core.store as _store                        # noqa: E402
-import scrapers.runner as _runner                  # noqa: E402
+if sys.platform == "win32":
+    # Every event loop's self-pipe is a socket.socketpair, which Windows
+    # builds by connecting a loopback socket: a guard that patches
+    # socket.connect to keep the suite offline (pytest -p nonet) would stop
+    # any loop from starting. The pair is made with the connect restored.
+    _socketpair = socket.socketpair
+
+    def _loopback_pair(*args, **kw):
+        guard = socket.socket.__dict__.get("connect")
+        if guard is None:
+            return _socketpair(*args, **kw)
+        del socket.socket.connect
+        try:
+            return _socketpair(*args, **kw)
+        finally:
+            socket.socket.connect = guard
+
+    socket.socketpair = _loopback_pair
+
+from src import config as _config                           # noqa: E402
+from src.config.profile_schema import TrackExclude          # noqa: E402
+from src.discovery.resolve import directory as _directory   # noqa: E402
+from src import runstate as _runstate                       # noqa: E402
+import src.session_log as _session_log            # noqa: E402
+import src.store as _store                        # noqa: E402
+from src.conftest import _close_stores            # noqa: E402,F401  (autouse: see there)
+import src.claude.api as _claude                    # noqa: E402
+import src.ops.scoring as _scoring                  # noqa: E402
+import src.discovery.write as _write                # noqa: E402
+from src.net import http as _http                   # noqa: E402
+from src.store import jobs as _jobs                 # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """A request no test answered fails instead of leaving the machine.
+    Needed beside `-p nonet`: an event loop's sockets connect without
+    socket.connect, which nonet patches."""
+    def _refuse():
+        raise AssertionError("test reached the network")
+    monkeypatch.setattr(_http, "_session", _refuse)
+    # A developer's .env key must not reach a test (CI has none): with it,
+    # a careers page asks Claude before its links (custom.claude_page).
+    monkeypatch.setattr(_config, "ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY_HERE")
+    # Nor a paid search's: with it, every search DDG missed asks Firecrawl.
+    monkeypatch.setattr(_config, "FIRECRAWL_API_KEY", "")
+    monkeypatch.setattr(_config, "APIFY_API_KEY", "")
+    # The resolver's domain lookup is a network call: off unless a test says so.
+    monkeypatch.setattr(_config, "DISCOVERY_DOMAIN_LOOKUP", False)
+    # Likewise the board directory, which reads a remote dataset.
+    monkeypatch.setattr(_directory, "index", lambda: _directory.Companies([], {}))
+    # No feed family is pulled unless a test turns it on (config.FEEDS[family]["on"]).
+    # Nor synced into the roster: no instance, so no feed rows in a test store.
+    for fam in _config.FEEDS.values():
+        monkeypatch.setitem(fam, "on", False)
+        monkeypatch.setitem(fam, "calls", [])
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _web_loop_debug():
+    """The web UI's event loop (src/web/server.py) runs in asyncio debug
+    mode, as pytest.ini's asyncio_debug runs pytest-asyncio's loops."""
+    from src.web import server
+
+    async def _debug():
+        asyncio.get_running_loop().set_debug(True)
+    server.call(_debug())
+
+
+@pytest.fixture(autouse=True)
+def loop_blocks(monkeypatch):
+    """Fails the test when a callback held an event loop past 100 ms, which
+    asyncio's debug mode logs: a blocking call hidden in async code stalls
+    every request at once. What debug mode adds inside the callback is not
+    counted: the stack it captures for each new future and task on that
+    thread, and the garbage collector's pauses on any thread. Yields the
+    records it caught, for the test that proves it can see one.
+
+    Notes:
+        A capture takes the whole stack with its source lines, 1.5-3.5 ms
+        each, so a callback that starts forty tasks read as a block: 21
+        unrelated tests failed so beside an exe build on 2026-09-26.
+    """
+    seen, spent, began = [], [], [0.0]      # spent: (thread or None, start, end)
+    extract = traceback.StackSummary.extract.__func__
+
+    def _captured(cls, *args, **kw):
+        start = time.monotonic()
+        try:
+            return extract(cls, *args, **kw)
+        finally:
+            spent.append((threading.get_ident(), start, time.monotonic()))
+
+    def _collector(phase, _info):
+        if phase == "start":
+            began[0] = time.monotonic()
+        else:
+            spent.append((None, began[0], time.monotonic()))
+
+    def _emit(record):
+        # Logged as the callback returns, on its thread: its own time is
+        # its duration less the union of debug time inside it.
+        if str(record.msg).startswith("Executing"):
+            end, me = time.monotonic(), threading.get_ident()
+            start = reach = end - record.args[-1]
+            record.own = record.args[-1]
+            for a, b in sorted((max(a, start), min(b, end)) for t, a, b in spent
+                               if t in (None, me) and b > start and a < end):
+                record.own -= max(0.0, b - max(a, reach))
+                reach = max(reach, b)
+        seen.append(record)
+
+    catch = logging.Handler(logging.WARNING)
+    catch.emit = _emit
+    log = logging.getLogger("asyncio")
+    log.addHandler(catch)
+    monkeypatch.setattr(traceback.StackSummary, "extract", classmethod(_captured))
+    gc.callbacks.append(_collector)
+    try:
+        yield seen
+    finally:
+        gc.callbacks.remove(_collector)
+        log.removeHandler(catch)
+    slow = [r.getMessage() for r in seen if getattr(r, "own", 0) > 0.1]
+    if slow:
+        pytest.fail(f"a callback blocked an event loop: {slow}")
+
+
+@pytest.fixture(autouse=True)
+def _outputs_to_tmp(tmp_path, monkeypatch):
+    """Session logs, digest files and the store never land in the real data
+    dir during tests: the webapp op runner opens a log per op, a harvest
+    pass rewrites every roster track's digest, and a test that opens the
+    default store would migrate the live jobs.db."""
+    monkeypatch.setattr(_session_log, "_log_dir",
+                        lambda: tmp_path / "session-logs")
+    monkeypatch.setattr(_config, "REPORT_DIR", tmp_path / "job_reports")
+    monkeypatch.setattr(_config, "STORE_DB_PATH", tmp_path / "jobs.db")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_run(monkeypatch):
+    """Every test is a run of its own (src/runstate.py): its memos,
+    caches, breakers and flags start empty. A test's run is never ended,
+    so nothing it registered with runstate.at_exit runs. The process's
+    state starts fresh too: the per-host limiter (its asyncio locks belong
+    to one event loop, and each test has its own), the board-owner
+    verdicts, the rows a deep verify gave up on, and ranked_jobs' place
+    verdicts (_place_ok: NC_RE's answers follow the profile a test patches)."""
+    token = _runstate.RUN.set(_runstate.Run())
+    monkeypatch.setattr(_http, "LIMITER", _http.HostLimiter())
+    monkeypatch.setattr(_claude, "_BOARD_OWNER_CACHE", {})
+    monkeypatch.setattr(_scoring, "_GIVEN_UP", set())
+    _http.reset_fetch_failures()     # the failure count is a ContextVar a sync test leaves set
+    _jobs._place_ok.cache_clear()
+    yield
+    _runstate.RUN.reset(token)
 
 
 # --------------------------------------------------------------------------- #
@@ -33,14 +200,19 @@ def cfg():
     return _config
 
 
+def track_with(**update):
+    """The local track with `update` applied (model_copy does not validate)."""
+    return _config.track_for_engine("local").model_copy(update=update)
+
+
 @pytest.fixture(scope="session")
 def local_track():
-    return _runner.track_for_engine("local")
+    return _config.track_for_engine("local")
 
 
 @pytest.fixture(scope="session")
-def neural_track():
-    return _runner.track_for_engine("neural")
+def sweep_track():
+    return _config.track_for_engine("sweep")
 
 
 @pytest.fixture(scope="session")
@@ -57,7 +229,7 @@ def local_addr(cfg):
 @pytest.fixture(scope="session")
 def elsewhere():
     """Somewhere no sane profile calls local — verified, not assumed."""
-    import core.locality as locality
+    import src.match.locality as locality
     for place in ("Ulaanbaatar, Mongolia", "Reykjavik, Iceland",
                   "Hobart, Tasmania"):
         if not locality.is_nc(place):
@@ -65,24 +237,93 @@ def elsewhere():
     pytest.skip("every candidate 'elsewhere' matches this profile's locality")
 
 
+#: What `pristine_keywords` promises to hand back. Spelled out here rather
+#: than read off the snapshot helpers' own tuples: the check below has to be
+#: independent of the code it checks, or it can only ever agree with it.
+_KEYWORD_LISTS = ("CORE_KEYWORDS", "DOMAIN_KEYWORDS", "SKILL_KEYWORDS",
+                  "INCLUDE_KEYWORDS", "EXCLUDE_PHRASES",
+                  "EXCLUDE_TITLE_PHRASES")
+
+
+def _keyword_state(cfg):
+    return {**{n: list(getattr(cfg, n)) for n in _KEYWORD_LISTS},
+            "ACCEPT_REMOTE": bool(cfg.ACCEPT_REMOTE)}
+
+
 @pytest.fixture
 def pristine_keywords(cfg):
-    """Snapshot/restore config's shared keyword lists.
+    """Snapshot/restore config's shared keyword and exclude lists.
 
-    `runner.apply_keyword_focus` mutates them IN PLACE (that's the contract
-    filters.py depends on), so any test that applies a track's focus would
-    leak into the next one without this.
+    `config.apply_keyword_focus` mutates the keyword lists IN PLACE (that's
+    the contract filters.py depends on) and `cfg.widen_keywords` empties the
+    exclude lists too, so any test that does either would leak into the
+    next one without this.
+
+    Verified on the way out, so a list the restore fails to put back fails
+    the test that changed it. It used to fail nothing: a widening emptied
+    EXCLUDE_TITLE_PHRASES for the rest of the session, and the only symptom
+    was a later, unrelated test quietly skipping.
     """
-    saved = (list(cfg.CORE_KEYWORDS), list(cfg.DOMAIN_KEYWORDS),
-             list(cfg.SKILL_KEYWORDS), list(cfg.INCLUDE_KEYWORDS),
-             cfg.ACCEPT_REMOTE)
+    saved = cfg.keyword_snapshot(cfg)
+    before = _keyword_state(cfg)
     yield
-    core, dom, skill, inc, accept = saved
-    cfg.CORE_KEYWORDS[:] = core
-    cfg.DOMAIN_KEYWORDS[:] = dom
-    cfg.SKILL_KEYWORDS[:] = skill
-    cfg.INCLUDE_KEYWORDS[:] = inc
-    cfg.ACCEPT_REMOTE = accept
+    cfg.restore_keywords(saved, cfg)
+    after = _keyword_state(cfg)
+    leaked = sorted(n for n, was in before.items() if after[n] != was)
+    assert not leaked, f"pristine_keywords did not put back: {leaked}"
+
+
+@pytest.fixture
+def exclude_vocab(monkeypatch):
+    """Factory: `exclude_vocab("t_x", clinical_titles=[...], ...)` gives
+    track "t_x" that [exclude.<track>] vocabulary for one test and returns
+    the track id.
+
+    A synthetic table rather than the active profile's, so a test can pin
+    the SHAPE of a vocabulary whether or not profile.toml (or the
+    profile.example.toml CI runs against) happens to configure it.
+
+    `gates._exclude_tables` is lru_cache-backed, so the cache is cleared on
+    BOTH sides: on the way in so the profile's own table for that id is not
+    already memoized, and on the way out so a later test sharing the id
+    does not read this one's vocabulary. Defined here because two files
+    configure one this way and the cache half is the easy half to forget.
+    """
+    import src.match.gates as gates
+
+    def _configure(track_id, **tables):
+        monkeypatch.setitem(gates.config.EXCLUDE_BY_TRACK, track_id, TrackExclude(**tables))
+        gates._exclude_tables.cache_clear()
+        return track_id
+
+    gates._exclude_tables.cache_clear()
+    yield _configure
+    gates._exclude_tables.cache_clear()
+
+
+@pytest.fixture
+def division_vocab(cfg, pristine_keywords, monkeypatch):
+    """A conglomerate whose division gate runs on a KNOWN vocabulary.
+
+    The tests using it exercise the REAL `filters.is_relevant` rather than
+    a stub -- the rule itself is what they are about -- so the loaded
+    profile must not be what decides the answer. The keyword tiers are
+    narrowed to one unmistakable in-field term, the [exclude] title phrase
+    that matters here is pinned, and [policy] watch_division_titles is set
+    to a two-entry stand-in for the real list. `pristine_keywords` puts the
+    profile's own lists back (and fails the test if it cannot).
+    """
+    for name, terms in (("CORE_KEYWORDS", ["electrophysiology"]),
+                        ("DOMAIN_KEYWORDS", ["electrophysiology"]),
+                        ("SKILL_KEYWORDS", ["electrophysiology"]),
+                        ("INCLUDE_KEYWORDS", ["electrophysiology"]),
+                        ("EXCLUDE_PHRASES", []),
+                        ("EXCLUDE_TITLE_PHRASES", ["manager"])):
+        getattr(cfg, name)[:] = terms
+    monkeypatch.setattr(cfg, "WATCH_DIVISION_TITLES",
+                        ("software engineer", "solutions architect"))
+    monkeypatch.setattr(cfg, "is_multi_division",
+                        lambda name: (name or "").lower().startswith("megacorp"))
 
 
 # --------------------------------------------------------------------------- #
@@ -106,11 +347,21 @@ def company(db):
 
 @pytest.fixture
 def add_job(db, company, local_addr):
-    """Factory: add_job('gh_acme_1', title=..., fit=0.9, **overrides)."""
-    def _add(job_id, title="Data Engineer", fit=None, track="local-tech",
+    """Factory: add_job('gh_acme_1', title=..., fit=0.9, **overrides).
+
+    The default title carries the job_id, so two rows added at this one
+    company are two DISTINCT openings. They have to be: store.ranked_jobs
+    collapses same-company/same-title rows to one survivor by default, so a
+    shared default title silently cost every ranking-backed test one of its
+    rows. Pass the SAME explicit title to both rows when a test wants that
+    collapse (tests/test_store.py's TestCollapse), or an exact title when it
+    asserts on the rendered string.
+    """
+    def _add(job_id, title=None, fit=None, track="local-tech",
              **overrides):
         row = {"job_id": job_id, "company_id": company, "company_name": "Acme",
-               "title": title, "url": f"https://acme.io/{job_id}",
+               "title": title or f"Data Engineer {job_id}",
+               "url": f"https://acme.io/{job_id}",
                "location": local_addr, "track": track,
                "resume_fit_score": fit}
         row.update(overrides)
@@ -136,6 +387,291 @@ def status_of(db):
 @pytest.fixture(scope="session")
 def client():
     """Flask test client — exercises the real routes with no socket."""
-    import webapp
-    webapp.app.config["TESTING"] = True
-    return webapp.app.test_client()
+    from src import web
+    web.app.config["TESTING"] = True
+    return web.app.test_client()
+
+
+@pytest.fixture
+def wired_db_path(tmp_path, monkeypatch):
+    """A throwaway store, wired into BOTH places the code looks one up.
+
+    A route opens `UI_TRACKS[track].db_path` (ops.maintenance.track_store);
+    everything that runs outside a request — discovery's preview_names,
+    capture's ingest, harvest/triage's own defaults — falls back to
+    `config.STORE_DB_PATH`. Seven helpers across two files wired one or both
+    of those by hand, and four of them wired only the track config, which
+    holds only for as long as the test stays on the route side of that line.
+    Both are wired here, always, so no test can reach the real store by
+    taking one step past what its own setup happened to cover.
+
+    Returns the path; the file itself is created by whoever connects first.
+    """
+    db_path = tmp_path / "wired.db"
+    monkeypatch.setattr(_config, "STORE_DB_PATH", db_path)
+    default = _config.UI_TRACKS[_config.DEFAULT_TRACK]
+    monkeypatch.setitem(_config.UI_TRACKS, _config.DEFAULT_TRACK,
+                        default.model_copy(update={"db_path": db_path}))
+    return db_path
+
+
+@pytest.fixture
+def patch_op(monkeypatch):
+    """`patch_op(name, fn)` runs `fn` as operation `name`'s target.
+
+    The registry holds function references, so patching the target's module
+    does not reach it; every front end calls through the entry instead.
+    """
+    from src.dispatch import registry
+
+    def _patch(name, fn):
+        monkeypatch.setitem(registry.REGISTRY[name], "target", fn)
+    return _patch
+
+
+# --------------------------------------------------------------------------- #
+#  Store plumbing the tests share
+# --------------------------------------------------------------------------- #
+
+def iso_days_ago(days):
+    """An ISO timestamp `days` days back — the shape every age column in the
+    store (last_seen, harvested_at, miss_at) is compared against."""
+    return (datetime.now() - timedelta(days=days)).isoformat()
+
+
+def company_row(conn, name, ats="greenhouse", **extra):
+    """Upsert one company by name and hand back the stored row.
+
+    `extra` lands last, so a caller's own `ats`/`slug` still wins. Two files
+    had written this same three-liner out byte for byte.
+    """
+    _store.upsert_company(conn, {"name": name, "ats": ats,
+                                 "slug": name.lower(), **extra})
+    return _store.get_company(conn, _store.company_id_by_name(conn, name))
+
+
+def make_board_fn(*, before=None, err=None, fetched=0, new=0, hydrated=0,
+                  closed=0, reopened=0, secs=0.0, **extra):
+    """A stand-in for `harvest.harvest_board`, for tests of `harvest.run`.
+
+    `run()` reads a fixed set of keys off whatever board_fn hands back, and
+    eight tests across two files had each spelled that dict out by hand — so
+    a key run() starts reading has to be added in eight places, and the ones
+    that miss it fail with a KeyError nowhere near the change.
+
+    `extra` carries the optional keys only some callers set (fetch_errors,
+    last_error). `before(company)` runs before the dict is returned, for the
+    tests that need the call recorded, blocked, or raised from; what it
+    returns is awaited when it is awaitable.
+    """
+    async def board_fn(company, db, hydrate=True, progress=None):
+        if before is not None and inspect.isawaitable(got := before(company)):
+            await got
+        return {"err": err, "fetched": fetched, "new": new,
+                "hydrated": hydrated, "closed": closed, "reopened": reopened,
+                "secs": secs, **extra}
+    return board_fn
+
+
+def keep_store_open(monkeypatch, db):
+    """Point `store.schema.connect()`, and so every store.Writer, at the
+    test's OWN connection, with close() disarmed.
+
+    The paths under test (add_names, score_missions, reresolve, ...) open
+    their own connection and close it when done, which would leave the
+    test nothing to assert against. A plain function, called from `_wire`
+    helpers, rather than a fixture.
+    """
+    class _NoClose:
+        def __getattr__(self, k):
+            return getattr(db, k)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(_store.schema, "connect", lambda *a, **k: _NoClose())
+    return db
+
+
+def stub_mission(monkeypatch, db=None, score=("adjacent", 0.5, "stub")):
+    """The board-add write path offline: `keep_store_open` (when `db` is
+    given), no title sampling, and the mission call answering `score` (a
+    verdict, or a callable returning one)."""
+    if db is not None:
+        keep_store_open(monkeypatch, db)
+    monkeypatch.setattr(_write, "_sample_titles", answer([]))
+    monkeypatch.setattr(_claude, "score_company_mission", answer(score))
+
+
+def no_pacing(monkeypatch):
+    """The board engine's page and detail delays at zero, for a test that
+    walks many pages or details."""
+    for name in ("PAGE_DELAY_S", "SWEEP_DETAIL_DELAY_S", "WHOLE_BOARD_DETAIL_DELAY_S"):
+        monkeypatch.setattr(_config, name, 0)
+
+
+def run_web_op(name, fn, timeout=10):
+    """Run `fn()` (a coroutine) as web-UI op `name` (src.dispatch.background)
+    on the web UI's loop, and wait for the runner to go idle; returns its
+    final status."""
+    from src.dispatch import background
+    from src.dispatch.registry import OpParams
+    from src.web.server import call
+    assert call(background.submit(name, OpParams(), fn)) is None, "the runner was busy"
+    deadline = time.monotonic() + timeout
+    while (s := call(background.status()))["running"]:
+        assert time.monotonic() < deadline, f"op {name!r} never finished"
+        time.sleep(0.02)
+    return s
+
+
+def fixture(name):
+    """tests/fixtures/`name`: a .json file decoded, any other as text."""
+    text = (ROOT / "tests" / "fixtures" / name).read_text(encoding="utf-8")
+    return json.loads(text) if name.endswith(".json") else text
+
+
+def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
+    """A stand-in for a requests Response: `status_code`,
+    `raise_for_status()`, `json()`, `text`, `content`, `url`,
+    `headers` (empty).
+
+    Thirteen of these were defined across five test files, each with its
+    own idea of which two or three attributes mattered and what
+    raise_for_status should raise. That is fine until a fetcher starts
+    reading an attribute one stub happens not to have, and the test that
+    should have caught it passes because a DIFFERENT stub has it.
+
+    `payload` is what json() returns; `text` defaults to that payload as
+    JSON, so a stub serves both the JSON and the scrape paths. `status` >=
+    400 makes raise_for_status raise requests.HTTPError carrying this
+    response, as requests does (claude.api reads its status and body). `url`
+    is the FINAL url a redirect-following GET reports (what
+    sniffer.candidate_pages reads); it is always present, so no caller has to
+    bolt one on.
+    """
+    body = text if text is not None else (
+        json.dumps(payload) if payload is not None else "")
+
+    final_url = url
+
+    class _Response:
+        status_code = status
+        url = final_url
+        headers = {}
+
+        def raise_for_status(self):
+            if status >= 400:
+                raise requests.HTTPError(f"{status} Error", response=self)
+
+        def json(self):
+            if payload is None:
+                raise ValueError("no JSON payload on this stub")
+            return payload
+
+        @property
+        def text(self):
+            return body
+
+        @property
+        def content(self):
+            return body.encode() if content is None else content
+
+    return _Response()
+
+
+def answer(value):
+    """A coroutine function standing in for an awaited callee: it returns
+    `value`, or, when `value` is callable, `value(*args, **kwargs)`."""
+    async def reply(*a, **kw):
+        return value(*a, **kw) if callable(value) else value
+    return reply
+
+
+class Request(str):
+    """One request a `serve`d session answered: equal to its URL with any
+    `params` appended as a query string. `.url` is the URL alone; `.method`,
+    `.params`, `.headers` and `.kw` are what was sent."""
+
+
+@pytest.fixture
+def serve(monkeypatch):
+    """Answer every request from the test, never the network: `serve(reply)`
+    installs `reply` and returns the log of `Request`s.
+
+    `reply` is a response (fake_response); an Exception, raised; a str
+    body or an int status; a callable(url, **kw) returning any of these,
+    run off the loop as the network would be, or an async one, awaited; a
+    {fragment: reply} dict, routed on the first fragment found in the URL
+    and its query (none found is a 404, or an AssertionError with
+    `strict=True`); or a list served front first, its last item repeating
+    -- the caller's own list, so a test may append after installing.
+
+    Replaces net.http.send, which every request reaches: the fetchers',
+    claude.api's, robots.txt's.
+    """
+    def _resolve(reply, url, full, kw, strict):
+        if isinstance(reply, list):
+            reply = reply.pop(0) if len(reply) > 1 else reply[0]
+            return _resolve(reply, url, full, kw, strict)
+        if isinstance(reply, dict):
+            for fragment, routed in reply.items():
+                if fragment in full:
+                    return _resolve(routed, url, full, kw, strict)
+            if strict:
+                raise AssertionError(f"request to an unrouted URL: {full}")
+            return fake_response(text="", status=404)
+        if isinstance(reply, BaseException):
+            raise reply
+        if isinstance(reply, str):
+            return fake_response(text=reply)
+        if isinstance(reply, int):
+            return fake_response(text="", status=reply)
+        if callable(reply):
+            return _resolve(reply(url, **kw), url, full, kw, strict)
+        return reply
+
+    def _install(reply, strict=False):
+        log = []
+
+        async def _send(method, url, *, polite=True, **kw):
+            params = dict(kw.get("params") or {})
+            full = url + ("?" + "&".join(f"{k}={v}" for k, v in params.items())
+                          if params else "")
+            req = Request(full)
+            req.url, req.method, req.params, req.kw = url, method.upper(), params, kw
+            req.headers = dict(kw.get("headers") or {})
+            log.append(req)
+            got = await asyncio.to_thread(_resolve, reply, url, full, kw, strict)
+            return await got if inspect.isawaitable(got) else got
+
+        monkeypatch.setattr(_http, "send", _send)
+        return log
+    return _install
+
+
+@pytest.fixture
+def wire(monkeypatch):
+    """Answer the aiohttp session's requests, for net.http's own transport
+    (everything else uses `serve`): `wire(*replies)` queues replies, each
+    (status, [(name, value) bytes pairs], body bytes) or an exception to
+    raise, and returns the log of (method, url, keywords) sent."""
+    def _install(*replies):
+        queue, sent = iter(replies), []
+
+        @contextlib.asynccontextmanager
+        async def request(method, url, **kw):
+            sent.append((method, str(url), kw))
+            got = next(queue)
+            if isinstance(got, BaseException):
+                raise got
+            status, raw_headers, body = got
+
+            async def read():
+                return body
+            yield SimpleNamespace(status=status, raw_headers=raw_headers, read=read,
+                                  reason="OK" if status < 400 else "Error")
+
+        monkeypatch.setattr(_http, "_session", lambda: SimpleNamespace(request=request))
+        return sent
+    return _install

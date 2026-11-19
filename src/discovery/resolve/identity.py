@@ -1,0 +1,407 @@
+"""Is this board really this company's? The identity guards every
+discovery path applies to a detection before trusting it.
+
+Two failure shapes, both seen in real runs: a candidate URL built from a
+truncated or generic domain token reached an unrelated company's site
+(`_risky_token_in_url` / `_corroborates`), and a careers page linked a
+parent conglomerate's shared board (`_affinity` / `foreign_board`, on the
+platforms whose spec sets `discovery.shared`). Shared by the sniffer, the
+scanning probes and the web-search resolver, so it depends on nothing in
+this package.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import sys
+from collections.abc import Callable, Sequence
+from typing import Unpack
+
+from typing_extensions import TypedDict
+
+from src import config, runstate
+from src.ats.board import BOARDS
+from src.claude import api as claude_api
+from src.match.locality import NC_HQ_RE as _NC_HQ_RE
+from src.match.names import domain_tokens, name_key, risky_domain_tokens
+from src.net import http
+from src.net.http import FETCH_ERRORS, HEADERS
+from src.net.util import host_of
+from src.rows import FetchedJob
+from . import fetchpool
+from .fetchpool import Page
+
+_log = logging.getLogger(__name__)
+
+# Words that name no company in particular ("medical", "health", "group"):
+# config.DISCOVERY_GENERIC_NAME_WORDS (profile.toml [discovery]
+# generic_name_words), else these. Neither a host match nor a page's
+# corroboration may rest on one.
+GENERIC_NAME_WORDS = frozenset(getattr(config, "DISCOVERY_GENERIC_NAME_WORDS", None) or {
+    "medical", "center", "centre", "health", "healthcare", "regional",
+    "group", "services", "systems", "system", "technology", "technologies",
+    "imaging", "solutions", "associates", "partners", "care", "clinic",
+    "hospital", "labs", "laboratories", "company", "corporation", "global",
+    "national", "american", "international", "the", "and", "inc", "llc",
+})
+
+
+# ─── Truncated-domain corroboration ───────────────────────────────────────
+#
+# candidate_urls tries every domain TOKEN (full, suffix-stripped, bare
+# first word) across every path/TLD combo, all fetched concurrently, and
+# takes the first hit in priority order. If the precise (full) token's
+# domain times out while an ambiguous truncated token's domain answers —
+# "galaxydiagnostics.com" dead, "galaxy.com" live — that unrelated
+# company's board wins outright ("Galaxy Diagnostics" -> a 57-job board at
+# the fintech Galaxy.com, zero of them local, misreported as a live
+# no-local-jobs board instead of the wrong company it actually is). A hit
+# reached only through a risky token (names.risky_domain_tokens) must
+# corroborate against the page content before it's trusted.
+
+
+def _risky_token_in_url(url: str, name: str) -> str:
+    """The risky domain token (names.risky_domain_tokens) `url`'s host
+    was built from, or "" if the host isn't one of those — including when
+    it's ALSO reachable via a safe (full/suffix-stripped) token, since the
+    full token containing the risky one as a substring
+    ("galaxydiagnostics" contains "galaxy") must not itself count as risky.
+
+    >>> _risky_token_in_url("https://www.galaxy.com/careers", "Galaxy Diagnostics")
+    'galaxy'
+    >>> _risky_token_in_url("https://www.galaxydiagnostics.com/careers", "Galaxy Diagnostics")
+    ''
+    >>> _risky_token_in_url("https://www.unitedtherapeutics.com/careers", "United Therapeutics")
+    ''
+    """
+    risky = risky_domain_tokens(name)
+    if not risky:
+        return ""
+    host = re.sub(r"^https?://", "", url.lower()).split("/", 1)[0]
+    safe = [t for t in domain_tokens(name) if t not in risky]
+    if any(s and s in host for s in safe):
+        return ""
+    for t in risky:
+        if t and t in host:
+            return t
+    return ""
+
+
+def _corroborates(text: str | None, name: str | None, skip_token: str = "") -> bool:
+    """True if `text` actually mentions `name` beyond the (possibly
+    generic/truncated) domain token that reached it — the check a
+    risky-token hit (see _risky_token_in_url) must pass before it's
+    trusted. Requires a distinctive word (>=4 letters, not in
+    GENERIC_NAME_WORDS) from `name`, other than `skip_token`, to appear in
+    the text; when only generic words are left, the whole name.
+
+    >>> _corroborates("Careers at Galaxy Diagnostics", "Galaxy Diagnostics", "galaxy")
+    True
+    >>> _corroborates("Galaxy Digital hires blockchain engineers",
+    ...                "Galaxy Diagnostics", "galaxy")
+    False
+    >>> _corroborates("", "Galaxy Diagnostics", "galaxy")
+    False
+
+    A generic word is no evidence: Gradient's environmental-consulting site
+    mentions "medical" and still is not Gradient Medical's (2026-10-08):
+
+    >>> _corroborates("Gradient: scientists for medical device risk", "Gradient Medical", "gradient")
+    False
+    >>> _corroborates("Welcome to Gradient Medical", "Gradient Medical", "gradient")
+    True
+
+    A name with nothing left to check (every word is the skipped token, or
+    too short) doesn't block the hit — there's no more precision to ask
+    for:
+
+    >>> _corroborates("anything", "Q2", "q2")
+    True
+    """
+    all_words: list[str] = re.findall(r"[a-z0-9]+", (name or "").lower())
+    words = [w for w in all_words if len(w) >= 4 and w != skip_token]
+    if not words:
+        return True
+    blob = (text or "").lower()
+    distinctive = [w for w in words if w not in GENERIC_NAME_WORDS]
+    if distinctive:
+        return any(w in blob for w in distinctive)
+    page_words: list[str] = re.findall(r"[a-z0-9]+", blob)
+    return " ".join(all_words) in " ".join(page_words)
+
+
+# (name, ats, board) whose foreign-board verdict was already printed this
+# run; the verdicts themselves are the process's, in src.claude.
+_FOREIGN_ANNOUNCED: Callable[[], set[tuple[str, str, str]]] = runstate.per_run(set)
+
+
+def _words(parts: Sequence[object]) -> list[str]:
+    """A handle's parts that can name an employer: the numeric ones (a
+    server pod) dropped."""
+    return [str(p) for p in parts if p is not None and not str(p).isdigit()]
+
+
+def _affinity(name: str, parts: Sequence[object]) -> bool:
+    """True if a detected handle's `parts` share an identity token with the
+    company name: any part, either direction, or a 4+-char shared prefix
+    (tenants abbreviate: 'vhr-unither').
+
+    >>> _affinity("KBI Biopharma", ("jsrglobal", 1, "KBI_Biopharma"))
+    True
+    >>> _affinity("Bioventus", ("osv-bioventus", 501, "External"))
+    True
+    >>> _affinity("United Therapeutics", ("vhr-unither", 5, "External"))
+    True
+
+    No affinity does NOT mean wrong — Merck & Co. really posts on tenant
+    'msd' — it means "cannot be confirmed from the strings alone", which is
+    what routes the hit to foreign_board's LLM check:
+
+    >>> _affinity("Genedata", ("danaher", 1, "DanaherJobs"))
+    False
+    >>> _affinity("Merck & Co.", ("msd", 5, "SearchJobs"))
+    False
+    """
+    # Tokens that appear in a handle's parts for structural reasons and say
+    # nothing about WHOSE board it is.
+    board_generic = {"jobs", "job", "careers", "career", "external", "site",
+                     "portal", "search", "global", "en", "us", "www", "com"}
+    name_generic = {"inc", "llc", "ltd", "plc", "corp", "corporation", "co",
+                    "the", "and", "of", "gmbh", "ag", "sa"}
+    board = " ".join(re.sub(r'([a-z])([A-Z])', r'\1 \2', w) for w in _words(parts))
+    board_toks = [t for t in re.findall(r"[a-z0-9]+", board.lower())
+                  if len(t) >= 3 and t not in board_generic]
+    name_words = [w for w in re.findall(r"[a-z0-9]+", (name or "").lower())
+                  if w not in name_generic]
+    squashed_name = "".join(name_words)
+    squashed_board = "".join(board_toks)
+    for bt in board_toks:
+        if bt in squashed_name:
+            return True
+    for nw in name_words:
+        if len(nw) >= 3 and nw in squashed_board:
+            return True
+    for bt in board_toks:
+        for nw in name_words:
+            if len(bt) >= 5 and len(nw) >= 5 and bt[:4] == nw[:4]:
+                return True
+    return False
+
+
+async def foreign_board(name: str, ats: str, handle: str | Sequence[object] | None) -> bool:
+    """True when `handle`, a board of `ats` detected for `name`, should NOT
+    be attributed to it: `ats`'s spec says a board can be a parent
+    company's (`discovery.shared`), the handle's parts share no identity
+    token with the name, AND the LLM judges it another employer's. The one
+    check every resolver step applies to a detection.
+
+    Notes:
+        Genedata's careers page legitimately links to Danaher's
+        danaher/DanaherJobs board — but confirming that board AS Genedata
+        made the daily crawl ingest every Danaher opco's local job under
+        Genedata's name (2026-08-28 discover session, nc=28). The string
+        check alone can't reject it: Merck & Co. really does post on
+        tenant 'msd', so a bare mismatch must stay (that's also the
+        offline behavior — with no API key the verdict is unknown and the
+        hit is kept, flagged in the log for a human glance).
+    """
+    board = BOARDS.get(ats)
+    if not (board and board.spec.discovery.shared):
+        return False
+    words = _words(handle if isinstance(handle, (tuple, list))
+                   else str(handle).split(board.spec.handle.sep))
+    if not words or _affinity(name, words):
+        return False
+    own = await claude_api.board_is_own(name, words[0], " ".join(words[1:]))
+    # Announce each (name, board) verdict ONCE — the sniff scans many
+    # candidate URLs that embed the same board link, and the 2026-08-28
+    # discover log repeated the same skip line 3x per company. Single write,
+    # not print(): print()'s separate text/newline writes let another
+    # thread splice its line into this one.
+    key, announced = (name, ats, words[0]), _FOREIGN_ANNOUNCED()
+    if own is False:
+        if key not in announced:
+            announced.add(key)
+            sys.stdout.write(
+                f"    [!] {name}: sniffed {ats} board {'/'.join(words)} "
+                f"belongs to another employer (parent/shared board) - "
+                f"skipped\n")
+        return True
+    if own is None and key not in announced:
+        announced.add(key)
+        sys.stdout.write(
+            f"    [?] {name}: {ats} board {words[0]!r} shares no token "
+            f"with the name and can't be verified offline - keeping; worth "
+            f"a human glance\n")
+    return False
+
+
+# --------------------------------------------------------------------------- #
+#  Fetching a company's candidate pages, with the identity check applied       #
+# --------------------------------------------------------------------------- #
+#
+# Four places scanned a company's candidate URLs looking for something --
+# an ATS signature, a Workday triple, a self-hosted board -- and each one
+# opened with the same six lines: build the candidate list, fetch it
+# through the per-run memo, walk it in priority order, skip the URLs that
+# did not answer, and skip the ones reached only through a risky domain
+# token that the page does not corroborate.
+#
+# They had already come apart. The Workday probe built and scanned its own
+# list with neither the corroboration check nor the foreign-board check,
+# so a hit the sniffer rejected was accepted there; the docstring saying
+# "Same guards on both paths now" is the repair, made by hand, that
+# candidate_pages makes structural.
+
+
+def corroborated(url: str, name: str, text: str | None) -> bool:
+    """False when `url` reaches `name`'s page only through a risky domain
+    token and the page does nothing to back that up.
+
+    A truncated or generic guess ("galaxy.com" for "Galaxy Diagnostics")
+    can land on a live site belonging to somebody else entirely, and does
+    exactly that when the precise domain times out. The page then has to
+    corroborate the company name before anything read off it is trusted.
+    A URL built from a safe token needs no corroboration.
+    """
+    risky = _risky_token_in_url(url, name)
+    return not risky or _corroborates(text, name, risky)
+
+
+class CandidateKw(TypedDict, total=False, closed=True):
+    """`fetchpool.candidate_urls`' keywords."""
+    patterns: list[tuple[str, str]]
+    cap: int | None
+    locale_paths: Sequence[str] | None
+
+
+async def candidate_responses(name: str, careers_url: str = "", **kw: Unpack[CandidateKw]
+                              ) -> list[tuple[str, Page | None]]:
+    """`name`'s candidate URLs paired with what each one answered, in
+    candidate-priority order. `None` where a URL did not answer at all.
+    `kw` goes to `candidate_urls` (patterns, cap).
+
+    The raw pass, for the one caller that needs to tell "nothing answered"
+    from "everything that answered was somebody else" --
+    sniffer.diagnose_no_board exists to name exactly that difference, so
+    it cannot use the filtered walk below. It reached into fetchpool for
+    the fetch itself before, which made the sniffer import its own package
+    and put a cycle between resolve/__init__ and resolve/sniffer.
+
+    Called through the module so there is ONE place to stub the fetch in
+    tests (tests/test_parsers.py patches fetchpool._fetch_all and every
+    caller follows).
+    """
+    urls = fetchpool.candidate_urls(name, careers_url, **kw)
+    if not urls:
+        return []
+    responses = await fetchpool._fetch_all(urls)
+    return [(u, responses.get(u)) for u in urls]
+
+
+async def candidate_pages(name: str, careers_url: str = "", **kw: Unpack[CandidateKw]
+                          ) -> list[Page]:
+    """The responses from `name`'s candidate URLs, best first, with the
+    ones that did not answer and the ones that do not corroborate (judged
+    off the loop) already dropped. `kw` goes to `candidate_urls`
+    (patterns, cap).
+
+    Priority order is the candidate list's, not completion order: the
+    fetch runs in parallel but the walk does not, because the first hit
+    wins and the precise domain must beat the generic guess.
+    """
+    pairs = await candidate_responses(name, careers_url, **kw)
+    return await asyncio.to_thread(
+        lambda: [r for url, r in pairs
+                 if r is not None and corroborated(url, name, r.text)])
+
+
+# --------------------------------------------------------------------------- #
+#  Is the company REALLY in your area?                                         #
+# --------------------------------------------------------------------------- #
+#
+# The same question the rest of this module asks about a PAGE ("is this
+# really that company's site?"), asked about a place: a company with no
+# local openings today may still be worth tracking if it demonstrably has
+# a local presence. Two functions, no callers in common with anything
+# else in local_sourcing -- the component analysis flagged them as an
+# island inside that module before they moved here.
+
+
+def _hq_match_beyond_brand(text: str | None, name: str,
+                           hq_re: re.Pattern[str] | None = None) -> bool:
+    r"""True if `text` carries a "<place>, ST" match whose place is NOT just
+    the company's own name: a match whose place tokens all appear in the
+    company name is brand text, and a match on any OTHER configured place
+    still counts.
+
+    `hq_re` defaults to the profile-derived locality pattern; the examples
+    pass their own so they hold on any profile:
+
+    >>> pat = re.compile(r"\b(?:Garner|Durham),\s*NC\b")
+    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Garner Health", pat)
+    False
+    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Acme Bio", pat)
+    True
+    >>> _hq_match_beyond_brand("HQ: Durham, NC", "Garner Health", pat)
+    True
+    >>> _hq_match_beyond_brand("no address here", "Acme Bio", pat)
+    False
+
+    Notes:
+        Garner Health is a New York company, but "Garner" is also a
+        configured locality town, so every page of garnerhealth.com
+        address-matched and the 2026-08-28 discover run activated it as
+        NC-local with zero NC jobs. The doctest once relied on the
+        personal profile and failed on profile.example.toml (2026-09-01).
+    """
+    squashed = name_key(name)
+    for m in (hq_re or _NC_HQ_RE).finditer(text or ""):
+        toks = re.findall(r"[a-z0-9]+", m.group(0).lower())
+        place_toks = toks[:-1] or toks          # drop the state suffix token
+        if all(t in squashed for t in place_toks):
+            continue
+        return True
+    return False
+
+
+async def nc_hq_signal(name: str, careers_url: str = "",
+                       board_jobs: list[FetchedJob] | None = None) -> bool:
+    """
+    True if the company has a verifiable NC presence — used to TRACK local
+    companies that currently have no NC openings. Checks the board's job
+    locations first (cheap), then the company site/careers/contact pages.
+    Page-text matches that are just the company's own brand name don't
+    count (see _hq_match_beyond_brand); a JOB posted in a locality town is
+    a genuine signal regardless of what the company is called.
+    """
+    if board_jobs:
+        for j in board_jobs:
+            if _NC_HQ_RE.search(j.get("location", "") or ""):
+                return True
+    urls = []
+    if careers_url:
+        urls.append(careers_url)
+    for tok in domain_tokens(name):
+        urls += [f"https://www.{tok}.com/contact", f"https://www.{tok}.com/about",
+                 f"https://www.{tok}.com/locations", f"https://www.{tok}.com/",
+                 f"https://www.{tok}.com/company"]
+    seen = set()
+    unreachable: set[str] = set()       # hosts whose connection failed: their other paths would too
+    for u in urls[:8]:
+        if u in seen or host_of(u) in unreachable:
+            continue
+        seen.add(u)
+        try:
+            r = await http.send("GET", u, timeout=config.PROBE_TIMEOUT,
+                                headers=HEADERS, allow_redirects=True)
+            if r.status_code == 200 and await asyncio.to_thread(
+                    lambda: _hq_match_beyond_brand(r.text, name)):
+                return True
+        except FETCH_ERRORS as e:
+            _log.debug("hq probe %s: %s", u, type(e).__name__)
+            if isinstance(e, http.Unreachable):
+                unreachable.add(host_of(u))
+    return False

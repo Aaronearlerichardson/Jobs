@@ -1,0 +1,53 @@
+{
+ "status": "Success",
+ "timestamp": "2026-10-06T03:15:46.871508Z",
+ "data": {
+  "totalCount": 3,
+  "requisitions": [
+   {
+    "requisitionId": 3727,
+    "postingEffectiveDate": "10/5/2026",
+    "postingExpirationDate": "-",
+    "displayJobTitle": "RF Power Application Engineer Intern",
+    "locations": [
+     {
+      "city": "Morrisville",
+      "state": "NC",
+      "country": "US"
+     }
+    ],
+    "externalDescription": "RF Power Application Intern Role Overview: The RF Power Application Intern will design, assemble, and test RF Power application circuits in support of our RF power amplifier product line. The intern will learn to utilize RF models and measured data to drive circuit level designs. This will include l"
+   },
+   {
+    "requisitionId": 3721,
+    "postingEffectiveDate": "10/1/2026",
+    "postingExpirationDate": "-",
+    "displayJobTitle": "Fab Equipment Engineering Intern",
+    "locations": [
+     {
+      "city": "Durham",
+      "state": "NC",
+      "country": "US"
+     }
+    ],
+    "externalDescription": "Position Summary MACOM is seeking a highly motivated Engineering Intern to support the Equipment Engineering organization within our semiconductor wafer fabrication facility. This internship is designed around a real-world engineering challenge: developing a strategy to collect and analyze operation"
+   },
+   {
+    "requisitionId": 3729,
+    "postingEffectiveDate": "10/5/2026",
+    "postingExpirationDate": "-",
+    "displayJobTitle": "RF Power Amplifier Applications Intern",
+    "locations": [
+     {
+      "city": "Morgan Hill",
+      "state": "CA",
+      "country": "US"
+     }
+    ],
+    "externalDescription": " GaN RF Power Amplifier Intern Job Description: The engineering intern will be working at the Morgan Hill CA Design Center alongside a highly knowledgeable team of RF engineers and will initially be tasked with device characterization of MACOM’s high power GaN transistor products geared towards Base"
+   }
+  ],
+  "filters": [],
+  "customFieldFilters": []
+ }
+}

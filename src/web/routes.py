@@ -1,0 +1,680 @@
+"""All HTTP routes: jobs/pipeline/companies/stats/tracks, the background-op
+API, config editing (Settings tab), and the SPA itself."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import logging
+import re
+import tempfile
+import tomllib
+from collections.abc import Mapping
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import cast
+
+from flask import Response, abort, jsonify, make_response, request, send_file
+from flask.typing import ResponseReturnValue
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from src import config
+from src import digest
+from src import store
+from src import tags as company_tags
+from src.claude import api as claude_api
+from src.claude.api import have_api_key
+from src.claude.fit import is_deep_verified
+from src.config import RuntimeTrack, profile_edit
+from src.crawl import harvest, health
+from src.discovery.paste_ingest import preview_names
+from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
+                                     stop, submit)
+from src.match import locality
+from src.net.util import JSON
+from src.ops.maintenance import track_store
+from src.rows import CompanyRow, JobRow, RankedJob, is_watched
+from src.validation import Text, error_lines
+from . import BOOT_ID, STATE, app
+from .server import call, schedule_restart
+
+_log = logging.getLogger(__name__)
+
+
+class _Body(BaseModel):
+    """A JSON request body. A key the route does not read is an error;
+    `track` (a track id) is accepted everywhere, as in the query string."""
+    model_config = ConfigDict(extra="forbid")
+
+    track: str | None = None
+
+
+def _invalid(lines: list[str], what: str = "bad request") -> tuple[Response, int]:
+    """The 400 for input that failed validation: `error` for the UI's toast,
+    `errors` one 'path: problem' line per bad key."""
+    return jsonify(error=f"{what}: " + "; ".join(lines), errors=lines), 400
+
+
+def _body[M: BaseModel](model: type[M]) -> M:
+    """The request's JSON body (none reads as {}) as `model`; aborts with
+    `_invalid` otherwise."""
+    try:
+        return model.model_validate_json(request.get_data() or b"{}")
+    except ValidationError as e:
+        abort(make_response(_invalid(error_lines(e))))
+
+
+def _track(tid: str | None = None) -> RuntimeTrack:
+    """Resolve the request's track config ([tracks.*] in profile.toml) from
+    ?track=<id>, else `tid` (a JSON body's "track"). Unknown ids fall back
+    to the default track rather than erroring: a stale localStorage value
+    after a config edit shouldn't brick the UI."""
+    tid = request.args.get("track") or tid or config.DEFAULT_TRACK
+    return (config.UI_TRACKS.get(cast(str, tid))
+            or config.UI_TRACKS[cast(str, config.DEFAULT_TRACK)])
+
+
+def _today() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+# --------------------------------------------------------------------------- #
+#  Background operations                                                        #
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/run/<name>")
+def api_run(name: str) -> ResponseReturnValue:
+    """Start an operation, or put it in the run queue behind the one already
+    running (202 rather than the old 409 — the request is kept, not lost).
+
+    A restart in progress and a track/engine mismatch still refuse outright:
+    neither is something waiting would fix. The restart would drop the queue
+    with the process, and the mismatch is wrong no matter when it runs.
+    """
+    op = OPS.get(name)
+    if op is None:
+        return jsonify(error=f"unknown operation {name!r}"), 404
+    if STATE["restarting"]:
+        return jsonify(error="server is restarting"), 409
+    args = _body(op["params"])
+    track_cfg = _track(args.track)
+    need = op.get("engine")
+    if need is not None and need != track_cfg.engine:
+        return jsonify(error=f"{name!r} needs the {need!r} engine - the "
+                             f"{track_cfg.label} track runs "
+                             f"{track_cfg.engine!r}"), 409
+    args = args.model_copy(update={"track": track_cfg.id})
+    # submit() claims the slot on the web UI's loop, one request at a time,
+    # so two requests in the same instant can't both start an operation:
+    # the loser is queued, not run.
+    entry = call(submit(name, args, lambda: op["fn"](args)))
+    if entry is None:
+        return jsonify(ok=True, name=name)
+    return jsonify(queued=True, id=entry["id"], name=entry["name"],
+                   position=entry["position"],
+                   duplicate=entry["duplicate"]), 202
+
+
+@app.delete("/api/run/queue/<entry_id>")
+def api_run_queue_remove(entry_id: str) -> ResponseReturnValue:
+    if not call(queue_remove(entry_id)):
+        return jsonify(error="not waiting in the run queue"), 404
+    return jsonify(removed=True)
+
+
+@app.delete("/api/run/queue")
+def api_run_queue_clear() -> ResponseReturnValue:
+    return jsonify(removed=call(queue_clear()))
+
+
+@app.post("/api/run/stop")
+def api_run_stop() -> ResponseReturnValue:
+    """Cancel the running operation (`stopping`: whether one was running);
+    the queue behind it carries on."""
+    return jsonify(stopping=call(stop()))
+
+
+@app.get("/api/run/status")
+def api_run_status() -> ResponseReturnValue:
+    # `since` is an ABSOLUTE line count (src.dispatch.background._Tee), not
+    # a raw index into the log, which gets its head chopped off once it
+    # passes 5000 lines (see background.status).
+    s = call(status(request.args.get("since", 0, type=int)))
+    return jsonify(**s, queued=len(s["queue"]))
+
+
+# --------------------------------------------------------------------------- #
+#  Jobs / pipeline / companies / stats                                         #
+# --------------------------------------------------------------------------- #
+
+def _geo_tag(r: Mapping[str, object]) -> str:
+    """Live geo bucket for a job row: "local" (configured locality),
+    "remote", or "relocation" (onsite somewhere the user would have to move
+    to). Derived at serve time from the location string — the stored
+    geo_mode is stale-by-construction (computed against the locality config
+    of whatever process ingested it) and overloaded (NULL/onsite ambiguity),
+    so it's only consulted as a secondary remote signal."""
+    loc = r.get("location")
+    loc = loc if isinstance(loc, str) else ""
+    if locality.NC_RE.search(loc):
+        return "local"
+    if (r.get("remote_eligible") or r.get("geo_mode") == "remote"
+            or locality.remote_signal(loc)):
+        return "remote"
+    return "relocation"
+
+
+def _job_json(r: JobRow | RankedJob, today: str, rank: int | None = None,
+              remote_floor: float | None = None,
+              prior: store.Prior | None = None) -> dict[str, object]:
+    fields = (
+        "job_id", "title", "company_name", "url", "location", "geo_mode",
+        "resume_fit_score", "combined_score", "mission_tier", "mission_score",
+        "fit_reason", "fit_gates", "fit_domain", "fit_function", "fit_stack",
+        "fit_seniority", "posted_at", "first_seen", "last_seen", "status",
+        "disposition", "disposition_note", "disposition_at",
+        # Application-pipeline tracking (store.PipelineFields + the stamp).
+        "applied_at", "followup_at", "contact", "referral", "outcome_reason",
+        # store.ranked_jobs(collapse=True) (the default /api/jobs uses): how many
+        # same-company/same-title postings this row stands in for, and the
+        # job_id/url of each of the others, so the Jobs tab can say "(N similar
+        # postings)" the way the digest does and let a person open them too.
+        "dup_count", "dup_job_ids", "dup_urls",
+    )
+    d: dict[str, object] = {k: r.get(k) for k in fields}
+    d["rank"] = rank
+    d["age"] = digest.age_tag(r, today)
+    d["verified"] = is_deep_verified(r.get("fit_reason"))
+    d["geo_bucket"] = _geo_tag(r)
+    d["relocation_required"] = d["geo_bucket"] == "relocation"
+    d["us_ok"] = locality.us_eligible(r.get("location") or "")
+    d["watched"] = bool(r.get("company_watch"))
+    # Whether a REMOTE row here is worth showing in a location-scoped track.
+    # The same rule ranked_jobs applies server-side, re-run per row because
+    # /api/jobs deliberately ships everything and gates on the client.
+    d["remote_ok"] = store.remote_admitted(r, remote_floor)
+    # An application of yours this posting repeats (store.prior_lookup).
+    d["prior"] = {**prior._asdict(), "label": prior.label} if prior else None
+    return d
+
+
+@app.get("/api/jobs")
+def api_jobs() -> ResponseReturnValue:
+    t = _track()
+    with track_store(t) as conn:
+        # No server-side geo gate (location_re=None): every row in the track
+        # comes back stamped with a live geo_bucket, and the CLIENT decides
+        # what to show ("willing to relocate" checkbox, remote-requires-watch
+        # rule). The digest/CLI callers of ranked_jobs keep their own geo
+        # gates — this is a UI-only widening.
+        rows = store.ranked_jobs(
+            conn, track=t.track, location_re=None,
+            rank_by=t.rank_by, min_mission=t.min_mission,
+            include_closed=request.args.get("closed") == "1",
+            include_dispositioned=request.args.get("dispositioned") == "1")
+        prior = store.prior_lookup(store.get_pipeline(conn))
+    today = _today()
+    floor = t.remote_mission_floor
+    return jsonify([_job_json(r, today, i + 1, remote_floor=floor, prior=prior(r))
+                    for i, r in enumerate(rows)])
+
+
+@app.get("/api/tracks")
+def api_tracks() -> ResponseReturnValue:
+    return jsonify([
+        {"id": t.id, "label": t.label, "engine": t.engine,
+         "min_fit_default": t.min_fit_default,
+         "willing_to_move_default": t.willing_to_move_default,
+         "remote_requires_watch": t.remote_requires_watch,
+         "remote_mission_floor": t.remote_mission_floor,
+         "verify_floor": t.verify_floor,
+         "default": t.id == config.DEFAULT_TRACK,
+         "ops": sorted(n for n, o in OPS.items()
+                       if o.get("engine") in (None, t.engine))}
+        for t in config.UI_TRACKS.values()
+    ])
+
+
+@app.get("/api/job/<job_id>")
+def api_job(job_id: str) -> ResponseReturnValue:
+    with track_store(_track()) as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id=?",
+                           (job_id,)).fetchone()
+    if not row:
+        return jsonify(error="not found"), 404
+    d = dict(row)
+    d["age"] = digest.age_tag(d, _today())
+    return jsonify(d)
+
+
+class _Disposition(_Body):
+    disposition: str = ""
+    note: Text = None
+    reason: Text = None
+
+
+@app.post("/api/job/<job_id>/disposition")
+def api_disposition(job_id: str) -> ResponseReturnValue:
+    p = _body(_Disposition)
+    with track_store(_track(p.track)) as conn:
+        row, err = store.set_disposition(
+            conn, job_id, p.disposition,
+            note=p.note, reason=p.reason)
+    if err:
+        return jsonify(error=err), 400
+    return jsonify(ok=True, job_id=cast(JobRow, row)["job_id"])
+
+
+class _Pipeline(_Body, store.PipelineFields):
+    pass
+
+
+@app.post("/api/job/<job_id>/pipeline")
+def api_pipeline_fields(job_id: str) -> ResponseReturnValue:
+    """Edit one application's tracking fields (store.PipelineFields).
+
+    Only the keys actually present in the body are written, so the SPA's
+    save-on-change editor can send one field at a time without blanking the
+    others.
+    """
+    p = _body(_Pipeline)
+    t = _track(p.track)
+    with track_store(t) as conn:
+        row, err = store.update_pipeline_fields(
+            conn, job_id, **p.model_dump(exclude_unset=True,
+                                         exclude={"track"}))
+    if err:
+        return jsonify(error=err), 400
+    return jsonify(ok=True, job=_job_json(
+        cast(JobRow, row), _today(), remote_floor=t.remote_mission_floor))
+
+
+@app.get("/api/pipeline")
+def api_pipeline() -> ResponseReturnValue:
+    t = _track()
+    today = _today()
+    floor = t.remote_mission_floor
+    with track_store(t) as conn:
+        rows = [_job_json(r, today, remote_floor=floor)
+                for r in store.get_pipeline(conn)]
+        due = [j["job_id"] for j in store.followups_due(conn, today)]
+    return jsonify(rows=rows, followups_due=due)
+
+
+@app.get("/api/report/conversion")
+def api_conversion() -> ResponseReturnValue:
+    """Applications per fit band x geo_mode, with the interview rate — the
+    Pipeline tab's answer to "which kind of job is actually converting?"."""
+    with track_store(_track()) as conn:
+        report = store.conversion_report(conn)
+    return jsonify(report)
+
+
+@app.get("/api/companies")
+def api_companies() -> ResponseReturnValue:
+    with track_store(_track()) as conn:
+        comps = store.get_companies(conn, active_only=False)
+        # Open-job count AND best résumé fit per company in one pass: the
+        # roster suggests watching a company that has already produced a
+        # good-fit job, which is how a hand-maintained watch list grows.
+        stats = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT company_id, open_jobs, best_fit FROM company_open_stats").fetchall()}
+    out = []
+    for c in comps:
+        n_open, best_fit = stats.get(c["id"], (0, None))
+        out.append({
+            "id": c["id"], "name": c["name"], "ats": c.get("ats"),
+            "mission_tier": c.get("mission_tier"),
+            "mission_score": c.get("mission_score"),
+            "active": bool(c.get("active")), "tags": sorted(company_tags.parse(c.get("tags"))),
+            "watched": is_watched(c), "review": c.get("review"), "open_jobs": n_open,
+            "best_fit": best_fit,
+            # Harvest freshness and the dead-board cycle's miss, so the
+            # roster shows WHY a company stopped producing rows.
+            "last_harvested_at": c.get("last_harvested_at"),
+            "miss_reason": c.get("miss_reason"),
+        })
+    return jsonify(out)
+
+
+class _Toggle(_Body):
+    on: bool = False
+
+
+@app.post("/api/company/<int:cid>/watch")
+def api_watch(cid: int) -> ResponseReturnValue:
+    p = _body(_Toggle)
+    with track_store(_track(p.track)) as conn:
+        if not store.get_company(conn, cid):
+            return jsonify(error="not found"), 404
+        store.set_watch(conn, cid, p.on)
+    return jsonify(ok=True, watched=p.on)
+
+
+@app.post("/api/company/<int:cid>/active")
+def api_active(cid: int) -> ResponseReturnValue:
+    p = _body(_Toggle)
+    with track_store(_track(p.track)) as conn:
+        conn.execute("UPDATE companies SET active=? WHERE id=?",
+                     (int(p.on), cid))
+        conn.commit()
+    return jsonify(ok=True, active=p.on)
+
+
+# --------------------------------------------------------------------------- #
+#  Roster review queue                                                         #
+# --------------------------------------------------------------------------- #
+#
+# Nothing an automated path discovers joins the roster by itself: it lands as
+# an inactive, review-pending company row (src/store/review.py) and waits here.
+
+
+@app.get("/api/pending")
+def api_pending() -> ResponseReturnValue:
+    with track_store(_track()) as conn:
+        rows = store.pending_companies(conn)
+    return jsonify(rows)
+
+
+@app.post("/api/company/<int:cid>/confirm")
+def api_confirm(cid: int) -> ResponseReturnValue:
+    """Accept a review candidate: it leaves the queue and the shared
+    mission rule decides whether it is crawled."""
+    with track_store(_track(_body(_Body).track)) as conn:
+        pending = store.get_company(conn, cid)
+        if not pending:
+            return jsonify(error="not found"), 404
+        # The activation verdict is decided here and handed to the store, so
+        # the persistence layer never has to reach into the Claude module.
+        active = claude_api.is_active_mission(pending.get("mission_tier"), pending["name"])
+        row = cast(CompanyRow, store.confirm_company(conn, cid, active=active))
+    return jsonify(ok=True, name=row["name"], active=bool(row["active"]))
+
+
+class _Reason(_Body):
+    reason: str = ""
+
+
+@app.post("/api/company/<int:cid>/reject")
+def api_reject(cid: int) -> ResponseReturnValue:
+    """Throw a review candidate away: the row and its jobs go, and the name
+    is blocklisted so discovery stops re-finding it."""
+    p = _body(_Reason)
+    with track_store(_track(p.track)) as conn:
+        name = store.reject_company(conn, cid,
+                                    p.reason.strip() or "rejected in review")
+    if not name:
+        return jsonify(error="not found"), 404
+    return jsonify(ok=True, name=name)
+
+
+class _Paste(_Body):
+    text: str = ""
+    use_llm: bool | None = None       # None: the model reads it if keyed
+
+
+@app.post("/api/names/preview")
+def api_names_preview() -> ResponseReturnValue:
+    """Parse a pasted page into review rows WITHOUT resolving anything.
+
+    Step one of the paste flow: resolving is what costs the requests, so the
+    names are shown first and only the ticked ones are sent to the op."""
+    # No busy guard: this only parses text and reads the store, and a run no
+    # longer means the next request is lost (/api/run/<name> queues it), so
+    # refusing a parse would only stop the person preparing the list.
+    p = _body(_Paste)
+    try:
+        names = call(preview_names(p.text, use_llm=p.use_llm))
+    except Exception as e:
+        return jsonify(error=f"could not parse that text: {e}"), 400
+    return jsonify(names)
+
+
+class _Block(_Reason):
+    names: list[str] = []
+
+
+@app.post("/api/names/block")
+def api_names_block() -> ResponseReturnValue:
+    """Blocklist the names a person marked 'not a company', so no discovery
+    path spends requests on them again."""
+    # No busy guard, for two reasons. Correctness: the paste flow blocks the
+    # junk names and THEN queues add-names, so a 409 here dropped the
+    # blocklist while the run it refused for went ahead anyway.
+    # Safety: this is the same single-row blocklist write the review-queue
+    # confirm/reject routes above have always done unguarded while an op
+    # runs -- one INSERT ... ON CONFLICT on its own connection, in WAL mode
+    # (readers never block the writer) with busy_timeout=BUSY_TIMEOUT_S, and
+    # a store.Writer's thread holds the store's process-wide _WRITE_LOCK only
+    # for the length of one batch() block (store/schema.py, e814fac), not
+    # for the whole run.
+    p = _body(_Block)
+    reason = p.reason.strip() or "not a company (review)"
+    with track_store(_track(p.track)) as conn:
+        keys = {k for k in (store.block_name(conn, n, reason)
+                            for n in p.names) if k}
+    return jsonify(ok=True, blocked=len(keys), keys=sorted(keys))
+
+
+@app.post("/api/import/companies")
+def api_import() -> ResponseReturnValue:
+    """Upsert companies from an exported roster JSON (idempotent — tags
+    merge, existing mission scores survive None fields)."""
+    f = request.files.get("file")
+    if not f:
+        return jsonify(error="no file uploaded"), 400
+    with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as t:
+        f.save(t)
+        tmp = t.name
+    try:
+        with track_store(_track()) as conn:
+            n = store.import_companies(conn, tmp)
+    except ValidationError as e:
+        return _invalid(error_lines(e), "import failed")
+    except Exception as e:
+        return jsonify(error=f"import failed: {e}"), 400
+    finally:
+        try:
+            Path(tmp).unlink()
+        except OSError:
+            pass
+    return jsonify(ok=True, imported=n)
+
+
+@app.get("/api/export/companies")
+def api_export() -> ResponseReturnValue:
+    with track_store(_track()) as conn:
+        rows = store.roster_rows(conn)
+    buf = io.BytesIO(json.dumps(rows, indent=1, ensure_ascii=False).encode("utf-8"))
+    return send_file(buf, mimetype="application/json", as_attachment=True,
+                     download_name="company_roster.json")
+
+
+# --------------------------------------------------------------------------- #
+#  Config editing (Settings tab) + graceful self-restart                        #
+# --------------------------------------------------------------------------- #
+
+def _config_busy() -> ResponseReturnValue | None:
+    """Refuse a config save while work is running OR waiting.
+
+    Saving schedules a self-restart (server.py schedule_restart relaunches
+    the process), and the run queue lives in memory: every waiting entry
+    would vanish with the process that holds it, silently. So the queue has
+    to drain or be cleared first, and the message has to say so.
+    """
+    s = call(status())
+    waiting, running = len(s["queue"]), s["running"]
+    if running or waiting:
+        what = (f"'{s['name']}' is running" if running
+                else "the run queue is not empty")
+        if running and waiting:
+            what += f", with {waiting} more in the run queue"
+        return jsonify(error=f"{what} - saving config restarts the server, "
+                             "so let the run queue drain or clear it "
+                             "first"), 409
+    if STATE["restarting"]:
+        return jsonify(error="server is restarting"), 409
+    return None
+
+
+@app.get("/api/config")
+def api_config_get() -> ResponseReturnValue:
+    raw, source = profile_edit.read_raw()
+    parsed: dict[str, JSON]
+    try:
+        parsed = tomllib.loads(raw)
+    except tomllib.TOMLDecodeError as e:     # mid-edit text: no parsed view
+        _log.debug("profile does not parse: %s", e)
+        parsed = {}
+    return jsonify(raw=raw, source=source, parsed=parsed)
+
+
+class _Toml(_Body):
+    toml: str = ""
+
+
+class _Updates(_Body):
+    updates: dict[str, object] = {}
+
+
+@app.post("/api/config/validate")
+def api_config_validate() -> ResponseReturnValue:
+    return jsonify(errors=profile_edit.validate(_body(_Toml).toml))
+
+
+def _save_config(text: str) -> ResponseReturnValue:
+    errors = profile_edit.validate(text)
+    if errors:
+        return _invalid(errors, "validation failed")
+    profile_edit.backup_then_write(text)
+    schedule_restart()
+    return jsonify(ok=True, restarting=True)
+
+
+@app.put("/api/config")
+def api_config_put() -> ResponseReturnValue:
+    busy = _config_busy()
+    if busy:
+        return busy
+    updates = _body(_Updates).updates
+    if not updates:
+        return jsonify(error="no updates given"), 400
+    try:
+        text = profile_edit.apply_updates(updates)
+    except Exception as e:
+        return jsonify(error=f"could not apply updates: {e}"), 400
+    return _save_config(text)
+
+
+@app.put("/api/config/raw")
+def api_config_put_raw() -> ResponseReturnValue:
+    busy = _config_busy()
+    if busy:
+        return busy
+    return _save_config(_body(_Toml).toml)
+
+
+@app.get("/api/stats")
+def api_stats() -> ResponseReturnValue:
+    t = _track()
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    with track_store(t) as conn:
+        # Each statement seeks one index (migrations 0002, 0011): one COUNT
+        # per tile scanned the whole jobs table, 2.7 s a call.
+        live = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(substr(first_seen,1,10) = ?), 0),"
+            " COUNT(posted_at) FROM live_jobs", (_today(),)).fetchone()
+        disp = conn.execute(
+            "SELECT COALESCE(SUM(disposition IN ('applied','interviewing')), 0),"
+            " COALESCE(SUM(disposition = 'saved'), 0)"
+            " FROM jobs WHERE disposition IS NOT NULL").fetchone()
+        # Boards the harvest plan would pull (not the whole roster: boards
+        # it has stopped or buried are left out).
+        roster = conn.execute(
+            "SELECT COALESCE(SUM(watch = 1), 0), COALESCE(SUM(review = 'pending'), 0)"
+            " FROM companies_effective").fetchone()
+        n_boards = len(harvest.plan(conn, min_age_hours=0))
+        stats = {
+            "open": live[0],
+            "closed": conn.execute("SELECT COUNT(*) FROM jobs WHERE status = 'closed'")
+                          .fetchone()[0],
+            "new_today": live[1],
+            "dated": live[2],
+            "pipeline": disp[0],
+            "saved": disp[1],
+            # Applications that went out in the last 7 days: the volume the
+            # apply band exists to raise. applied_at is stamped once, on the
+            # first 'applied', so a row since moved to interviewing/rejected
+            # still counts toward the week it went out in.
+            "applied_7d": conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
+                " AND substr(applied_at,1,10) >= ?", (week_ago,)).fetchone()[0],
+            "companies_active": n_boards,
+            # Roster GROWTH, from companies.created_at. last_probed cannot
+            # answer this: a bulk mission re-score rewrites it on every row.
+            "companies_new_7d": store.roster_growth(conn, days=7),
+            # Candidates that failed to become crawlable companies, per reason
+            # family — the worklist behind a roster that stopped growing.
+            "company_misses": dict(store.miss_counts(conn)),
+            "watched": roster[0],
+            # Platforms whose latest pass broke across their boards (crawl.health).
+            "platform_alerts": health.alerts(conn),
+            # Roster candidates waiting on a human — the Review tab's badge.
+            "pending_review": roster[1],
+            "api_key": have_api_key(),
+            "screen_model": config.CLAUDE_MODEL,
+            "verify_model": config.CLAUDE_VERIFY_MODEL,
+            "db": str(t.db_path),
+            # Where the Settings tab writes. Shown in the header because the
+            # two can diverge (a per-user data dir vs. a profile beside the
+            # code).
+            "profile": str(config.PROFILE_PATH),
+            "track": t.id,
+            "boot_id": BOOT_ID,
+        }
+    return jsonify(stats)
+
+
+@app.get("/api/boot")
+def api_boot() -> ResponseReturnValue:
+    """This process's BOOT_ID: the restart overlay polls it until it changes."""
+    return jsonify(boot_id=BOOT_ID)
+
+
+def _asset_version() -> str:
+    """Fingerprint of the front-end files, for cache-busting."""
+    h = hashlib.md5()
+    for p in sorted((Path(app.root_path) / "static").rglob("*")):
+        if p.is_file():
+            h.update(p.name.encode())
+            h.update(str(p.stat().st_mtime_ns).encode())
+    return h.hexdigest()[:10]
+
+
+@app.get("/")
+def index() -> Response:
+    # Served as a plain file, NOT via Jinja — the SPA's JS contains
+    # template-looking fragments a render pass would corrupt. The only
+    # rewriting is a cache-buster stamped onto the asset URLs: the CSS/JS
+    # live at fixed paths, so a browser that cached an older copy would
+    # otherwise keep serving it across restarts (a half-written app.js
+    # renders the shell with no tiles, no jobs, and no error you'd notice).
+    html = (Path(app.root_path) / "templates" / "index.html").read_text(
+        encoding="utf-8")
+    v = _asset_version()
+    html = re.sub(r'(?<=["\'])(/static/[^"\']+?)(?:\?v=[^"\']*)?(?=["\'])',
+                  lambda m: f"{m.group(1)}?v={v}", html)
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.after_request
+def _no_store_assets(resp: Response) -> Response:
+    """Never let the browser reuse a stale front-end. Single-user localhost:
+    correctness beats the microscopic win from caching a 40 KB file."""
+    if request.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp

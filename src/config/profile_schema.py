@@ -1,0 +1,589 @@
+"""The profile.toml schema: one pydantic model per section, and every
+profile default.
+
+`parse` validates a whole profile once, at load; `problems` returns what
+is wrong with one as path-qualified lines (the Settings tab's validator).
+Every table rejects keys it does not declare, so a misspelled key is an
+error rather than a silent default.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Annotated, Literal, Self
+
+from pydantic import (AfterValidator, BaseModel, BeforeValidator,
+                      ConfigDict, Field, PrivateAttr, TypeAdapter,
+                      ValidationError, ValidationInfo, field_validator,
+                      model_validator)
+
+from src import tags
+from src.validation import Regex, error_lines
+
+from .tables import DEFAULT_TRACKS
+
+
+class ProfileError(ValueError):
+    """A profile that does not match the schema. `lines` holds one
+    'path: problem' entry per bad key."""
+
+    def __init__(self, source: str | Path, lines: list[str]) -> None:
+        self.lines = lines
+        super().__init__(f"{source} does not match the profile schema:\n"
+                         + "\n".join(f"  {ln}" for ln in lines))
+
+
+class _Table(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+def _filled(v: str) -> str:
+    if not v.strip():
+        raise ValueError("must not be blank")
+    return v.strip()
+
+
+def _table_only(v: object) -> dict[str, object]:
+    if not isinstance(v, dict):
+        raise ValueError("unknown key")
+    return v
+
+
+def _scope_tag(v: str | None) -> str | None:
+    """A track's `store_tag`: a canonical scope tag, None when blank. `watch`
+    and `pending-review` are facts of a company (store `watch` and `review`
+    columns), not tags a roster row carries.
+
+    >>> _scope_tag(" NC_Local "), _scope_tag("")
+    ('local', None)
+    >>> _scope_tag("watch")  # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+    ValueError: not a scope tag
+    """
+    tag = tags.canonical(v)
+    if tag in tags.FACT_TOKENS:
+        raise ValueError(f"{tag!r} is a company flag, not a scope tag")
+    return tag or None
+
+
+Unit = Annotated[float, Field(ge=0.0, le=1.0)]
+Count = Annotated[int, Field(ge=0)]
+Filled = Annotated[str, AfterValidator(_filled)]
+
+
+# --- [keywords] / [exclude] -------------------------------------------------
+# Both mix fixed keys with per-track sub-tables ([keywords.<track id>]).
+# A key that is not a declared field must be such a table.
+
+class TrackKeywords(_Table):
+    core: list[str] = []
+    domain: list[str] = []
+    skill: list[str] = []
+
+
+_KEYWORD_TABLES = TypeAdapter(dict[str, Annotated[TrackKeywords, BeforeValidator(_table_only)]])
+
+
+class Keywords(TrackKeywords):
+    model_config = ConfigDict(extra="allow")
+    _tracks: dict[str, TrackKeywords] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _read_tracks(self) -> Self:
+        """The undeclared keys, each validated as a `TrackKeywords` table."""
+        self._tracks = _KEYWORD_TABLES.validate_python(self.model_extra or {})
+        return self
+
+    @property
+    def tracks(self) -> dict[str, TrackKeywords]:
+        """The per-track tables, by track id."""
+        return self._tracks
+
+
+class TrackExclude(_Table):
+    role_phrases: list[str] = []
+    title_tokens: list[str] = []
+    defense_strong: list[str] = []
+    defense_weak: list[str] = []
+    nonclinical: list[str] = []
+    clinical_titles: list[str] = []
+    clinical_markers: list[str] = []
+
+
+_EXCLUDE_TABLES = TypeAdapter(dict[str, Annotated[TrackExclude, BeforeValidator(_table_only)]])
+
+
+class Exclude(_Table):
+    model_config = ConfigDict(extra="allow")
+    _tracks: dict[str, TrackExclude] = PrivateAttr(default_factory=dict)
+    phrases: list[str] = []
+    title_phrases: list[str] = []
+    title_exempt_phrases: list[str] = []
+    boilerplate_phrases: list[Regex] = []
+
+    @field_validator("boilerplate_phrases")
+    @classmethod
+    def _lowercase_fragments(cls, v: list[str]) -> list[str]:
+        """Reject an uppercase letter outside an escape: the scrub runs
+        without re.I over lowercased text.
+
+        >>> Exclude(boilerplate_phrases=[r"health\\s+plans?"]).boilerplate_phrases
+        ['health\\\\s+plans?']
+        >>> Exclude(boilerplate_phrases=["Health plan"])
+        Traceback (most recent call last):
+        pydantic_core._pydantic_core.ValidationError: 1 validation error for Exclude
+        ...
+        """
+        bad = [f for f in v if re.sub(r"\\.", "", f) != re.sub(r"\\.", "", f).lower()]
+        if bad:
+            raise ValueError(f"boilerplate_phrases must be lowercase: {bad}")
+        return v
+
+    @model_validator(mode="after")
+    def _read_tracks(self) -> Self:
+        """The undeclared keys, each validated as a `TrackExclude` table."""
+        self._tracks = _EXCLUDE_TABLES.validate_python(self.model_extra or {})
+        return self
+
+    @property
+    def tracks(self) -> dict[str, TrackExclude]:
+        """The per-track tables, by track id."""
+        return self._tracks
+
+
+class Locations(_Table):
+    onsite: list[str] = []
+    remote: list[str] = []
+    accept_remote: bool = False
+    exclude: list[str] = []
+    remote_tokens: list[str] = []
+    remote_phrases: list[str] = []
+    hard_negations: list[str] = []
+    us_markers: list[str] = []
+    non_us_regions: list[str] = []
+
+
+# --- [tracks.<id>] ----------------------------------------------------------
+
+class TrackSources(_Table):
+    model_config = ConfigDict(frozen=True)
+    store: bool = True
+    aggregators: bool = False
+
+
+class Methodology(_Table):
+    """A track's crawl methodology. The class defaults are the "local"
+    engine's; ENGINE_DEFAULTS holds each engine's bundle, and a track
+    table overrides any key it sets (see src/config/tracks.py for what
+    each key does)."""
+    keyword_mode: Literal["extend", "replace"] = "extend"
+    accept_remote: bool = False
+    sources: TrackSources = Field(default_factory=TrackSources)
+    store_tag: Annotated[str | None, AfterValidator(_scope_tag)] = None
+    require_core_anchor: bool = False
+    geo_gate: bool = True
+    # TOML has no null: `false` switches the admission off.
+    remote_mission_floor: Annotated[Unit | None, BeforeValidator(
+        lambda v: None if v is False else v)] = 0.85
+    verify_top: Count = 15
+    verify_floor: Unit = 0.25
+    email: bool = False
+    digest_min_fit: Unit = 0.4
+    notify: bool = False
+    exclude_gate: bool = True
+    # The default technical-title gate: a posting whose TITLE doesn't match
+    # this never costs an API call. Broad and field-neutral on purpose;
+    # narrow or widen it per track.
+    tech_title_regex: Regex = (
+        r"\b("
+        r"engineer|engineering|developer|develop|software|programmer|programming|"
+        r"architect|devops|sre|reliability|infrastructure|platform|security|"
+        r"data|database|analyst|analytics|quantitative|"
+        r"scientist|science|sciences|scientific|research|researcher|"
+        r"ml|machine learning|deep learning|ai|algorithm|algorithms|modeling|"
+        r"simulation|computational|"
+        r"informatic\w*|bioinformatic\w*|statistic\w*|biostatistic\w*|"
+        r"epidemiolog\w*|"
+        r"firmware|hardware|embedded|robotics|systems|automation|technologist|"
+        r"quality|validation|verification|qa|test|r&d|python"
+        r")\b"
+    )
+
+
+ENGINE_DEFAULTS = {
+    # A location-scoped crawl of the companies in your store: asks each
+    # board for YOUR region, so it stays cheap on huge employers.
+    "local": Methodology(),
+    # A location-AGNOSTIC sweep: whole boards and aggregator feeds,
+    # gated hard on CORE keywords.
+    "sweep": Methodology(
+        keyword_mode="replace", accept_remote=True,
+        sources=TrackSources(aggregators=True),
+        store_tag=tags.SWEEP, require_core_anchor=True, geo_gate=False,
+        verify_top=0, exclude_gate=False),
+}
+
+#: Retired engine name -> current one, so an older profile keeps working.
+ENGINE_ALIASES = {"neural": "sweep"}
+
+
+def _engine(v: str) -> str:
+    v = ENGINE_ALIASES.get(v, v)
+    if v not in ENGINE_DEFAULTS:
+        raise ValueError("unknown engine; expected "
+                         + " or ".join(ENGINE_DEFAULTS))
+    return v
+
+
+class Track(Methodology):
+    """One [tracks.<id>] table, resolved: every methodology key it leaves
+    out is filled from its engine's defaults, and a blank string means the
+    key is unset (src.config.tracks._build_ui_tracks' doctest shows both).
+    `db`, when present, must name a file."""
+    label: str = ""                   # "" -> the track id
+    db: Filled | None = None          # None -> "<id>.db"
+    track: str = ""                   # "" -> the id, "_" -> "-"
+    engine: Annotated[str, AfterValidator(_engine)] = "local"
+    rank_by: Literal["fit", "combined"] = "fit"
+    min_mission: Unit | None = None
+    min_fit_default: Unit = 0.0
+    willing_to_move_default: bool = False
+    remote_requires_watch: bool = False
+    default: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        data = {k: v for k, v in data.items()
+                if k == "db" or not (isinstance(v, str) and not v.strip())}
+        name = data.get("engine", "local")
+        if not isinstance(name, str) or ENGINE_ALIASES.get(name, name) not in ENGINE_DEFAULTS:
+            return data                             # the engine field reports it
+        eng = ENGINE_DEFAULTS[ENGINE_ALIASES.get(name, name)]
+        fill = {n: getattr(eng, n) for n in Methodology.model_fields if n not in data}
+        if isinstance(mine := data.get("sources"), (dict, TrackSources)):
+            mine = mine if isinstance(mine, dict) else mine.model_dump(exclude_unset=True)
+            fill["sources"] = {**eng.sources.model_dump(), **mine}
+        return {**data, **fill}
+
+
+# --- [policy] ----------------------------------------------------------------
+
+class Policy(_Table):
+    multi_division: list[str] = []
+    multi_division_mission_floor: Unit = 0.6
+    watch_division_titles: list[str] = []
+    harvest_offmission_hours: Annotated[float, Field(ge=0)] = 168.0
+    board_max_rows: Annotated[int, Field(ge=1)] = 3000
+    respect_robots: bool = True
+    robots_exempt_hosts: list[str] = []
+    search_dns_fallback: list[str] = ["1.1.1.1", "8.8.8.8"]
+    robots_connect_timeout: Annotated[float, Field(gt=0)] = 3.0
+    robots_read_timeout: Annotated[float, Field(gt=0)] = 10.0
+    browser_channels: list[str] = ["", "chrome", "msedge"]
+    page_retries: Annotated[int, Field(ge=0)] = 1
+    page_retry_pause_s: Annotated[float, Field(ge=0)] = 5.0
+    probe_pause_s: Annotated[float, Field(ge=0)] = 1.0
+    search_probe_pause_s: Annotated[float, Field(ge=0)] = 2.0
+
+
+# --- [candidate] / [mission] / [locality] ----------------------------------
+
+class Candidate(_Table):
+    summary: str = ""
+    strengths: list[str] = []
+    fit_caps: list[str] = []
+    avoid: str = ""
+    resume: str = ""
+
+
+def _ordered(band: list[float]) -> list[float]:
+    if band[0] > band[1]:
+        raise ValueError("must be [lo, hi] with lo <= hi")
+    return band
+
+
+class MissionTier(_Table):
+    name: Filled
+    desc: str = ""
+    band: Annotated[list[Unit], Field(min_length=2, max_length=2),
+                    AfterValidator(_ordered)] = [0.0, 1.0]
+    active: bool = True
+
+
+class Mission(_Table):
+    tiers: list[MissionTier] = []
+    bullseye_regex: Regex = ""
+    bullseye_tier: str = ""
+
+    @model_validator(mode="after")
+    def _bullseye_names_a_tier(self) -> Mission:
+        names = {t.name for t in self.tiers}
+        if names and self.bullseye_tier.strip() and (
+                self.bullseye_tier.strip() not in names):
+            raise ValueError("bullseye_tier names no tier in `tiers`")
+        return self
+
+
+class Locality(_Table):
+    name: str = "local"
+    word_tokens: list[str] = []
+    substrings: list[str] = []
+    state_suffix: list[str] = []
+
+    @field_validator("name")
+    @classmethod
+    def _blank_is_local(cls, v: str) -> str:
+        return v.strip() or "local"
+
+
+# --- [sources] ---------------------------------------------------------------
+
+class Discourse(_Table):
+    label: str = ""
+    url: Filled
+    category_id: int = 0
+
+
+class RssFeed(_Table):
+    label: str = ""
+    url: Filled
+    location: str = "Remote"
+
+
+def _default_rss() -> list[RssFeed]:
+    wwr = "https://weworkremotely.com/categories"
+    return [RssFeed(label="WeWorkRemotely - Programming",
+                    url=f"{wwr}/remote-programming-jobs.rss"),
+            RssFeed(label="WeWorkRemotely - All Other",
+                    url=f"{wwr}/all-other-remote-jobs.rss"),
+            RssFeed(label="Jobicy - All Remote",
+                    url="https://jobicy.com/?feed=job_feed")]
+
+
+class Usajobs(_Table):
+    enabled: bool = False
+    keyword: str = ""
+    location: str = ""
+    radius: Count = 50
+    # Absent -> the fetcher's technical set; [] -> every series.
+    series: list[str] | None = None
+    results_per_page: Annotated[int, Field(ge=1)] = 250
+
+
+class Getro(_Table):
+    enabled: bool = False
+    boards: list[str] = []
+    max_details: Count = 150
+
+
+class BoardDirectory(_Table):
+    # A URL or a local directory holding manifest.json, companies.parquet and
+    # one <file>/jobs.parquet per platform (the jobhive dataset's layout).
+    base_url: Filled = "https://storage.stapply.ai/jobhive/v1"
+    # Platform files to read; [] -> every file the manifest lists.
+    files: list[str] = []
+    min_gate_titles: Count = 1
+    max_scored_per_run: Count = 200
+    refresh_days: Count = 7
+
+
+class GoogleJobs(_Table):
+    # Job searches, each run in each of `locations`; [] -> the core
+    # keywords of the location-scoped track.
+    queries: list[str] = []
+    # "City, ST" places; [] -> your [locality] places with its state code.
+    locations: list[str] = []
+    # (query, location) pairs one run searches, every query in the first
+    # location before the second.
+    max_searches: Annotated[int, Field(ge=1)] = 12
+    # Postings one run reads, and the most it may charge (USD).
+    max_items: Annotated[int, Field(ge=1)] = 100
+    max_charge_usd: Annotated[float, Field(gt=0)] = 0.5
+    # Days one run's postings are reused before the actor runs again.
+    refresh_days: Count = 7
+
+
+class Sources(_Table):
+    remoteok: bool = True
+    remotive: bool = True
+    remotive_category: str = ""
+    hnhiring: bool = True
+    hnhiring_max_threads: Count = 2
+    discourse: list[Discourse] = []
+    # Absent -> these general remote-job feeds; [] -> no RSS at all.
+    rss: list[RssFeed] = Field(default_factory=_default_rss)
+    usajobs: Usajobs = Field(default_factory=Usajobs)
+    getro: Getro = Field(default_factory=Getro)
+    board_directory: BoardDirectory = Field(default_factory=BoardDirectory)
+    google_jobs: GoogleJobs = Field(default_factory=GoogleJobs)
+
+
+# --- [discovery] -------------------------------------------------------------
+
+class SeedCompany(_Table):
+    name: Filled
+    notes: str = ""
+
+
+class DirectoryPage(_Table):
+    url: Filled
+    # First group = the company name in a link href; "" -> the generic harvest.
+    link_re: Regex = ""
+
+
+class Discovery(_Table):
+    # A bare name, or a { name, notes } table.
+    seed_companies: list[Annotated[SeedCompany, BeforeValidator(
+        lambda v: {"name": v} if isinstance(v, str) else v)]] = []
+    seed_triggers: list[str] = []
+    # Big employers worth the slow careers-page scan (`discovery.scan`).
+    scan_majors: list[str] = []
+    # A bare URL, or a { url, link_re } table.
+    directory_urls: list[Annotated[DirectoryPage, BeforeValidator(
+        lambda v: {"url": v} if isinstance(v, str) else v)]] = []
+    # Name -> official domain before the resolver guesses one.
+    domain_lookup: bool = True
+    domain_lookup_urls: list[str] = [
+        "https://autocomplete.clearbit.com/v1/companies/suggest?query={q}"]
+    # Hosts tried for a found domain, in order, until one has a board.
+    domain_hosts: list[str] = ["{domain}", "careers.{domain}", "jobs.{domain}"]
+    # Tried after a seeded host's root, which some careers sites refuse.
+    locale_paths: list[str] = ["/us/en", "/en-us", "/en"]
+    # Structured name registries `discover.py --registries` reads.
+    # "google_jobs" is paid (APIFY_API_KEY, [sources.google_jobs]): add it
+    # to opt in.
+    registries: list[Literal["nih_sbir", "openfda_devices", "google_jobs"]] = [
+        "nih_sbir", "openfda_devices"]
+    # openFDA medical specialties worth reading (its own labels); [] = all.
+    registry_specialties: list[str] = []
+    name_search_queries: list[str] = []
+    brainstorm_names: Count = 50
+    name_blocklist: list[str] = []
+    websearch_cap: Count = 20
+    # Firecrawl credits a run may spend searching what DuckDuckGo missed
+    # (FIRECRAWL_API_KEY; 2 credits per 10 results); 0 never asks it.
+    firecrawl_credits: Count = 100
+    # Days a name that missed is skipped by every discovery rerun; 0 = never.
+    miss_retry_days: Count = 14
+    aggregator_hosts: list[str] = []
+    generic_name_words: list[str] = []
+
+
+# --- [fit] -------------------------------------------------------------------
+# A profile's weights / gate_penalty tables MERGE over these: a key it
+# leaves out keeps its default, and a key not declared here is an error.
+
+class FitWeights(_Table):
+    domain: Unit = 0.25
+    function: Unit = 0.34
+    stack: Unit = 0.33
+    seniority: Unit = 0.08
+
+
+class GatePenalty(_Table):
+    geo: Unit = 0.20
+    embedded: Unit = 0.40
+    level: Unit = 0.35
+    phd: Unit = 0.45
+    management: Unit = 0.35
+    clearance: Unit = 0.45
+
+
+class LadderRung(_Table):
+    score: Unit
+    terms: list[str]
+
+
+class Fit(_Table):
+    weights: FitWeights = Field(default_factory=FitWeights)
+    gate_penalty: GatePenalty = Field(default_factory=GatePenalty)
+    domain_ladder: list[LadderRung] = []
+    stack_core: list[str] = []
+    stack_anti: list[str] = []
+    region_terms: list[str] = []
+    disposition_examples: Count = 3
+    clearance_verbs: list[str] = []
+    clearance_qualifiers: list[str] = []
+
+
+# --- the whole profile -------------------------------------------------------
+
+class Profile(_Table):
+    # `tracks` first: the per-track [keywords.<id>] / [exclude.<id>] checks
+    # below read the validated track ids.
+    tracks: dict[str, Track] = Field(default_factory=lambda: {
+        tid: Track.model_validate(t) for tid, t in DEFAULT_TRACKS.items()})
+    keywords: Keywords = Field(default_factory=Keywords)
+    exclude: Exclude = Field(default_factory=Exclude)
+    locations: Locations = Field(default_factory=Locations)
+    policy: Policy = Field(default_factory=Policy)
+    candidate: Candidate = Field(default_factory=Candidate)
+    mission: Mission = Field(default_factory=Mission)
+    locality: Locality = Field(default_factory=Locality)
+    sources: Sources = Field(default_factory=Sources)
+    discovery: Discovery = Field(default_factory=Discovery)
+    fit: Fit = Field(default_factory=Fit)
+
+    @field_validator("tracks", mode="before")
+    @classmethod
+    def _empty_is_builtin(cls, v: object) -> object:
+        return v or DEFAULT_TRACKS
+
+    @field_validator("keywords", "exclude")
+    @classmethod
+    def _tables_name_tracks(cls, v: Keywords | Exclude,
+                            info: ValidationInfo) -> Keywords | Exclude:
+        extra = v.model_extra or {}                 # a dict: extra="allow"
+        ids = info.data.get("tracks", extra)
+        stray = sorted(k for k in extra if k not in ids)
+        if stray:
+            raise ValueError(", ".join(f"[{info.field_name}.{k}]"
+                                       for k in stray)
+                             + " names no [tracks.*] table")
+        return v
+
+
+def parse(raw: Mapping[str, object], source: str | Path = "profile") -> Profile:
+    """`raw` (a parsed profile.toml) as a validated Profile, or ProfileError
+    listing every bad key path (the lines `problems` returns)."""
+    try:
+        return Profile.model_validate(raw)
+    except ValidationError as e:
+        raise ProfileError(source, error_lines(e)) from None
+
+
+def problems(raw: Mapping[str, object]) -> list[str]:
+    """What is wrong with `raw`, one 'path: problem' line per bad key; []
+    when it is a valid profile. A line names the key, never its value: a
+    profile holds personal data.
+
+    >>> problems({"keywords": {"core": ["neuro"]}})
+    []
+    >>> for line in problems({
+    ...         "tracks": {"t": {"engine": "rocket"}},
+    ...         "keywords": {"core": "neuro", "t": {"skill": ["c"]}},
+    ...         "mission": {"tiers": [{"desc": "no name"}]},
+    ...         "sources": {"rss": [{"label": "no url"}]},
+    ...         "fit": {"weights": {"domain": 0.5, "vibes": 0.1}}}):
+    ...     print(line)
+    tracks.t.engine: unknown engine; expected local or sweep
+    keywords.core: Input should be a valid list
+    mission.tiers[0].name: required
+    sources.rss[0].url: required
+    fit.weights.vibes: unknown key
+
+    Weights merge over the defaults rather than replacing them:
+
+    >>> parse({"fit": {"weights": {"domain": 0.5}}}).fit.weights.model_dump()
+    {'domain': 0.5, 'function': 0.34, 'stack': 0.33, 'seniority': 0.08}
+    """
+    try:
+        parse(raw)
+    except ProfileError as e:
+        return e.lines
+    return []

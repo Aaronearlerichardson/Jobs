@@ -2,71 +2,286 @@
 the HN thread parser, posting-date normalisation, age tags, and the
 closed-posting probe guards. No network."""
 
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
-from bs4 import BeautifulSoup
+import requests
 
-import core.digest_md as digest_md
-import discovery.ats_dork as dork
-import discovery.sniffer as sniffer
-import scrapers.fetchers.company as company_fetch
-from scrapers.util import norm_posted_date
+import src.digest.render as digest
+import src.discovery.local_sourcing as local_sourcing
+import src.discovery.name_sources as name_sources
+import src.discovery.paste_ingest as paste_ingest
+import src.discovery.resolve.fetchpool as fetchpool
+from conftest import answer, fake_response, keep_store_open, stub_mission
+import src.discovery.pipeline as pipeline
+import src.discovery.resolve.board as resolve_board
+import src.discovery.resolve.identity as identity
+import src.discovery.resolve.sniffer as sniffer
+import src.discovery.write as write
+from src.ats import signatures as ats_signatures
+import src.ats.board.company as company_fetch
+import src.ats.board.closure as job_probe
+from src.net.util import norm_posted_date
+from src.match.names import junk_name_reason
+from src.ops import repair
+from src import config, tags
+import src.store as store
+from src.store.employers import write_mission
 
 
 class TestSniffer:
-    def test_extracts_lever_and_greenhouse_slugs(self):
-        boards = dork.extract_boards_from_urls([
-            "https://jobs.lever.co/bioagilytix/x",
-            "https://boards.greenhouse.io/pendo/jobs/1"])
-        assert {("lever", "bioagilytix"), ("greenhouse", "pendo")} <= set(boards)
-
-    def test_custom_board_needs_real_job_links(self):
-        assert not sniffer._looks_like_custom_board("<a href='/careers/'>Careers</a>")
-
     def test_detects_adp_cid_ccid(self):
         url = ("workforcenow.adp.com/x?cid=d290c04e-0230-4cd9-8bf0-f116bfab1405"
                "&ccid=19000101_000003")
-        assert sniffer._detect(url)[1] == "adp"
+        assert ats_signatures.detect(url)[1] == "adp"
 
-    def test_detects_lead_platform(self):
-        assert sniffer._detect("via acme.eightfold.ai portal")[0] == "lead"
+    def test_detects_infor_host_and_org(self):
+        """An Infor board URL names BOTH halves of the coordinate; one
+        without the org id names no board."""
+        host = "css-acme-prd.inforcloudsuite.com"
+        url = (f"https://{host}/hcm/Jobs/page/JobsHomePage"
+               f"?csk.JobBoard=EXTERNAL&csk.HROrganization=42")
+        assert ats_signatures.detect("", url) == ("fetchable", "infor", f"{host}|42")
+        assert ats_signatures.detect("", f"https://{host}/hcm/Jobs/page/JobsHomePage") is None
+        assert ats_signatures.detect(f'<a href="{url.replace("&", "&amp;")}">Jobs</a>') == \
+            ("fetchable", "infor", f"{host}|42")
 
-    def test_probes_cover_sniffable_atses(self):
-        from discovery.probes import PROBES
-        assert {"greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr",
-                "smartrecruiters"} <= set(PROBES)
+    async def test_sniffs_a_phenom_board_from_its_widget_endpoint(self, monkeypatch):
+        """A Phenom tenant's own site is the board: its pages embed the
+        widget API origin, which is the board's slug."""
+        root = "https://www.example-health.org/careers"
+        page = fake_response(text='<html><script>var ddo = {"widgetApiEndpoint":'
+                                  '"https://careers.example-health.org/widgets"};'
+                                  '</script></html>', url=root)
+        monkeypatch.setattr(sniffer, "candidate_pages", answer([page]))
+        assert await sniffer.sniff_ats("Example Health") == {
+            "ats": "phenom", "slug": "careers.example-health.org", "careers_url": root}
+
+    async def test_confirms_a_board_its_page_names_at_the_page_origin(self, monkeypatch):
+        """A signature naming only the vendor (a SuccessFactors asset host)
+        makes the site that carried it the board, confirmed at its origin:
+        where `pack` puts it."""
+        root = "https://careers.example-health.org/go/jobs/1/"
+        page = fake_response(text='<script src="https://rmkcdn.successfactors.com/j.js">'
+                                  '</script>', url=root)
+        monkeypatch.setattr(sniffer, "candidate_pages", answer([page]))
+        asked = []
+        monkeypatch.setattr(sniffer, "confirm", answer(lambda *a: asked.append(a) or 4))
+        assert (await sniffer.sniff_careers_ats("Example Health"))["confirmed"]
+        assert asked == [("successfactors", "rmkcdn", "https://careers.example-health.org")]
 
 
-class TestCustomBoardLinks:
-    def test_real_job_links_detected(self):
+def _stub_fetch_all(monkeypatch, mapping):
+    """Replace fetchpool._fetch_all with a lookup into `mapping` (url -> html),
+    so no network call happens; any URL not in `mapping` fetches as None.
+
+    One patch covers every caller now: the sniffer and the Workday probe
+    used to import the name and so needed their own copies replaced, and
+    both go through identity.candidate_pages, which looks it up on
+    fetchpool at call time."""
+    async def _fake(urls):
+        return {u: (fake_response(text=mapping[u], url=u) if u in mapping else None)
+                for u in urls}
+    monkeypatch.setattr(fetchpool, "_fetch_all", _fake)
+
+
+class TestDeadHostCache:
+    """_fetch_page skips a host that refused a connection earlier in the
+    run: the candidate list tries several paths per name-guessed host and
+    the miss path rebuilds it a few more times, so one dead host cost seven
+    identical GETs per name in the 2026-09-01 add-names run."""
+
+    async def test_refused_host_is_not_retried_on_other_paths(self, serve):
+        calls = serve(requests.exceptions.ConnectionError("dns"))
+        assert await fetchpool._fetch_page("https://www.dead.example/") is None
+        assert await fetchpool._fetch_page("https://www.dead.example/careers") is None
+        assert await fetchpool._fetch_page("https://www.other.example/careers") is None
+        assert calls == ["https://www.dead.example/",
+                         "https://www.other.example/careers"]
+
+    async def test_read_timeout_is_not_a_dead_host(self, serve):
+        # A slow host may still answer another path; only refused
+        # connections (DNS, TLS, connect timeout) are remembered.
+        calls = serve(requests.exceptions.ReadTimeout("slow"))
+        await fetchpool._fetch_page("https://www.slow.example/")
+        await fetchpool._fetch_page("https://www.slow.example/careers")
+        assert len(calls) == 2
+
+
+class TestPageMemo:
+    """_fetch_page answers a repeated URL from its per-run memo: each stage
+    of a name's resolution rebuilds the candidate list, so live hosts were
+    fetched up to seven times per name (sgs.com, intertek.com, a 403ing
+    infosys.com in the 2026-09-01 add-names runs)."""
+
+    def _session(self, serve, status=200, body="x" * 400):
+        return serve(fake_response(text=body, status=status))
+
+    async def test_live_page_is_fetched_once_per_run(self, serve):
+        calls = self._session(serve)
+        a = await fetchpool._fetch_page("https://www.sgs.com/")
+        b = await fetchpool._fetch_page("https://www.sgs.com/")
+        assert a is b and a is not None
+        assert calls == ["https://www.sgs.com/"]
+
+    async def test_misses_are_memoized_too(self, serve):
+        calls = self._session(serve, status=403)
+        assert await fetchpool._fetch_page("https://www.infosys.com/") is None
+        assert await fetchpool._fetch_page("https://www.infosys.com/") is None
+        assert len(calls) == 1
+
+    async def test_distinct_urls_still_fetch(self, serve):
+        calls = self._session(serve)
+        await fetchpool._fetch_page("https://www.sgs.com/")
+        await fetchpool._fetch_page("https://www.sgs.com/careers")
+        assert len(calls) == 2
+
+
+class TestJobPageMeta:
+    """URL-only manual adds read their title (and JD) off the posting page;
+    nine empty-title rows sat in the 2026-09-01 store because nothing did."""
+
+    async def test_jsonld_title_and_description(self, serve):
+        body = " ".join(["word"] * 60)
+        serve('<script type="application/ld+json">{"@type": "JobPosting", '
+              '"title": "Sr Vision Software Engineer", '
+              '"description": "' + body + '"}</script>')
+        title, desc = await company_fetch.job_page_meta("https://x.example/jobs/1")
+        assert title == "Sr Vision Software Engineer"
+        assert desc.startswith("word word")
+
+    async def test_title_falls_back_to_og_title_then_html_title(self, serve):
+        serve('<html><head><meta property="og:title" content="Data Engineer II">'
+              '<title>Data Engineer II | Acme Careers</title></head></html>')
+        assert (await company_fetch.job_page_meta("https://x.example/j"))[0] == "Data Engineer II"
+        serve('<html><head><title> Data  Engineer II | Acme Careers</title>'
+              '</head></html>')
+        assert (await company_fetch.job_page_meta("https://x.example/j"))[0] == "Data Engineer II"
+
+    async def test_fetch_failure_is_a_double_miss(self, serve):
+        serve(requests.ConnectionError("down"))
+        assert await company_fetch.job_page_meta("https://x.example/j") == ("", "")
+
+
+class TestRootScan:
+    """sniff_ats/sniff_careers_ats fall back to the bare homepage when every
+    careers-path candidate misses (Task 2: NALA Membranes / Merakris
+    Therapeutics reference their ATS on the root page, not a /careers path)."""
+
+    async def test_sniff_ats_recovers_ats_badge_on_homepage(self, monkeypatch):
+        root = "https://www.acmegenomics.com/"
+        _stub_fetch_all(monkeypatch, {
+            root: '<a href="https://jobs.lever.co/acmegenomics">Jobs</a>'})
+        hit = await sniffer.sniff_ats("Acme Genomics")
+        assert hit == {"ats": "lever", "slug": "acmegenomics",
+                       "careers_url": root}
+
+    async def test_sniff_careers_ats_falls_back_to_root_as_a_lead(self, monkeypatch):
+        # Ashby has no probe-confirmable count path for a bare slug fixture
+        # here, so this exercises the unconfirmed-lead branch of the
+        # root-scan fallback.
+        root = "https://www.acmegenomics.com/"
+        _stub_fetch_all(monkeypatch, {
+            root: '<a href="acme-genomics.gohire.io">Jobs</a>'})
+        lead = await sniffer.sniff_careers_ats("Acme Genomics")
+        assert lead["confirmed"] is False
+        assert lead["ats"] == "gohire"
+
+    async def test_no_root_fallback_when_a_candidate_already_hit(self, monkeypatch):
+        # A hit on a real careers-path candidate must win outright -- the
+        # root scan only runs when nothing else did.
+        candidate = "https://www.acmegenomics.com/careers"
+        root = "https://www.acmegenomics.com/"
+        _stub_fetch_all(monkeypatch, {
+            candidate: '<a href="https://jobs.lever.co/acmegenomics">Jobs</a>',
+            root: '<a href="https://boards.greenhouse.io/wrongone">Jobs</a>'})
+        hit = await sniffer.sniff_ats("Acme Genomics")
+        assert hit["ats"] == "lever"
+
+    async def test_risky_root_token_still_needs_corroboration(self, monkeypatch):
+        # "Galaxy Diagnostics" -> root guess "galaxy.com" is a truncated
+        # (risky) token; a page that doesn't mention "diagnostics" must not
+        # be trusted even when it's the only thing that answered.
+        root = "https://www.galaxy.com/"
+        _stub_fetch_all(monkeypatch, {
+            root: '<a href="https://jobs.lever.co/galaxyfintech">Jobs</a>'})
+        assert await sniffer.sniff_ats("Galaxy Diagnostics") is None
+
+    async def test_risky_root_token_recovered_when_it_corroborates(self, monkeypatch):
+        root = "https://www.galaxy.com/"
+        _stub_fetch_all(monkeypatch, {
+            root: ('Careers at Galaxy Diagnostics<br>'
+                   '<a href="https://jobs.lever.co/galaxydx">Jobs</a>')})
+        hit = await sniffer.sniff_ats("Galaxy Diagnostics")
+        assert hit and hit["ats"] == "lever"
+
+
+class TestDiagnoseNoBoard:
+    """The "no-board-found" qualifiers classify_miss appends."""
+
+    async def test_domain_unreachable_when_nothing_answers(self, monkeypatch):
+        _stub_fetch_all(monkeypatch, {})
+        assert await sniffer.diagnose_no_board("Acme Genomics") == "domain-unreachable"
+
+    async def test_site_blocked_when_a_host_refused_the_crawler(self, monkeypatch):
+        """carolina.com answers every page 403: a live site behind a bot
+        wall, not an unreachable one (2026-10-08)."""
+        _stub_fetch_all(monkeypatch, {})
+        monkeypatch.setattr(sniffer.http, "refused", lambda u: "acmegenomics.com" in u)
+        assert await sniffer.diagnose_no_board("Acme Genomics") == "site-blocked"
+
+    async def test_site_only_no_careers_when_a_page_answers_with_nothing_on_it(
+            self, monkeypatch):
+        root = "https://www.acmegenomics.com/"
+        _stub_fetch_all(monkeypatch, {root: "<html><body>Welcome</body></html>"})
+        assert (await sniffer.diagnose_no_board("Acme Genomics")
+                == "site-only-no-careers")
+
+    async def test_careers_page_no_ats_when_real_job_links_but_no_ats(
+            self, monkeypatch):
+        careers = "https://www.acmegenomics.com/careers"
         html = ('<a href="/careers/facilities-engineer-88">Facilities Engineer</a>'
                 '<a href="/careers/quality-engineer-19">Quality Engineer</a>'
                 '<a href="/careers/data-scientist-3">Data Scientist</a>')
-        links = company_fetch.find_job_links(BeautifulSoup(html, "html.parser"))
-        assert len(links) == 3
+        _stub_fetch_all(monkeypatch, {careers: html})
+        assert (await sniffer.diagnose_no_board("Acme Genomics")
+                == "careers-page-no-ats")
 
-    def test_nav_links_rejected(self):
-        html = ('<a href="/careers/open-positions/">Careers</a>'
-                '<a href="/careers/career-opportunities/">View Current Job Openings</a>'
-                '<a href="/careers/career-opportunities/">Career Opportunities</a>')
-        assert company_fetch.find_job_links(BeautifulSoup(html, "html.parser")) == []
+    async def test_wrong_domain_when_only_a_risky_token_answers_uncorroborated(
+            self, monkeypatch):
+        root = "https://www.galaxy.com/careers"
+        _stub_fetch_all(monkeypatch, {
+            root: "<html><body>Galaxy Digital hires blockchain engineers</body></html>"})
+        assert (await sniffer.diagnose_no_board("Galaxy Diagnostics")
+                == "wrong-domain")
 
-    def test_aggregator_host_is_never_a_custom_board(self):
-        assert company_fetch.custom_board_listing_url(
-            "https://www.indeed.com/jobs?q=x", "<html></html>") is None
+    async def test_risky_uncorroborated_noise_ignored_when_a_safe_page_answers(
+            self, monkeypatch):
+        # The precise domain DOES answer (just with nothing careers-shaped
+        # on it); an unrelated site coincidentally living at the truncated
+        # "galaxy.com" guess must not override that with "wrong-domain" --
+        # that reason is reserved for when the precise domain is the one
+        # that's dead (see the sibling test above).
+        safe = "https://www.galaxydiagnostics.com/"
+        risky = "https://www.galaxy.com/careers"
+        _stub_fetch_all(monkeypatch, {
+            safe: "<html><body>Welcome to Galaxy Diagnostics</body></html>",
+            risky: "<html><body>Galaxy Digital hires blockchain engineers</body></html>"})
+        assert (await sniffer.diagnose_no_board("Galaxy Diagnostics")
+                == "site-only-no-careers")
 
 
 class TestHnParser:
     def test_role_found_out_of_order(self):
-        from scrapers.fetchers.hnhiring import _parse_post
+        from src.ats.feeds.hnhiring import _parse_post
         _, role, loc, _ = _parse_post(
             "Acme Neuro | Remote (US) | $150k-190k | Senior ML Engineer | Full-time")
         assert role == "Senior ML Engineer"
         assert "Remote" in loc
 
     def test_inc_suffix_not_chopped(self):
-        from scrapers.fetchers.hnhiring import _parse_post
+        from src.ats.feeds.hnhiring import _parse_post
         company, role, _, _ = _parse_post("Foo Inc. | ML Engineer | Durham, NC")
         assert company == "Foo Inc." and role == "ML Engineer"
 
@@ -100,7 +315,6 @@ class TestPostedDates:
         assert got == "2026-08-01"
 
     def test_status_sync_backfills_posted_at(self, db, company, add_job):
-        import core.store as store
         add_job("gh_acme_2")
         store.sync_job_statuses(db, company, [
             {"id": "gh_acme_2", "title": "Data Engineer",
@@ -113,60 +327,1219 @@ class TestPostedDates:
 
 class TestAgeTag:
     def test_new_when_first_seen_today(self):
-        assert digest_md.age_tag({"first_seen": datetime.now().isoformat()}) == "NEW"
+        assert digest.age_tag({"first_seen": datetime.now().isoformat()}) == "NEW"
 
     def test_days_since_posting(self):
-        assert digest_md.age_tag({
+        assert digest.age_tag({
             "first_seen": "2026-01-01T00:00:00",
             "posted_at": (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d"),
         }) == "6d"
 
     def test_stale_flag(self):
-        assert digest_md.age_tag({
+        assert digest.age_tag({
             "first_seen": "2026-01-01T00:00:00",
             "posted_at": (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"),
         }) == "60d!"
 
     def test_unknown_date(self):
-        assert digest_md.age_tag({"first_seen": "2026-01-01T00:00:00"}) == "?"
+        assert digest.age_tag({"first_seen": "2026-01-01T00:00:00"}) == "?"
 
 
 class TestClosedProbeGuards:
-    def test_gated_host_is_indeterminate(self):
+    async def test_gated_host_is_indeterminate(self):
         # Bot-gated hosts must never be read as "job closed".
-        assert company_fetch.probe_job_open(
-            "https://www.linkedin.com/jobs/view/123")[0] is None
-
-    def test_closed_marker_matches(self):
-        assert company_fetch._CLOSED_TEXT_RE.search(
-            "This position is no longer available")
-
-    def test_closed_loop_jd_does_not_trip_the_marker(self):
-        assert not company_fetch._CLOSED_TEXT_RE.search(
-            "develop closed-loop neurostimulation")
+        assert (await job_probe.probe_job_open(
+            "https://www.linkedin.com/jobs/view/123"))[0] is None
 
 
 class TestDiscoveryWiring:
-    def test_brainstorm_disabled_touches_no_api(self):
-        import discovery.local_sourcing as ls
-        assert ls.brainstorm_company_names(n=0) == []
+    async def test_brainstorm_disabled_touches_no_api(self):
+        assert await name_sources.brainstorm_company_names(n=0) == []
 
     def test_populate_companies_has_dork_switch(self):
-        import discovery.local_sourcing as ls
+        import src.discovery.local_sourcing as ls
         assert "dork" in ls.populate_companies.__code__.co_varnames
 
-    def test_dork_queries_built_from_profile(self):
-        from discovery.ats_dork import DORK_QUERIES
-        assert len(DORK_QUERIES) >= 4
-        assert any("greenhouse" in q for q in DORK_QUERIES)
-
-    def test_probe_instances_coexist_unlaunched(self):
-        # Lazy launch: K probes can be constructed and torn down without
+    async def test_probe_pool_coexists_unlaunched(self):
+        # Lazy launch: a K-browser pool can be built and torn down without
         # ever starting a browser.
-        from contextlib import ExitStack
+        from src.discovery.resolve.probes import JsScanProbePool
+        async with JsScanProbePool(3) as pool:
+            assert pool.size == 3 and not pool.launched
 
-        from discovery.probes import WorkdayJsProbe
-        with ExitStack() as stack:
-            probes = [stack.enter_context(WorkdayJsProbe()) for _ in range(3)]
-            assert len(probes) == 3
-            assert not any(p._launched for p in probes)
+
+class TestPastedPageNames:
+    """Company names out of text copied off a results page.
+
+    The parser is deliberately permissive: a junk name costs one failed
+    resolve and is dropped by the same probe -> validate chain that guards
+    the LLM brainstorm, while a dropped real name is invisible. So these
+    pin the two things that actually matter — real employers survive, and
+    the specific noise a results page emits does not.
+    """
+
+    # Shaped like a LinkedIn job search: title / company / location / chrome.
+    RESULTS = """Senior Data Engineer
+Fennec Pharmaceuticals
+Durham, NC (Hybrid)
+Promoted
+2 days ago
+Clinical Research Scientist
+Locus Biosciences
+Research Triangle Park, NC
+Easy Apply
+Over 100 applicants
+Precision BioSciences · Durham, NC
+1K followers
+Principal Statistician
+Chimerix
+Raleigh-Durham-Chapel Hill Area
+Reposted 3 days ago
+G1 Therapeutics
+See all jobs
+Page 1 of 4"""
+
+    def test_finds_every_employer(self):
+        names = paste_ingest.parse_company_names(self.RESULTS)
+        assert set(names) == {
+            "Fennec Pharmaceuticals", "Locus Biosciences", "Precision BioSciences",
+            "Chimerix", "G1 Therapeutics",
+        }
+
+    def test_keeps_the_order_they_appeared_in(self):
+        names = paste_ingest.parse_company_names(self.RESULTS)
+        assert names[0] == "Fennec Pharmaceuticals"
+        assert names[-1] == "G1 Therapeutics"
+
+    @pytest.mark.parametrize("line", [
+        "2 days ago", "3 weeks ago", "Reposted 3 days ago", "Promoted",
+        "Easy Apply", "Actively recruiting", "1K followers", "10,001 employees",
+        "Over 100 applicants", "See all jobs", "Page 1 of 4", "Remote",
+        "Durham, NC", "Durham, NC (Hybrid)", "Raleigh-Durham-Chapel Hill Area",
+    ])
+    def test_page_furniture_is_dropped(self, line):
+        assert paste_ingest.parse_company_names(line) == []
+
+    @pytest.mark.parametrize("line", [
+        "Senior Data Engineer", "Clinical Research Scientist",
+        "Principal Statistician", "Director of Operations",
+        "Registered Nurse", "Software Developer II",
+    ])
+    def test_job_titles_are_dropped(self, line):
+        """Results pages interleave titles with employers; a title resolves to
+        nothing, so dropping it saves a pointless probe."""
+        assert paste_ingest.parse_company_names(line) == []
+
+    def test_a_digit_prefixed_stat_is_not_mistaken_for_a_list_item(self):
+        """Stripping list markers before the noise check turned '2 days ago'
+        into 'days ago' and '1K followers' into 'K followers', both of which
+        then looked like company names."""
+        assert paste_ingest.parse_company_names("2 days ago\n1K followers") == []
+
+    def test_numbered_lists_still_have_their_markers_stripped(self):
+        assert paste_ingest.parse_company_names(
+            "1. Fennec Pharmaceuticals\n2) Chimerix\n- G1 Therapeutics") == [
+            "Fennec Pharmaceuticals", "Chimerix", "G1 Therapeutics"]
+
+    def test_separator_suffixes_are_trimmed(self):
+        assert paste_ingest.parse_company_names(
+            "Precision BioSciences · Durham, NC\nChimerix • 1K followers") == [
+            "Precision BioSciences", "Chimerix"]
+
+    def test_duplicates_collapse_case_insensitively(self):
+        assert paste_ingest.parse_company_names(
+            "Chimerix\nCHIMERIX\nchimerix") == ["Chimerix"]
+
+    def test_accepts_a_list_as_well_as_a_blob(self):
+        assert paste_ingest.parse_company_names(
+            ["Chimerix", "2 days ago"]) == ["Chimerix"]
+
+    def test_empty_input_is_not_an_error(self):
+        for empty in ("", None, [], "   \n\n  "):
+            assert paste_ingest.parse_company_names(empty) == []
+
+    def test_urls_are_not_company_names(self):
+        assert paste_ingest.parse_company_names(
+            "https://linkedin.com/jobs/view/123\nwww.example.com\nChimerix") == ["Chimerix"]
+
+    def test_limit_is_honoured(self):
+        blob = "\n".join(f"Company {i} Bio" for i in range(50))
+        assert len(paste_ingest.parse_company_names(blob, limit=10)) == 10
+
+
+class TestPastedNameExtractionFallback:
+    async def test_llm_extraction_falls_back_to_the_parser(self, monkeypatch, db):
+        """No API key (or a failed call) must not lose the paste — the regex
+        parser still runs, so the card works for free."""
+        monkeypatch.setattr(paste_ingest, "extract_names_llm", answer([]))
+        captured = {}
+
+        async def _resolve(n, *a, **k):
+            # resolve_or_miss, not resolve_board_sniff_first: add_names
+            # goes through the wrapper that also yields a miss reason, and
+            # the real one would hit the network on a failed resolve.
+            captured[n] = None
+            return None, "no-board-found"
+
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", _resolve)
+        keep_store_open(monkeypatch, db)
+        await paste_ingest.add_names("Chimerix\n2 days ago", use_llm=True)
+        assert "Chimerix" in captured, "the paste was lost when the LLM returned nothing"
+
+
+class TestPastedNameBoardGuard:
+    """A pasted name the roster spells differently passes the name check,
+    resolves to a board already on file, and used to land as a second row
+    ("SAS" beside "SAS Institute", "Veeva Systems" beside "Veeva", "NVIDIA
+    AI" beside "NVIDIA" on 2026-09-01). The board is checked before the
+    insert now."""
+
+    def _wire(self, monkeypatch, db, hit):
+        stub_mission(monkeypatch, db)
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", answer((hit, None)))
+
+    async def test_same_board_under_another_name_is_not_added(self, monkeypatch, db, capsys):
+        store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
+                                  "slug": "globalcareers-sas"})
+        self._wire(monkeypatch, db, {"name": "SAS", "ats": "icims",
+                                     "slug": "globalcareers-sas",
+                                     "careers_url": "https://www.sas.com/careers",
+                                     "count": 150, "nc": 30, "via": "sniff"})
+        await paste_ingest.add_names("SAS", max_workers=1)
+        names = [r[0] for r in db.execute("SELECT name FROM companies")]
+        assert names == ["SAS Institute"]
+        assert "[dup]" in capsys.readouterr().out
+
+    async def test_a_new_board_is_still_written(self, monkeypatch, db):
+        store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
+                                  "slug": "globalcareers-sas"})
+        self._wire(monkeypatch, db, {"name": "Veeva", "ats": "lever",
+                                     "slug": "veeva",
+                                     "careers_url": "https://www.veeva.com/careers",
+                                     "count": 40, "nc": 12, "via": "sniff"})
+        await paste_ingest.add_names("Veeva", max_workers=1)
+        names = sorted(r[0] for r in db.execute("SELECT name FROM companies"))
+        assert names == ["SAS Institute", "Veeva"]
+
+
+class TestResolutionStallWatchdog:
+    """One wedged resolution must not hold a resolution pass — and the web
+    UI's one-op-at-a-time slot — forever. 2026-08-28: 59 of 60 pasted names
+    finished in 8 minutes; the 60th hung for over an hour and wedged the op
+    slot until the app was restarted. The watchdog behind add_names and
+    discover_local's sniff/websearch passes is src.net.parallel.fan_out's
+    `stall_s`."""
+
+    async def test_fan_out_abandons_only_the_stuck_item(self):
+        from src.net import parallel
+
+        async def work(n):
+            if n == "slow":
+                await asyncio.sleep(10)
+            return "ok"
+
+        stalled = []
+        got = [x async for x in parallel.fan_out(
+            ["fast", "slow"], work, max_workers=2, with_item=True,
+            stall_s=0.3, on_abandon=stalled.append)]
+        assert got == [("fast", "ok")]
+        assert stalled == ["slow"]
+
+    async def test_a_hung_resolve_is_abandoned_and_recorded(self, monkeypatch, db):
+        async def _resolve(n, *a, **k):
+            if n.startswith("Hangs"):
+                await asyncio.sleep(10)   # far past the patched stall window
+            return None, "no-board-found"
+
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", _resolve)
+        monkeypatch.setattr(local_sourcing, "RESOLVE_STALL_S", 0.3)
+        misses = []
+        monkeypatch.setattr(
+            "src.store.record_miss",
+            lambda conn, n, r, **kw: misses.append((n, r)))
+        keep_store_open(monkeypatch, db)
+        out = await paste_ingest.add_names("Chimerix\nHangs Forever Inc")
+        assert out == []
+        assert ("Hangs Forever Inc", "fetch-error:stalled") in misses, \
+            "the wedged name was not abandoned as a recorded miss"
+        assert any(n == "Chimerix" for n, _ in misses), \
+            "names that resolved before the stall must still be processed"
+
+
+class TestDoubledTitleExtraction:
+    """A results page that repeats each job title pins the employer by position.
+
+    LinkedIn renders every hit as "<title>(Verified job)<title>" with the
+    employer on the next line. Reading that marker beats filtering the page:
+    filtering a real 329-line search page yielded 15 employers plus 102 pieces
+    of chrome ("Past month", "Posted 3 days ago3 days ago", markdown nav
+    links), each of which would have cost a network resolve. The marker yields
+    the same 15 and never looks at the rest.
+    """
+
+    PAGE = """73 results
+Durham, NC (50 mi)
+How promoted jobs are ranked
+Signal Processing Engineer (Verified job)Signal Processing Engineer
+CoVar
+Durham, NC (On-site)
+You'd be a top applicant
+Viewed
+ ·
+Posted 2 weeks ago2 weeks ago
+ ·
+Easy Apply
+Senior AI/ML EngineerSenior AI/ML Engineer
+Pedestal Health
+Raleigh, NC (Remote)
+Posted 1 week ago1 week ago
+Postdoctoral AssociatePostdoctoral Associate
+Duke University
+Durham, NC
+4 connections work here
+Statistical Software DeveloperStatistical Software Developer
+Headwater Science
+Durham, NC (Hybrid)
+[About](https://about.linkedin.com/)
+[Help Center](https://www.linkedin.com/help/linkedin/)"""
+
+    def test_pulls_exactly_the_employers(self):
+        assert paste_ingest.parse_company_names(self.PAGE) == [
+            "CoVar", "Pedestal Health", "Duke University", "Headwater Science"]
+
+    def test_page_chrome_is_never_considered(self):
+        got = paste_ingest.parse_company_names(self.PAGE)
+        for chrome in ("73 results", "How promoted jobs are ranked",
+                       "Durham, NC (50 mi)", "Viewed", "Easy Apply"):
+            assert chrome not in got
+
+    def test_markdown_nav_links_are_dropped(self):
+        assert paste_ingest.parse_company_names(
+            "[Help Center](https://www.linkedin.com/help/linkedin/)") == []
+
+    def test_employer_names_containing_title_words_survive(self):
+        """The keyword screen that rejects job titles must not run on a name
+        the marker already proved is an employer — 'Headwater Science' and
+        'Vadum Inc.' would otherwise be collateral."""
+        page = ("Data EngineerData Engineer\nHeadwater Science\n"
+                "Machine Learning EngineerMachine Learning Engineer\nVadum Inc.")
+        assert paste_ingest.parse_company_names(page) == [
+            "Headwater Science", "Vadum Inc."]
+
+    def test_a_doubled_date_is_not_a_doubled_title(self):
+        """'Posted 2 weeks ago2 weeks ago' repeats a SUFFIX, not the whole
+        line, so it must not mark the next line as a company."""
+        assert paste_ingest._DOUBLED_TITLE_RE.match(
+            "Posted 2 weeks ago2 weeks ago") is None
+
+    @pytest.mark.parametrize("line", [
+        "Signal Processing Engineer (Verified job)Signal Processing Engineer",
+        "Senior AI/ML EngineerSenior AI/ML Engineer",
+        "Postdoctoral AssociatePostdoctoral Associate",
+    ])
+    def test_marker_matches_both_badged_and_bare_doubles(self, line):
+        assert paste_ingest._DOUBLED_TITLE_RE.match(line)
+
+    def test_falls_back_when_the_page_has_no_marker(self):
+        """A source that doesn't repeat titles (a directory, an article) still
+        goes through the permissive line filter."""
+        assert paste_ingest.parse_company_names(
+            "Chimerix\n2 days ago\nG1 Therapeutics") == ["Chimerix", "G1 Therapeutics"]
+
+    def test_one_stray_double_does_not_hijack_a_plain_list(self):
+        """Two markers are required, so a coincidental repeat in prose cannot
+        switch a plain list over to positional reading. (Positional reading
+        would return nothing but the line after the stray double; every real
+        name surviving proves line mode ran. "bla bla" itself is multi-word
+        lowercase prose, which the line filter now drops on sight.)"""
+        assert paste_ingest.parse_company_names(
+            "Chimerix\nbla bla\nG1 Therapeutics\nBiogen") == [
+            "Chimerix", "G1 Therapeutics", "Biogen"]
+
+
+class TestResolveBoardSniffFirstCustomShortCircuit:
+    """Offline coverage for the Task 1 fix: a `custom` sniff hit only wins
+    immediately when it already carries local jobs. No network: sniff_ats,
+    probe_company, websearch_board and validate_board are all faked."""
+
+    @staticmethod
+    def _sniff_custom(careers_url="https://x.example/careers"):
+        return answer({"ats": "custom", "careers_url": careers_url})
+
+    async def test_weak_custom_hit_falls_through_to_probe_and_websearch(self, monkeypatch):
+        """nc == 0 on the custom hit must not short-circuit: both probe and
+        websearch get a chance before anything is returned."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        calls = {"probe": 0, "websearch": 0}
+
+        async def _probe(name, scan=True):
+            calls["probe"] += 1
+            return None
+
+        async def _websearch(name, max_results=8):
+            calls["websearch"] += 1
+            return None
+
+        monkeypatch.setattr(resolve_board, "probe_company", _probe)
+        monkeypatch.setattr(resolve_board, "websearch_board", _websearch)
+        # The marketing page "validates" (a handful of scraped fragments)
+        # but has zero LOCAL jobs.
+        monkeypatch.setattr(resolve_board, "validate_board", answer((9, 0)))
+
+        hit = await resolve_board.resolve_board_sniff_first("Pfizer")
+
+        assert calls == {"probe": 1, "websearch": 1}
+        assert hit is not None and hit["ats"] == "custom" and hit["nc"] == 0
+
+    async def test_strong_custom_hit_short_circuits(self, monkeypatch):
+        """nc > 0 on the custom hit DOES win immediately: neither probe nor
+        websearch is ever called."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        calls = {"probe": 0, "websearch": 0}
+        monkeypatch.setattr(
+            resolve_board, "probe_company",
+            answer(lambda *a, **k: calls.update(probe=calls["probe"] + 1)))
+        monkeypatch.setattr(
+            resolve_board, "websearch_board",
+            answer(lambda *a, **k: calls.update(websearch=calls["websearch"] + 1)))
+        monkeypatch.setattr(resolve_board, "validate_board", answer((5, 2)))
+
+        hit = await resolve_board.resolve_board_sniff_first("Science.xyz")
+
+        assert calls == {"probe": 0, "websearch": 0}
+        assert hit["ats"] == "custom" and hit["nc"] == 2 and hit["via"] == "sniff"
+
+    async def test_held_custom_fallback_returned_when_nothing_better(self, monkeypatch):
+        """probe and websearch both miss entirely -> the weak custom hit,
+        not None, is the answer: it still beats no answer at all."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(resolve_board, "probe_company", answer(None))
+        monkeypatch.setattr(resolve_board, "websearch_board", answer(None))
+        monkeypatch.setattr(resolve_board, "validate_board", answer((9, 0)))
+
+        hit = await resolve_board.resolve_board_sniff_first("Novozymes")
+
+        assert hit is not None
+        assert hit["ats"] == "custom" and hit["nc"] == 0 and hit["via"] == "sniff"
+
+    async def test_better_probe_hit_wins_over_held_fallback(self, monkeypatch):
+        """A real ATS found at step 2 (probe) beats the held custom
+        fallback, even though the custom hit was found first."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(
+            resolve_board, "probe_company",
+            answer(lambda name, scan=True: {
+                "name": name, "ats": "greenhouse", "slug": "acme",
+                "count": 10, "nc": 4}))
+        monkeypatch.setattr(
+            resolve_board, "websearch_board",
+            answer(lambda *a, **k: pytest.fail("websearch must not run: probe already won")))
+
+        async def _validate(comp):
+            return (9, 0) if comp["ats"] == "custom" else (10, 4)
+
+        monkeypatch.setattr(resolve_board, "validate_board", _validate)
+
+        hit = await resolve_board.resolve_board_sniff_first("Acme")
+
+        assert hit["ats"] == "greenhouse" and hit["nc"] == 4 and hit["via"] == "probe"
+
+    async def test_better_websearch_hit_wins_over_held_fallback(self, monkeypatch):
+        """A real ATS found only at step 3 (websearch) beats the held
+        custom fallback when probe also misses."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(resolve_board, "probe_company", answer(None))
+        monkeypatch.setattr(
+            resolve_board, "websearch_board",
+            answer({"ats": "workday", "triple": ("acme", 1, "Acme")}))
+
+        async def _validate(comp):
+            return (9, 0) if comp["ats"] == "custom" else (20, 6)
+
+        monkeypatch.setattr(resolve_board, "validate_board", _validate)
+
+        hit = await resolve_board.resolve_board_sniff_first("Acme")
+
+        assert hit["ats"] == "workday" and hit["nc"] == 6 and hit["via"] == "websearch"
+
+    async def test_vendor_careers_url_names_its_board(self, monkeypatch):
+        """A careers_url on a fetchable vendor's host is read off the URL
+        itself (the sniff never fetches one); dead, it is that board's miss."""
+        for step in ("probe_company", "websearch_board"):
+            monkeypatch.setattr(resolve_board, step, answer(
+                lambda *a, **k: pytest.fail("the URL names the board")))
+        monkeypatch.setattr(sniffer, "sniff_ats", answer(
+            lambda *a, **k: pytest.fail("the URL names the board")))
+        seen = []
+        monkeypatch.setattr(resolve_board, "validate_board",
+                            answer(lambda comp: seen.append(comp) or (12, 3)))
+        url = "https://careers-acme.icims.com/jobs/search"
+
+        hit = await resolve_board.resolve_board_sniff_first("Acme", url)
+
+        assert (hit["ats"], hit["slug"], hit["via"]) == ("icims", "careers-acme", "sniff")
+        assert seen[0]["slug"] == "careers-acme" and seen[0]["careers_url"] == url
+        assert await resolve_board.classify_miss("Acme", url) == "board-dead:icims"
+
+    async def test_vendor_careers_url_on_a_parent_tenant_is_not_the_board(self, monkeypatch):
+        """The URL step keeps every other step's parent-tenant guard: a
+        Workday careers_url on another employer's tenant is never fetched
+        as this company's board. A platform whose spec does not set
+        `discovery.shared` is never asked."""
+        monkeypatch.setattr("src.claude.api.board_is_own", answer(False))
+        monkeypatch.setattr(sniffer, "sniff_ats", answer(None))
+        for step in ("probe_company", "websearch_board"):
+            monkeypatch.setattr(resolve_board, step, answer(None))
+        monkeypatch.setattr(resolve_board, "validate_board", answer(
+            lambda comp: pytest.fail("a foreign board was fetched")))
+        url = "https://danaher.wd1.myworkdayjobs.com/DanaherJobs"
+
+        assert await resolve_board.resolve_board_sniff_first("Genedata", url) is None
+        assert not await identity.foreign_board("Genedata", "greenhouse", "danaher")
+
+    async def test_an_unreadable_board_is_no_dead_board(self, monkeypatch, serve):
+        """A board whose fetch fails while it is validated is a transient
+        miss, never board-dead (which closes a roster row's postings); a
+        prunable platform's listing 404 is dead, and a live board with
+        nothing local is no-local-jobs."""
+        monkeypatch.setattr(sniffer, "sniff_ats", answer(None))
+        for step in ("probe_company", "websearch_board"):
+            monkeypatch.setattr(resolve_board, step, answer(None))
+        url = "https://boards.greenhouse.io/acme"
+        board = {"ats": "greenhouse", "slug": "acme"}
+
+        serve(requests.exceptions.ReadTimeout("slow"))
+        assert await resolve_board.resolve_or_miss("Acme", url) == (
+            None, "fetch-error:unreadable-greenhouse")
+        assert (await resolve_board.read_local(board))[2] == "fetch-error:unreadable-greenhouse"
+        serve(404)
+        assert await resolve_board.resolve_or_miss("Acme", url) \
+            == (None, "board-dead:greenhouse")
+        assert (await resolve_board.read_local(board))[2] == "board-dead:greenhouse"
+        serve(fake_response({"jobs": [{"id": 1, "title": "Eng", "absolute_url": url,
+                                       "location": {"name": "Paris, France"}}]}))
+        assert await resolve_board.read_local(board) == ([], 1, "no-local-jobs")
+
+
+class TestDiscoverLocalWebsearchPass:
+    """Offline coverage for the Task 2 fix: discover_local's bulk pass now
+    runs a bounded websearch step for names probe+sniff left boardless.
+    gather_names, probe_company, websearch_board and the store are all
+    faked -- no network, no real DB."""
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    def _patch_common(self, monkeypatch, names, recent=frozenset()):
+        monkeypatch.setattr(local_sourcing, "gather_names", answer(list(names)))
+        monkeypatch.setattr(local_sourcing, "probe_company", answer(None))
+        monkeypatch.setattr(store.schema, "connect", lambda *a, **k: self._FakeConn())
+        monkeypatch.setattr(store, "recent_miss_names",
+                            lambda conn, days=14: set(recent))
+
+    async def test_websearch_cap_bounds_attempts(self, monkeypatch):
+        names = [f"Company {i}" for i in range(6)]
+        self._patch_common(monkeypatch, names)
+        calls = []
+        monkeypatch.setattr(
+            local_sourcing, "websearch_board",
+            answer(lambda name, max_results=8: calls.append(name)))
+
+        await local_sourcing.discover_local(
+            max_workers=2, js_majors=False, sniff=False,
+            websearch=True, websearch_cap=2)
+
+        assert len(calls) == 2
+
+    async def test_websearch_cap_zero_disables_the_pass(self, monkeypatch):
+        names = ["Alpha", "Beta"]
+        # Deliberately do NOT patch src.store here: cap=0 must short-circuit
+        # before any DB connection is even attempted.
+        monkeypatch.setattr(local_sourcing, "gather_names", answer(list(names)))
+        monkeypatch.setattr(local_sourcing, "probe_company", answer(None))
+        calls = []
+        monkeypatch.setattr(
+            local_sourcing, "websearch_board",
+            answer(lambda name, max_results=8: calls.append(name)))
+
+        await local_sourcing.discover_local(
+            max_workers=2, js_majors=False, sniff=False,
+            websearch=True, websearch_cap=0)
+
+        assert calls == []
+
+    async def test_recently_missed_names_are_skipped(self, monkeypatch):
+        names = ["Alpha", "Beta"]
+        self._patch_common(monkeypatch, names, recent={"Alpha"})
+        calls = []
+        monkeypatch.setattr(
+            local_sourcing, "websearch_board",
+            answer(lambda name, max_results=8: calls.append(name)))
+
+        await local_sourcing.discover_local(
+            max_workers=2, js_majors=False, sniff=False,
+            websearch=True, websearch_cap=10)
+
+        assert calls == ["Beta"]
+
+    async def test_a_tracked_name_is_probed_only_and_never_a_miss(self, monkeypatch):
+        """A name the roster already boards (`tracked`) gets the cheap probe
+        but no fallback pass, and no miss is filed against it (2026-09-29:
+        half of a 6.5-minute JS pass went on employers already crawled)."""
+        from src.match.names import name_key
+        self._patch_common(monkeypatch, ["Tracked Co", "Fresh Co"])
+        calls = []
+        monkeypatch.setattr(
+            local_sourcing, "websearch_board",
+            answer(lambda name, max_results=8: calls.append(name)))
+
+        _, _, misses = await local_sourcing.discover_local(
+            max_workers=2, js_majors=False, sniff=False, websearch=True,
+            websearch_cap=10, tracked=frozenset({name_key("Tracked Co")}))
+
+        assert calls == ["Fresh Co"]
+        assert [m["name"] for m in misses] == ["Fresh Co"]
+
+
+class TestPopulateScoresOnlyWhatTheRosterDoesNotSettle:
+    """populate_companies' mission call runs only for a hit the roster does
+    not already settle (_settled_board): on 2026-09-29, 45 of 49 calls went
+    on boards already tracked, each printed with a fresh verdict the row
+    never took."""
+
+    async def test_a_tracked_board_costs_no_mission_call(self, monkeypatch, db):
+        keep_store_open(monkeypatch, db)
+        store.upsert_company(db, {"name": "Acme", "ats": "lever", "slug": "acme",
+                                  "active": 1, "total_job_count": 5,
+                                  "mission_tier": "adjacent", "mission_score": 0.5})
+        hits = [{"name": n, "ats": "lever", "slug": n.lower(), "nc": 2, "count": 9}
+                for n in ("Acme", "Newco")]
+        seen = {}
+
+        async def discover(extra_names=None, tracked=frozenset()):
+            seen["tracked"] = tracked
+            return hits, [], []
+        monkeypatch.setattr(local_sourcing, "discover_local", discover)
+        asked = []
+        monkeypatch.setattr(local_sourcing, "_score_hit", answer(
+            lambda h: asked.append(h["name"]) or ("adjacent", 0.5, "stub")))
+
+        written = await local_sourcing.populate_companies(dork=False)
+
+        assert asked == ["Newco"]
+        assert seen["tracked"] == {"acme"}
+        assert sorted(r["name"] for r in written) == ["Acme", "Newco"]
+        acme = next(c for c in store.get_companies(db) if c["name"] == "Acme")
+        assert (acme["local_job_count"], acme["total_job_count"]) == (2, 9)
+
+
+class TestPastedNamePreview:
+    """Step one of the two-step paste flow: the names are shown, with what
+    the store already knows about each, BEFORE anything is resolved.
+    Resolving is the expensive half -- one page's 15 junk names cost about a
+    thousand HTTP requests."""
+
+    def _wire(self, monkeypatch, db):
+
+        keep_store_open(monkeypatch, db)
+
+    async def test_states_split_new_tracked_blocked_and_missed(self, monkeypatch, db):
+        store.upsert_company(db, {"name": "IQVIA", "ats": "workday",
+                                  "handle": "iqvia|5|IQVIA"})
+        store.block_name(db, "Oncology", "not a company")
+        store.record_miss(db, "Fennec Pharmaceuticals", "no-board-found")
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health", "IQVIA",
+                                             "Oncology",
+                                             "Fennec Pharmaceuticals"])
+        rows = await paste_ingest.preview_names("<pasted page>", use_llm=False)
+        assert {r["name"]: r["state"] for r in rows} == {
+            "Alpaca Health": "new", "IQVIA": "tracked",
+            "Oncology": "blocked", "Fennec Pharmaceuticals": "missed"}
+        assert [r["key"] for r in rows][0] == "alpacahealth"
+
+    async def test_the_profile_blocklist_counts_too(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(config, "DISCOVERY_NAME_BLOCKLIST", {"biotech"})
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Biotech"])
+        assert [r["state"] for r in
+                await paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
+
+    async def test_preview_resolves_nothing(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        tried = []
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
+                            answer(lambda *a, **k: tried.append(a) or (None, "x")))
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health"])
+        assert [r["name"] for r in
+                await paste_ingest.preview_names("x", use_llm=False)] \
+            == ["Alpaca Health"]
+        assert tried == [], "the preview step resolved a name"
+
+    async def test_the_model_reads_the_paste_when_a_key_is_configured(
+            self, monkeypatch, db):
+        # preview_names(use_llm=None) resolves the default through
+        # src.claude.api.have_api_key now, not its own inline
+        # ANTHROPIC_API_KEY-vs-placeholder comparison (one of three such
+        # copies folded into that shared helper).
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(paste_ingest, "have_api_key", lambda: True)
+        monkeypatch.setattr(paste_ingest, "extract_names_llm",
+                            answer(["Model Named Co"]))
+        assert [r["name"] for r in await paste_ingest.preview_names("x")] \
+            == ["Model Named Co"]
+
+    async def test_no_key_means_the_regex_parser(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(paste_ingest, "have_api_key", lambda: False)
+        monkeypatch.setattr(paste_ingest, "extract_names_llm",
+                            answer(lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("called with no API key"))))
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Parsed Co"])
+        assert [r["name"] for r in await paste_ingest.preview_names("x")] \
+            == ["Parsed Co"]
+
+
+class TestAddNamesQueue:
+    """Step two: add_names takes the CONFIRMED list, and everything it
+    resolves lands in the review queue rather than on the roster."""
+
+    _HIT = {"name": "Alpaca Health", "ats": "lever", "slug": "alpaca",
+            "careers_url": "https://alpaca.example/careers",
+            "count": 8, "nc": 3, "via": "sniff"}
+
+    def _wire(self, monkeypatch, db, hit=None):
+        stub_mission(monkeypatch, db)
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
+                            answer((hit or self._HIT, None)))
+
+    async def test_a_resolved_name_lands_in_the_queue_not_the_roster(
+            self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        await paste_ingest.add_names(["Alpaca Health"], max_workers=1)
+        assert [c["name"] for c in store.pending_companies(db)] \
+            == ["Alpaca Health"]
+        assert store.get_companies(db) == []
+
+    async def test_a_blocklisted_name_is_never_resolved(self, monkeypatch, db):
+        store.block_name(db, "Oncology", "not a company")
+        self._wire(monkeypatch, db, {**self._HIT, "name": "Oncology"})
+        tried = []
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n) or (None, "x")))
+        await paste_ingest.add_names(["Oncology"], max_workers=1)
+        assert tried == []
+        assert store.get_companies(db, active_only=False) == []
+
+    async def test_a_name_already_on_the_roster_is_not_re_resolved(
+            self, monkeypatch, db):
+        store.upsert_company(db, {"name": "Alpaca Health", "ats": "lever",
+                                  "slug": "alpaca"})
+        self._wire(monkeypatch, db)
+        tried = []
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n) or (None, "x")))
+        await paste_ingest.add_names(["Alpaca Health"], max_workers=1)
+        assert tried == []
+
+    async def test_a_raw_blob_still_works(self, monkeypatch, db):
+        # The thin single-step path the CLI (and an older client) still use.
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health"])
+        await paste_ingest.add_names("Alpaca Health\n2 days ago", max_workers=1)
+        assert [c["name"] for c in store.pending_companies(db)] \
+            == ["Alpaca Health"]
+
+
+class TestScoreAndUpsert:
+    """write.score_and_upsert is the one write path behind every
+    automated add surface (populate_companies, resolve_leads, add_names,
+    harvest_urls): duplicate check first, mission score second, and any name
+    the store has not confirmed lands in the review queue."""
+
+    _HIT = {"name": "Alpaca Health", "ats": "lever", "slug": "alpaca",
+            "careers_url": "https://alpaca.example/careers",
+            "count": 8, "nc": 3, "via": "sniff"}
+
+    def _wire(self, monkeypatch, scored=("adjacent", 0.5, "stub")):
+        """Stub the network (titles) and the LLM; returns the list of names
+        the scorer was asked about."""
+        asked = []
+        stub_mission(monkeypatch,
+                     score=lambda name, *a, **k: asked.append(name) or scored)
+        return asked
+
+    @staticmethod
+    async def _upsert(db, hit, **kw):
+        async with store.Writer(db) as w:
+            return await write.score_and_upsert(w, hit, **kw)
+
+    async def test_an_unconfirmed_name_is_queued_not_activated(
+            self, monkeypatch, db):
+        asked = self._wire(monkeypatch)
+        row, active, pending = await self._upsert(
+            db, self._HIT, source="paste", include_missions=("adjacent",))
+        assert asked == ["Alpaca Health"]
+        # The verdict says a reviewer's confirmation WOULD activate it ...
+        assert (active, pending) == (1, True)
+        # ... but the row itself sits in the queue, off the crawl.
+        assert [c["name"] for c in store.pending_companies(db)] \
+            == ["Alpaca Health"]
+        assert store.get_companies(db) == []
+        stored = store.get_companies(db, active_only=False)[0]
+        assert stored["active"] == 0
+        assert tags.has(stored["tags"], tags.LOCAL) and stored["review"] == "pending"
+        assert (stored["local_job_count"], stored["total_job_count"]) == (3, 8)
+        assert stored["source"] == "paste"
+        assert stored["careers_url"] == self._HIT["careers_url"]
+        assert (row["mission_tier"], row["mission_score"]) == ("adjacent", 0.5)
+
+    async def test_a_confirmed_name_is_refreshed_in_place(self, monkeypatch, db):
+        store.upsert_company(db, {"name": "Alpaca Health", "ats": "lever",
+                                  "slug": "alpaca", "active": 1})
+        self._wire(monkeypatch)
+        # No job count: a row that has produced jobs keeps `active`
+        # whatever discovery scores it (_productive_row).
+        hit = {**self._HIT, "count": None}
+        _, active, pending = await self._upsert(
+            db, hit, source="paste", include_missions=("adjacent",))
+        assert (active, pending) == (1, False)
+        assert [c["name"] for c in store.get_companies(db)] \
+            == ["Alpaca Health"]
+        assert store.pending_companies(db) == []
+        # The activation rule is src.claude.is_active_mission, and it is
+        # what a confirmed row's `active` follows.
+        _, active, _ = await self._upsert(
+            db, hit, source="paste", include_missions=())
+        assert active == 0
+        assert store.get_companies(db) == []
+
+    async def test_a_board_tracked_under_another_name_costs_no_score(
+            self, monkeypatch, db):
+        store.upsert_company(db, {"name": "Alpaca", "ats": "lever",
+                                  "slug": "alpaca"})
+        asked = self._wire(monkeypatch)
+        assert await self._upsert(
+            db, self._HIT, source="paste") is None
+        assert asked == [], "the duplicate check must run before the LLM call"
+        assert [c["name"] for c in store.get_companies(db, active_only=False)] \
+            == ["Alpaca"]
+
+    async def test_the_same_name_spelled_otherwise_is_a_duplicate(self, monkeypatch, db):
+        """name_key("Alpaca Health") == name_key("Alpacahealth"), but the
+        upsert keys on the exact name: the hit landed as a second, pending
+        row on the same board (2026-09-29)."""
+        store.upsert_company(db, {"name": "Alpacahealth", "ats": "lever",
+                                  "slug": "alpaca", "active": 1})
+        asked = self._wire(monkeypatch)
+        assert await self._upsert(db, self._HIT, source="local_sourcing") is None
+        assert asked == []
+        assert [c["name"] for c in store.get_companies(db, active_only=False)]             == ["Alpacahealth"]
+
+    async def test_a_dead_board_is_replaced_keeping_its_verdict(self, monkeypatch, db):
+        store.upsert_company(db, {"name": "Alpaca Health", "ats": "greenhouse", "slug": "gone",
+                                  "mission_tier": "core", "mission_score": 0.9})
+        db.execute("UPDATE companies SET miss_reason='board-dead', active=0")
+        asked = self._wire(monkeypatch)
+        row, _, _ = await self._upsert(db, self._HIT, source="local_sourcing")
+        assert asked == []
+        (kept,) = store.get_companies(db, active_only=False)
+        assert (kept["ats"], kept["slug"], kept["miss_reason"], kept["mission_score"]) == (
+            "lever", "alpaca", None, 0.9)
+
+    async def test_a_precomputed_score_skips_the_scorer(self, monkeypatch, db):
+        asked = self._wire(monkeypatch)
+        row, _, _ = await self._upsert(
+            db, self._HIT, source="local_sourcing",
+            scored=("core", 0.9, "pooled"))
+        assert asked == []
+        assert (row["mission_tier"], row["mission_score"]) == ("core", 0.9)
+
+    async def test_local_tag_follows_the_local_count_unless_given(
+            self, monkeypatch, db):
+        self._wire(monkeypatch)
+        await self._upsert(
+            db, {**self._HIT, "nc": 0}, source="paste")
+        first = store.get_companies(db, active_only=False)[0]
+        assert (first["tags"], first["review"]) == (None, "pending")
+        # ats_dork admits an nc == 0 board on its HQ signal and says so
+        # by passing the tag explicitly.
+        await self._upsert(
+            db, {**self._HIT, "name": "Beta Bio", "slug": "beta", "nc": 0,
+                 "careers_url": "https://beta.example/careers"},
+            source="ats_dork", tags=tags.LOCAL)
+        beta = next(c for c in store.get_companies(db, active_only=False)
+                    if c["name"] == "Beta Bio")
+        assert (beta["tags"], beta["review"]) == (tags.LOCAL, "pending")
+
+    async def test_a_workday_triple_lands_in_the_handle_column(self, monkeypatch, db):
+        self._wire(monkeypatch)
+        await self._upsert(
+            db, {**self._HIT, "ats": "workday",
+                 "slug": ("acme", 5, "External")}, source="ats_dork")
+        stored = store.get_companies(db, active_only=False)[0]
+        assert stored["slug"] is None
+        assert stored["handle"] == "acme|5|External"
+
+
+class TestScoreMissionsHonoursTheReviewQueue:
+    """score_missions revives an inactive, unscored row that scores to an
+    on-mission tier (its original mission call is assumed to have failed).
+    A row in the review queue is inactive for a different reason: nobody
+    has confirmed it yet. The 2026-09-01 re-resolution pass queued 24
+    unscored rows that this healer would otherwise have activated wholesale,
+    skipping the queue."""
+
+    def _wire(self, monkeypatch, db):
+        stub_mission(monkeypatch, db)
+
+    async def test_pending_rows_are_scored_but_not_revived(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        store.upsert_company(db, {"name": "Queued Co", "ats": "lever",
+                                  "slug": "queued", "active": 0,
+                                  "review": "pending"})
+        store.upsert_company(db, {"name": "Failed Call Co", "ats": "lever",
+                                  "slug": "failed", "active": 0})
+        await local_sourcing.score_missions(max_workers=1)
+        rows = {r["name"]: dict(r) for r in
+                db.execute("SELECT name, active, review, mission_tier FROM companies_effective")}
+        assert rows["Queued Co"]["active"] == 0
+        assert rows["Queued Co"]["review"] == "pending"
+        assert rows["Queued Co"]["mission_tier"] == "adjacent"
+        assert rows["Failed Call Co"]["active"] == 1
+
+
+class TestScoreMissionsScoresAnEmployerOnce:
+    """The verdict is the employer's, so its boards are scored once, through
+    the largest; a board holding a verdict of its own is scored on its own."""
+
+    def _wire(self, monkeypatch, db):
+        asked = []
+
+        def score(name, context):
+            asked.append(name)
+            return ("adjacent", 0.5 if name == "Acme (ashby)" else 0.6, name)
+
+        stub_mission(monkeypatch, db, score)
+        return asked
+
+    async def test_an_unscored_employer_is_scored_through_its_largest_board(self, monkeypatch, db):
+        asked = self._wire(monkeypatch, db)
+        store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a", "total_job_count": 3})
+        store.add_board(db, {"name": "Acme", "ats": "ashby", "slug": "b", "total_job_count": 9})
+        await local_sourcing.score_missions(max_workers=1)
+        assert asked == ["Acme (ashby)"]
+        assert [r[:] for r in db.execute(
+            "SELECT mission_tier, mission_score FROM companies_effective")] == [("adjacent", 0.5)] * 2
+
+    async def test_a_board_with_its_own_verdict_is_rescored_on_its_own(self, monkeypatch, db):
+        asked = self._wire(monkeypatch, db)
+        a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a",
+                                    "active": 1, "total_job_count": 3})
+        write_mission(db, a, mission_tier="core", mission_score=0.9)
+        db.commit()
+        b, _ = store.add_board(db, {"name": "Acme", "ats": "ashby", "slug": "b",
+                                    "active": 1, "total_job_count": 9})
+        c, _ = store.add_board(db, {"name": "Acme", "ats": "icims", "slug": "c",
+                                    "active": 1, "total_job_count": 1})
+        store.set_board_mission(db, c, "other", 0.1)
+        await local_sourcing.score_missions(max_workers=1, rescore_all=True)
+        assert sorted(asked) == ["Acme (ashby)", "Acme (icims)"]
+        got = {r["id"]: (r["mission_tier"], r["mission_score"]) for r in
+               db.execute("SELECT id, mission_tier, mission_score FROM companies_effective")}
+        assert got == {a: ("adjacent", 0.5), b: ("adjacent", 0.5), c: ("adjacent", 0.6)}
+
+
+class TestResolutionOrder:
+    """The order discovery resolves a name in, pinned.
+
+    src.discovery.pipeline used to carry its OWN probe-first resolver: slug
+    variants of the name against every ATS before anything looked at the
+    company's site. That is the order that mapped "Ripple Neuro" onto the
+    payments company's board (2026-08-28) and a stranger's board onto two
+    roster rows (2026-09-18, 2026-09-21). Every name list goes through
+    resolve.board now, and nothing here may reintroduce a probe that
+    outranks the careers-page sniff.
+
+    Offline: sniff_ats, probe_company, websearch_board and
+    validate_board are all faked.
+    """
+
+    @staticmethod
+    def _wire(monkeypatch, *, sniff=None, probe=None, boards=None):
+        monkeypatch.setattr(sniffer, "sniff_ats", answer(sniff))
+        monkeypatch.setattr(resolve_board, "probe_company", answer(probe))
+        monkeypatch.setattr(resolve_board, "websearch_board", answer(None))
+        monkeypatch.setattr(
+            resolve_board, "validate_board",
+            answer(lambda comp: (boards or {}).get(
+                (comp["ats"], comp.get("slug")), (0, 0))))
+
+    async def test_the_careers_page_beats_a_colliding_slug_probe(self, monkeypatch):
+        """The company's own page names greenhouse/raya-health-inc; the
+        name's first word confirms on an unrelated 120-job Lever board.
+        The page wins, and the stranger's board is never taken."""
+        self._wire(
+            monkeypatch,
+            sniff={"ats": "greenhouse", "slug": "raya-health-inc",
+                   "careers_url": "https://rayahealth.example/careers"},
+            probe={"name": "Raya Health", "ats": "lever", "slug": "raya",
+                   "count": 120, "nc": 9},
+            boards={("greenhouse", "raya-health-inc"): (7, 3),
+                    ("lever", "raya"): (120, 9)})
+
+        hit = await resolve_board.resolve_board_sniff_first("Raya Health")
+
+        assert (hit["ats"], hit["slug"], hit["via"]) == (
+            "greenhouse", "raya-health-inc", "sniff")
+
+    async def test_a_probe_only_hit_is_confirmed_but_flagged(self, monkeypatch):
+        """Nothing readable on the company's site: the name-guessed slug is
+        the only evidence, so it resolves -- carrying a verify note, which
+        is what a human reading the report acts on."""
+        self._wire(monkeypatch,
+                   probe={"name": "Zeta Labs", "ats": "greenhouse",
+                          "slug": "zetalabs", "count": 12, "nc": 4},
+                   boards={("greenhouse", "zetalabs"): (12, 4)})
+
+        hit = await resolve_board.resolve_board_sniff_first("Zeta Labs")
+
+        assert (hit["ats"], hit["via"]) == ("greenhouse", "probe")
+        assert "name-guessed slug" in pipeline.verify_note(hit)
+
+    async def test_an_empty_board_does_not_confirm(self, monkeypatch):
+        """Every hit is validated by a live fetch, so a slug guess landing
+        on a board with no postings is a MISS -- the probe's own 200 used to
+        be enough."""
+        self._wire(monkeypatch,
+                   probe={"name": "Nova Health", "ats": "greenhouse",
+                          "slug": "novahealth", "count": 0, "nc": 0},
+                   boards={})
+
+        assert await resolve_board.resolve_board_sniff_first("Nova Health") is None
+
+
+class TestDiscoveredBoardsReachTheRoster:
+    """What `discover-term` queues: every resolved board, local or not,
+    tagged as its platform seeds (queue_names `seed_tags`).
+
+    The resolver legitimately returns a `custom` hit -- a real careers page
+    on no known platform, keyed on its URL. The old discover-term write
+    gated on the ATS sweep's registry, which omitted `custom` on purpose,
+    so every such candidate was reported confirmed and then dropped.
+
+    Offline: the store is the in-memory `db`, titles and the mission call
+    are stubbed exactly as TestScoreAndUpsert stubs them.
+    """
+
+    @staticmethod
+    def _wire(monkeypatch, db, tier="core-mission"):
+        stub_mission(monkeypatch, db, (tier, 0.9, "stub"))
+
+    @staticmethod
+    async def _queue(monkeypatch, name, ats, slug, careers_url, nc=3, count=8):
+        hit = {"name": name, "ats": ats, "slug": slug, "careers_url": careers_url,
+               "count": count, "nc": nc, "via": "sniff"}
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", answer((hit, None)))
+        async with store.Writer() as w:
+            return await local_sourcing.queue_names(
+                w, {name: "discovery:neurotech"}, local_only=False, seed_tags=True)
+
+    async def test_a_resolved_custom_board_reaches_the_roster(self, monkeypatch, db):
+        """A self-hosted careers page lands in the review queue with its URL
+        as the board's coordinate."""
+        self._wire(monkeypatch, db)
+
+        await self._queue(monkeypatch, "Beta Custom", "custom", None,
+                          "https://beta.example/careers", nc=2, count=5)
+
+        stored = store.get_companies(db, active_only=False)[0]
+        assert (stored["name"], stored["ats"]) == ("Beta Custom", "custom")
+        # A self-hosted board has no handle: the URL IS the coordinate.
+        assert stored["slug"] is None
+        assert store.board_key(stored) == ("custom",
+                                           "https://beta.example/careers")
+        assert stored["mission_tier"] == "core-mission"
+        assert (stored["local_job_count"], stored["total_job_count"]) == (2, 5)
+        # A custom board is one request, so it seeds the sweep (its spec's
+        # `sweep`, D14).
+        assert tags.has(stored["tags"], tags.SWEEP) and stored["review"] == "pending"
+
+    async def test_a_custom_roster_row_is_crawlable_end_to_end(self, monkeypatch, db,
+                                                         serve):
+        """Once the reviewer confirms it, the row is one the harvester picks
+        up and fetch_company dispatches."""
+        self._wire(monkeypatch, db)
+
+        await self._queue(monkeypatch, "Beta Custom", "custom", None,
+                          "https://beta.example/careers", nc=2)
+
+        store.confirm_company(db, store.company_id_by_name(db, "Beta Custom"))
+        row = store.get_companies(db, active_only=False)[0]
+        assert [c["name"] for c in store.harvestable_companies(db)] \
+            == ["Beta Custom"]
+        assert [c["name"] for c in store.get_companies(db)] \
+            == ["Beta Custom"]
+        # src.crawl.harvest.fetch_whole_board and the local track
+        # (src.crawl.harvest.run_track) both dispatch a roster row here.
+        seen = serve("<html></html>")
+        await company_fetch.fetch_company(row, None)
+        assert seen == ["https://beta.example/careers"]
+
+    async def test_a_confirmed_board_follows_is_active_mission(self, monkeypatch, db):
+        """An off-mission tier parks the row rather than dropping it."""
+        store.upsert_company(db, {"name": "Beta Custom", "ats": "custom",
+                                  "careers_url": "https://beta.example/careers",
+                                  "active": 1})
+        self._wire(monkeypatch, db, tier="other")
+
+        await self._queue(monkeypatch, "Beta Custom", "custom", None,
+                          "https://beta.example/careers", nc=2)
+
+        stored = store.get_companies(db, active_only=False)[0]
+        assert (stored["mission_tier"], stored["active"]) == ("other", 0)
+
+    async def test_a_slug_keyed_board_keeps_its_slug_and_seed_tag(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+
+        await self._queue(monkeypatch, "Alpha Bio", "greenhouse", "alphabio",
+                          "https://alpha.example/careers", nc=0)
+
+        stored = store.get_companies(db, active_only=False)[0]
+        assert (stored["ats"], stored["slug"]) == ("greenhouse", "alphabio")
+        assert tags.has(stored["tags"], tags.SWEEP) and stored["review"] == "pending"
+
+    async def test_a_dry_run_writes_nothing(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        hit = {"name": "Alpha Bio", "ats": "greenhouse", "slug": "alphabio",
+               "careers_url": None, "count": 8, "nc": 0, "via": "sniff"}
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(
+            lambda n, *a: (hit, None) if n == "Alpha Bio" else (None, "no-board-found")))
+        async with store.Writer() as w:
+            queued, missed = await local_sourcing.queue_names(
+                w, {"Alpha Bio": "discovery:x", "Ghost": "discovery:x"},
+                local_only=False, dry_run=True)
+        assert (queued, missed) == ([hit], [("Ghost", "no-board-found")])
+        assert store.get_companies(db, active_only=False) == []
+
+
+class TestADiscoveryPassKeepsARaisingItem:
+    """A pass skips an item whose resolution raises, but never silently:
+    local sourcing records a fetch-error miss, so the retry schedule still
+    applies."""
+
+    async def test_a_resolve_pass_records_a_fetch_error_miss(self, capsys):
+        async def boom(name):
+            raise ValueError("bad page")
+        hits, misses = [], []
+        await local_sourcing._resolve_pass(["Acme"], boom, "[T]", hits, misses, 1)
+        assert (hits, misses) == (
+            [], [{"name": "Acme", "reason": "fetch-error:ValueError"}])
+        assert "Acme error: bad page" in capsys.readouterr().out
+
+
+class TestJunkNames:
+    def test_roster_names_pass(self, db):
+        # The names the roster actually carries must not be screened out.
+        for n in ("Beacon Biosignals", "SAS Institute", "Judi Health",
+                  "Cala Health, Inc.", "Duke University", "UNC Chapel Hill",
+                  "3M", "Q2 Solutions", "Blue Cross NC", "GRAIL", "NVIDIA",
+                  "Bausch + Lomb", "J&J MedTech", "Red Hat", "Aah",
+                  "Music and Cognition Lab", "Precision Neuroscience",
+                  "Wellcome Centre for Human Neuroimaging"):
+            assert junk_name_reason(n) == "", n
+
+
+class TestJunkNamesInThePasteFlow:
+    """Section headings, category nouns and location strings in a paste
+    never reach the resolver (2026-09-09 log audit)."""
+
+    async def test_preview_marks_junk_unticked_with_a_reason(self, monkeypatch, db):
+        keep_store_open(monkeypatch, db)
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health",
+                                             "Required Qualifications"])
+        rows = await paste_ingest.preview_names("x", use_llm=False)
+        assert [(r["name"], r["state"]) for r in rows] == [
+            ("Alpaca Health", "new"), ("Required Qualifications", "junk")]
+        assert rows[1]["why"] == "section-heading"
+
+    async def test_blocked_beats_junk_in_the_preview(self, monkeypatch, db):
+        store.block_name(db, "Oncology", "not a company")
+        keep_store_open(monkeypatch, db)
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
+                            lambda *a, **k: ["Oncology"])
+        assert [r["state"] for r in
+                await paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
+
+    async def test_add_names_records_junk_as_a_miss_and_never_resolves_it(
+            self, monkeypatch, db):
+        keep_store_open(monkeypatch, db)
+        tried = []
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n) or (None, "no-local-jobs")))
+        await paste_ingest.add_names(["Proficiency in SQL.", "Alpaca Health"],
+                                     max_workers=1)
+        assert tried == ["Alpaca Health"]
+        row = db.execute("SELECT miss_reason, active FROM companies "
+                         "WHERE name='Proficiency in SQL.'").fetchone()
+        assert row["miss_reason"] == "junk-name:section-heading"
+        assert row["active"] == 0
+        # ...and a junk-family miss is not a re-resolution candidate.
+        assert [c["name"] for c in repair._reresolve_candidates(db)] == []
+
+
+class TestSnifferResolvesHostsOnce:
+    """The careers-page sniffer resolves each guessed host once, bounded,
+    before fetching any path on it (2026-09-09 log audit)."""
+
+    async def test_unresolvable_hosts_are_never_fetched(self, monkeypatch):
+        looked_up, fetched = [], []
+
+        def _gai(host, *a, **k):
+            looked_up.append(host)
+            if host.startswith("dead"):
+                raise OSError("no such host")
+            return [("addr",)]
+        monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
+        monkeypatch.setattr(fetchpool, "_fetch_page",
+                            answer(lambda u, **k: fetched.append(u) or None))
+        urls = ["https://dead.example/careers", "https://dead.example/",
+                "https://dead.example/jobs", "https://live.example/careers"]
+        out = await fetchpool._fetch_all(urls)
+        assert sorted(looked_up) == ["dead.example", "live.example"], \
+            "each host resolved once, not once per path"
+        assert fetched == ["https://live.example/careers"]
+        assert set(out) == set(urls) and out["https://dead.example/"] is None
+        # a later stage rebuilding the list asks the resolver nothing
+        looked_up.clear()
+        await fetchpool._fetch_all(["https://dead.example/en/jobs",
+                                    "https://live.example/"])
+        assert looked_up == []
+
+    async def test_a_silent_resolver_skips_the_host_this_pass_only(self, monkeypatch):
+        import threading
+        gate = threading.Event()
+
+        def _gai(host, *a, **k):
+            gate.wait(2)
+            return [("addr",)]
+        monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
+        kept = await fetchpool._drop_unresolvable(["https://slow.example/"],
+                                                  timeout=0.05)
+        assert kept == []
+        assert not fetchpool._DEAD_HOSTS().dead("https://slow.example/"), \
+            "a slow resolver is not a missing name"
+        gate.set()
+
+    async def test_a_refused_connection_still_marks_the_host_dead(self, monkeypatch,
+                                                             serve):
+        serve(requests.exceptions.ConnectionError("refused"))
+        assert await fetchpool._fetch_page("https://x.example/") is None
+        assert await fetchpool._drop_unresolvable(["https://x.example/careers"]) == []

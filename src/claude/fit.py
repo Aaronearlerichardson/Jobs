@@ -1,0 +1,970 @@
+"""
+Multi-axis résumé-fit scorer.
+
+Replaces the single-scalar `score_resume_fit` with a rubric that scores a role
+on a few ORTHOGONAL axes and then GATES on disqualifiers. This fixes the two
+failure modes of keyword/one-scalar scoring:
+
+  * too specific  -> every non-domain role looks identical.  Solved: the
+    `function` and `stack` axes still separate a warehouse Data Engineer from
+    an embedded DSP Engineer even when both score ~0 on `domain`.
+  * too general   -> one kind of experience is mistaken for another.  Solved:
+    `stack` is matched as an explicit set, so the *word* "data engineer" can't
+    launder a Snowflake/dbt role into scientific-pipeline experience.
+
+Division of labour: the LLM judges each axis and flags gates (what it is good
+at); Python does the arithmetic (transparent, tunable, calibratable). The
+combiner is a weighted geometric mean -- the same imbalance-punishing shape
+store.combined_score() already uses -- times the worst gate multiplier.
+
+Wired into:
+  - crawl/triage.py, ops/maintenance.py, ops/scoring.py: call
+    `score_resume_fit(title, desc, location=...)` here for the FitResult
+    (the rubric scores the profile, not résumé text).
+  - src/config/profile.py:  loads the optional `[fit]` profile block (weights / gate
+    penalties / domain ladder / stack / region); omit it and the schema's
+    defaults (src/config/profile_schema.py) apply.
+  - store/__init__.py :  jobs table carries one column per axis (fit_domain/function/
+    stack/seniority) plus fit_gates; FitResult.as_columns() produces them and
+    store.update_job_scores() writes them. resume_fit_score stays the combined
+    scalar, so ranked_jobs()/combined_score() keep working untouched.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import re
+import sqlite3
+from collections.abc import Iterable
+from contextlib import closing
+from dataclasses import dataclass, field
+from typing import Annotated
+
+from pydantic import BeforeValidator
+
+from src import config, runstate, store
+from src.store import NOT_A_FIT_SIGNAL
+from src.claude.api import api_disabled, call_claude_json, have_api_key
+from src.claude.reply import Reply, Unit
+from src.match import locality
+from src.rows import FitColumns
+from src.validation import OneOf
+
+_log = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+#  Rubric taxonomy. The profile's weights and penalties are config.FIT_*;      #
+#  these copies of the schema defaults serve the config-free calibration       #
+#  import (tests/test_fit.py holds them equal to the schema's).                #
+#  Kept to FOUR axes on purpose: averaging more axes regresses every role to   #
+#  the mean and quietly brings back the "everything looks similar" problem.    #
+#  Let the gates, not more axes, create the spread.                            #
+# --------------------------------------------------------------------------- #
+
+AXES = ("domain", "function", "stack", "seniority")
+
+DEFAULT_WEIGHTS = {
+    "domain":    0.25,   # modality ladder: iEEG/EEG > neural > biosignal > imaging > health > none
+    "function":  0.34,   # role discipline from the JD BODY, not the title
+    "stack":     0.33,   # explicit tool overlap, load-bearing tools weighted
+    "seniority": 0.08,   # clears the bar without being wildly over/under
+}  # calibrated on the 17-role anchor set below: MAE 0.036, rank-agreement 0.91
+
+# A failed gate multiplies the base score. We take the WORST (min) gate rather
+# than the product, so a doubly-disqualified role sinks once, hard, instead of
+# to a pathological ~0 that hides ordering among the disqualified.
+DEFAULT_GATE_PENALTY = {
+    "geo":      0.20,    # not remote and not in-region (hard constraint)
+    "embedded": 0.40,    # core work is firmware/PCB/analog/RTOS (avoid-list)
+    "level":    0.35,    # below-bar: ops/coordination/data-entry/analyst-only
+    "phd":      0.45,    # hard PhD requirement with no equivalent-experience path
+    # Wrong SEAT, not wrong level: the role's core is people/program/product
+    # management (directing engineers/contractors, PRDs, roadmaps, governance)
+    # and the candidate is an IC. Harsher than phd — equivalent experience can
+    # argue past a PhD line; it cannot conjure a management track record.
+    "management": 0.35,
+    # Role demands an ACTIVE/current security clearance the candidate doesn't
+    # hold (Vadum-class). Same weight as phd: sometimes arguable past (an
+    # employer can sponsor a clearable citizen), unlike a management track
+    # record. Citizenship-only or "able to obtain" requirements do NOT trip
+    # this — the candidate is a US citizen. Detected by the LLM AND a
+    # deterministic regex backstop (_CLEARANCE_RE) on the posting text.
+    "clearance": 0.45,
+}
+
+GATES = tuple(DEFAULT_GATE_PENALTY)
+
+# The domain ladder, stack vocabulary, and region are the parts of the rubric
+# that are ABOUT YOU, so there is no honest hard-coded default for them. Set
+# them explicitly in profile.toml [fit] (loaded via config.FIT_*) for a tuned
+# search; leave [fit] out and they are DERIVED from the profile you already
+# wrote — your keyword tiers are a serviceable domain ladder, your `skill`
+# tier is a serviceable stack, and [locality] is your region. The prompt
+# renders whatever is loaded, so the taxonomy is data either way.
+#
+# The last-resort literals below only apply to an empty profile.
+FALLBACK_DOMAIN_LADDER = [
+    (1.00, "the exact subject matter you work on"),
+    (0.15, "an unrelated field"),
+]
+FALLBACK_STACK_CORE = "the tools named in your résumé"
+
+
+def _cfg[T](name: str, default: T) -> T:
+    return getattr(config, name, None) or default
+
+
+def _derived_domain_ladder() -> list[tuple[float, str]]:
+    """A domain ladder built from the profile's keyword tiers.
+
+    `core` terms are what you actually want (top rung), `domain` terms are the
+    adjacent fields you'd accept (middle), and everything else is the floor.
+    Crude next to a hand-tuned ladder, but it is genuinely YOURS on day one
+    instead of being someone else's field."""
+    core = _cfg("CORE_KEYWORDS", list[str]())
+    domain = _cfg("DOMAIN_KEYWORDS", list[str]())
+    rungs = []
+    if core:
+        rungs.append((1.00, ", ".join(core[:12])))
+    if domain:
+        rungs.append((0.60, ", ".join(domain[:12])))
+    if not rungs:
+        return FALLBACK_DOMAIN_LADDER
+    rungs.append((0.15, "no connection to any of the above"))
+    return rungs
+
+
+def _derived_region() -> str:
+    """The region string for the geo gate, from [locality]."""
+    # Last resort only: applies to an empty profile.
+    fallback_region = "remote"
+    name = _cfg("LOCALITY_NAME", "")
+    places = list(_cfg("LOCALITY_SUBSTRINGS", list[str]()))[:8]
+    if not name and not places:
+        return fallback_region
+    where = name or ", ".join(places)
+    if places and name:
+        where = f"{name} ({', '.join(places)})"
+    return f"remote, or {where}"
+
+
+def _domain_ladder_text() -> str:
+    ladder = _cfg("FIT_DOMAIN_LADDER", None)
+    rungs = ([(r.score, ", ".join(r.terms)) for r in ladder]
+             if ladder else _derived_domain_ladder())
+    return "; ".join(f"{txt} ~{score:.2f}" for score, txt in rungs)
+
+
+def _stack_core_text() -> str:
+    """The candidate's tools: [fit].stack_core, else the profile's `skill`
+    keyword tier — which is already a list of the tools they work with."""
+    return _cfg("FIT_STACK_CORE", None) or (
+        ", ".join(_cfg("SKILL_KEYWORDS", [])) or FALLBACK_STACK_CORE)
+
+
+def _anti_stack_clause() -> str:
+    """The 'tools that disqualify' half of the stack axis — only rendered when
+    the profile names some. There is no way to derive an anti-stack (the tools
+    you DON'T want are not implied by the ones you do), and inventing one
+    would silently penalise roles the user never objected to."""
+    anti = _cfg("FIT_STACK_ANTI", None)
+    if not anti:
+        return ""
+    return (f" If the JD centres on tools OUTSIDE that stack ({anti}), score"
+            " low no matter what the title says; if any of those is a stated"
+            " REQUIREMENT (required/must-have, not merely preferred), stack is"
+            " at most 0.20.")
+
+
+@dataclass
+class FitResult:
+    """One role's fit: the scalar, the axis vector, the tripped gates, why."""
+    score: float | None
+    axes: dict[str, float] = field(default_factory=dict)
+    gates: list[str] = field(default_factory=list)   # names of FAILED gates
+    reason: str = ""
+    model: str = ""     # model id that produced the score ("" = unknown)
+
+    def summary(self) -> str:
+        """Compact one-liner that carries the vector into fit_reason/reports.
+        For an unscored result (no axes) it is just the plain reason, so a
+        None-scored row doesn't get a misleading [dom0.00 ...] tag."""
+        if not self.axes:
+            return self.reason
+        a = " ".join(f"{k[:3]}{self.axes.get(k, 0):.2f}" for k in AXES)
+        g = f" gate:{'+'.join(self.gates)}" if self.gates else ""
+        return f"[{a}{g}] {self.reason}".strip()
+
+    def as_columns(self) -> FitColumns:
+        """DB-ready fields: the scalar, the reason tag, the tripped gates, the
+        scoring model, and one column per axis. Keys match the jobs-table
+        columns added in __init__.py. Axes are None on an unscored result, so
+        those columns clear."""
+        return {"resume_fit_score": self.score,
+                "fit_reason": self.summary(),
+                "fit_gates": ",".join(self.gates) or None,
+                "fit_model": self.model or None,
+                "fit_domain": self.axes.get("domain"),
+                "fit_function": self.axes.get("function"),
+                "fit_stack": self.axes.get("stack"),
+                "fit_seniority": self.axes.get("seniority")}
+
+
+# --------------------------------------------------------------------------- #
+#  Pure combiner -- no API, no I/O; this is the unit-testable / calibratable   #
+#  core. Weighted geometric mean of the axes, times the worst gate penalty.    #
+# --------------------------------------------------------------------------- #
+
+def combine(axes: dict[str, float], failed_gates: Iterable[str] = (),
+            weights: dict[str, float] | None = None,
+            penalties: dict[str, float] | None = None) -> float:
+    weights = weights or DEFAULT_WEIGHTS
+    penalties = penalties or DEFAULT_GATE_PENALTY
+    eps = 1e-6
+    wsum = sum(weights[a] for a in AXES) or 1.0
+    log = sum(weights[a] * math.log(max(eps, float(axes.get(a, 0.0)))) for a in AXES)
+    base = math.exp(log / wsum)
+    mult = min([penalties.get(g, 1.0) for g in failed_gates] + [1.0])
+    return round(base * mult, 2)
+
+
+# --------------------------------------------------------------------------- #
+#  Prompt: the LLM returns per-axis subscores + tripped gates + one reason.    #
+#  It does NOT return the final number -- Python owns that so it stays tunable #
+#  and honest. Candidate profile is injected from config (whoever is loaded).  #
+# --------------------------------------------------------------------------- #
+
+def _profile_block() -> str:
+    if getattr(config, "CANDIDATE_STRENGTHS", None):
+        strengths = "\n".join(f"  {i}. {s}" for i, s in enumerate(config.CANDIDATE_STRENGTHS, 1))
+        summary = getattr(config, "CANDIDATE_SUMMARY", "") or ""
+        avoid = getattr(config, "CANDIDATE_AVOID", "") or ""
+        # profile.toml [candidate] fit_caps. The model never returns the final
+        # scalar (Python owns the combine), so a cap is enforced by bounding
+        # the axis it targets: when one applies, function must sit at or below
+        # the cap value. Went unread from the old scorer's retirement until
+        # 2026-08 — the production-quality-ops cap is the census's #1 screen.
+        caps = (getattr(config, "CANDIDATE_FIT_CAPS", None) or [])
+        caps_block = ("\nHard caps — when one applies, score the FUNCTION axis "
+                      "at or below the cap value:\n"
+                      + "\n".join(f"  - {c}" for c in caps)) if caps else ""
+        return f"{summary}\nStrengths (priority order):\n{strengths}\n{avoid}{caps_block}".strip()
+    return "A technical candidate. (No profile loaded; judge on general merit.)"
+
+
+def disposition_examples_block(conn: sqlite3.Connection, limit: int = 3) -> str:
+    """Few-shot calibration from the candidate's OWN recorded decisions
+    (run_scraper.py --mark): up to `limit` applied/interviewing postings as
+    positive examples, `limit` dismissed ones as negatives, and `limit`
+    rejected ones — pursued, but the employer said no — newest first.
+    Returns '' when there are none. A --why note rides along verbatim,
+    which is exactly how 'wrong archetype — TPM seat' style lessons reach
+    the scorer; on a rejected row the recorded outcome_reason
+    (store.OUTCOME_REASONS) rides along with it, so the block distinguishes
+    a role that never answered from one that interviewed and declined.
+    See tests/test_store.py::TestPipelineTracking."""
+    pos = conn.execute(
+        "SELECT title, company_name FROM jobs "
+        "WHERE disposition IN ('applied','interviewing') "
+        "ORDER BY disposition_at DESC LIMIT ?", (limit,)).fetchall()
+    neg = conn.execute(
+        "SELECT title, company_name, disposition_note, outcome_reason FROM jobs "
+        "WHERE disposition = 'dismissed' "
+        "AND COALESCE(outcome_reason, '') NOT IN (SELECT value FROM json_each(?)) "
+        "ORDER BY disposition_at DESC LIMIT ?",
+        (json.dumps(NOT_A_FIT_SIGNAL), limit)).fetchall()
+    rej = conn.execute(
+        "SELECT title, company_name, disposition_note, outcome_reason "
+        "FROM jobs WHERE disposition = 'rejected' "
+        "ORDER BY disposition_at DESC LIMIT ?", (limit,)).fetchall()
+    if not pos and not neg and not rej:
+        return ""
+    lines = ["", "CALIBRATION — this candidate's own recorded decisions on real postings:"]
+    lines += [f'- PURSUED: "{(r["title"] or "")[:70]}" at {r["company_name"]}'
+              for r in pos]
+    for r in neg:
+        why = " / ".join(x for x in ((r["outcome_reason"] or "").strip(),
+                                     (r["disposition_note"] or "").strip()[:90]) if x)
+        tail = f' — their reason: "{why}"' if why else ""
+        lines.append(f'- DISMISSED: "{(r["title"] or "")[:70]}" at {r["company_name"]}{tail}')
+    for r in rej:
+        why = " / ".join(x for x in ((r["outcome_reason"] or "").strip(),
+                                     (r["disposition_note"] or "").strip()[:90])
+                         if x)
+        lines.append(f'- PURSUED, then turned down by the employer'
+                     f'{" (" + why + ")" if why else ""}: '
+                     f'"{(r["title"] or "")[:70]}" at {r["company_name"]}')
+    lines.append("Treat these as ground truth about what this candidate wants; "
+                 "score similar roles consistently with them.")
+    return "\n".join(lines)
+
+
+def _read_disposition_block() -> str:
+    """disposition_examples_block over the default store. profile.toml
+    [fit] disposition_examples sets the count (0 disables); silently empty
+    when the store is unavailable."""
+    n = config.FIT_DISPOSITION_EXAMPLES
+    if n <= 0:
+        return ""
+    try:
+        with closing(store.connect()) as conn:
+            return disposition_examples_block(conn, n)
+    except (sqlite3.Error, OSError) as e:
+        _log.warning("disposition examples unavailable: %s", e)
+        return ""
+
+
+#: The run's disposition_examples_block, read once (a crawl scores hundreds
+#: of jobs; dispositions don't change mid-run).
+_disposition_block = runstate.per_run(_read_disposition_block)
+
+
+def _axes_and_gates_block() -> str:
+    """The axis + gate rubric shared verbatim by the first-pass screen
+    (build_system_prompt) and the finalist re-screen (build_verify_prompt),
+    so the two passes can never drift apart on definitions."""
+    return f"""Score each of four axes from 0.00 to 1.00, independently:
+
+- "domain": overlap of the ROLE'S OWN day-to-day subject matter with the
+  candidate's domain, graded on this ladder with partial credit for
+  neighbours: {_domain_ladder_text()}.
+  Score what the role itself works on, NOT the employer's product domain —
+  an internal-tooling, IT, TPM, or ops seat at a company in the candidate's
+  field is NOT a role in that field, however much the company boilerplate
+  mentions the mission.
+- "function": how well the role's DISCIPLINE matches the kind of work the
+  candidate profile above describes. Judge from the JD BODY, not the title:
+  a role whose day-to-day is a different discipline scores low EVEN IF the
+  title overlaps, and one whose discipline matches scores high even if the
+  title is unfamiliar. People-management, program/product-management, and
+  internal enablement seats are different disciplines from hands-on work.
+- "stack": overlap of the tools the JD actually requires with the candidate's
+  stack ({_stack_core_text()}). Weight load-bearing requirements heavily.{_anti_stack_clause()}
+- "seniority": does the candidate clear the level without being wildly over- or
+  under-qualified. Principal/Staff for a mid-level candidate scores low, as do
+  people-management titles (Manager/Senior Manager/Director) and roles whose
+  years-of-experience requirement far exceeds the candidate's.
+
+Then set any GATES that apply (these are disqualifiers, not deductions):
+- "geo": true if the role is neither remote nor in the candidate's region
+  ({_cfg("FIT_REGION", None) or _derived_region()}).
+  A "JOB LOCATION (stored)" line, when present, is the posting's own
+  location field: judge the gate from it together with any location or
+  remote language in the text. A stored location inside the region clears
+  the gate; a stored onsite location outside it, with no remote option in
+  the text, trips it.
+- "embedded": true if the core work is firmware, PCB, analog, or RTOS.
+- "level": true if the role is below the candidate's technical bar (SOP
+  execution, coordination, monitoring, manual data entry, analyst-only).
+- "phd": true only if a PhD is a HARD requirement with no equivalent-experience path.
+- "management": true if the role's CORE is people/program/product management —
+  directing engineers or contractors, owning PRDs/roadmaps/governance,
+  running programs — rather than hands-on IC engineering or science. An IC
+  role with some cross-team coordination is NOT management.
+- "clearance": true only if the posting TEXT states an ACTIVE or current
+  security clearance (Secret/TS/SCI) is required. US citizenship,
+  export-control (ITAR) eligibility, or "ability to obtain a clearance" do
+  NOT trip this — the candidate is a US citizen and clearable — and a
+  defense/DoD employer context alone is NEVER grounds to infer it."""
+
+
+def build_system_prompt() -> str:
+    return f"""You are a hiring screener scoring how well ONE job fits this candidate:
+
+{_profile_block()}
+{_disposition_block()}
+
+Judge from the job's ACTUAL responsibilities in the description, not its title.
+{_axes_and_gates_block()}
+
+Return ONLY a JSON object with exactly:
+- "domain", "function", "stack", "seniority": numbers 0.00-1.00.
+- "gates": array of the gate names that are TRUE (empty array if none).
+- "reason": one short phrase (<= 14 words) naming the deciding factor."""
+
+
+def build_verify_prompt() -> str:
+    return f"""You are RE-SCREENING a finalist job with its FULL posting text for this candidate:
+
+{_profile_block()}
+{_disposition_block()}
+
+STEP 1 — extract the posting's hard requirements. Read the WHOLE text; the
+requirements/qualifications block is usually near the END, after company
+boilerplate, and it outranks the marketing copy at the top:
+- "years_required": minimum years of experience demanded (number, or null).
+- "seat_type": the role's CORE seat, one of "ic-engineering", "ic-science",
+  "management", "program-product", "sales-field", "support-ops".
+- "must_haves": the 3-6 load-bearing requirements as short phrases.
+- "candidate_gaps": the must_haves this candidate plainly lacks.
+
+STEP 2 — with that extraction in mind (a candidate missing the spine of the
+job cannot score well however attractive the employer's domain is):
+{_axes_and_gates_block()}
+
+Return ONLY a JSON object with exactly:
+- "years_required": number or null.
+- "seat_type": one of the strings above.
+- "must_haves", "candidate_gaps": arrays of short strings.
+- "domain", "function", "stack", "seniority": numbers 0.00-1.00, on the SAME
+  scale as a first-pass screen — a role squarely in the candidate's lane
+  scores HIGH on those axes; gaps belong in "candidate_gaps" and "gates",
+  never as blanket axis deductions.
+- "gates": ARRAY of the gate names that are TRUE (empty array if none).
+- "reason": one phrase, <= 14 words, naming the deciding factor."""
+
+
+def _parse_gates(raw: object) -> list[str]:
+    """The known gates a `gates` value trips, lower-cased: an array's
+    names, or a {gate: bool} object's truthy keys.
+
+    >>> _parse_gates(["geo", "vibes"]), _parse_gates({"Geo": 1, "phd": False})
+    (['geo'], ['geo'])
+
+    Notes:
+        Iterating the object as-is yields EVERY key: the first --verify-top
+        run marked all five gates on all 30 finalists that way.
+    """
+    if isinstance(raw, dict):
+        raw = [g for g, v in raw.items() if v]
+    if isinstance(raw, (list, tuple)):
+        return [n for g in raw if isinstance(g, str) and (n := g.lower()) in GATES]
+    return []
+
+
+# The schema tells the API the gate names; _parse_gates keeps the dict
+# tolerance for the legacy tool-call path, where nothing enforces it.
+Gates = Annotated[list[Annotated[str, OneOf(GATES)]], BeforeValidator(_parse_gates)]
+
+SEAT_TYPES = ("ic-engineering", "ic-science", "management",
+              "program-product", "sales-field", "support-ops")
+
+
+class FitReply(Reply):
+    """The screen's answer: four axes, the tripped gates, and why."""
+    domain: Unit
+    function: Unit
+    stack: Unit
+    seniority: Unit
+    gates: Gates
+    reason: str
+
+    def axes(self) -> dict[str, float]:
+        return self.model_dump(include=set(AXES))
+
+
+class _Requirements(Reply):
+    years_required: float | None
+    seat_type: Annotated[str, OneOf(SEAT_TYPES, loose=True)]
+    must_haves: list[str]
+    candidate_gaps: list[str]
+
+
+class VerifyReply(FitReply, _Requirements):
+    """The deep pass's answer. The base order puts the requirements first,
+    where build_verify_prompt asks for them (pinned by
+    tests/test_fit.py::TestPrompts::test_verify_prompt_extracts_requirements)."""
+
+
+# A body shorter than this is a stub (a stored "Posted N days ago" string, a
+# dead link), not a JD. We can't score it honestly, so we return None rather
+# than a title-only guess that floats to the top on a fake 0.45. Matches the
+# Workday backfill's notion of "missing" so the two stay consistent.
+MIN_DESC_CHARS = 200
+
+def _clearance_regex() -> re.Pattern[str]:
+    # Deterministic backstop for the "clearance" gate: ACTIVE/current-clearance
+    # demands are formulaic enough to regex, and a missed gate means a wasted
+    # application at a role the candidate cannot hold. Deliberately does NOT
+    # match "eligible for" / "ability to obtain" a clearance — the candidate is
+    # a clearable US citizen, so only holding-one-today requirements gate.
+    # verbs/qualifiers come from config.FIT_CLEARANCE_VERBS/_QUALIFIERS
+    # (profile.toml [fit] clearance_verbs / clearance_qualifiers), falling back
+    # to these defaults when unconfigured.
+    default_verbs = ("active", "current")
+    default_qualifiers = (
+        "us", "u\\.s\\.", "government", "dod", "top[-\\s]?secret", "ts/?\\s?sci", "secret",
+    )
+    cfg_verbs = getattr(config, "FIT_CLEARANCE_VERBS", None)
+    cfg_quals = getattr(config, "FIT_CLEARANCE_QUALIFIERS", None)
+    # Config values are plain words (escaped here); the built-in defaults are
+    # already hand-tuned regex fragments (character classes for spacing
+    # variants like "top secret" / "top-secret"), used verbatim.
+    verbs = [re.escape(v) for v in cfg_verbs] if cfg_verbs else list(default_verbs)
+    quals = [re.escape(q).replace(r"\ ", r"[-\s]") for q in cfg_quals] if cfg_quals \
+        else list(default_qualifiers)
+    return re.compile(
+        rf"\b(?:{'|'.join(verbs)})\s+"
+        rf"(?:(?:{'|'.join(quals)})\s+)*"
+        r"(?:security\s+)?clearance", re.I)
+
+
+_CLEARANCE_RE = _clearance_regex()
+
+
+def _clearance_required(text: str | None) -> bool:
+    return bool(_CLEARANCE_RE.search(text or ""))
+
+
+# --------------------------------------------------------------------------- #
+#  Deterministic gate OVERRIDE (the strip side of the backstop)                #
+# --------------------------------------------------------------------------- #
+#
+# _clearance_required above is the ADD side: a formulaic active-clearance
+# demand the model missed gets the gate anyway. Nothing ever took a gate
+# back OFF, so a gate the profile's own rules say must not fire rode all
+# the way into the stored score. Two shapes were doing real damage:
+#
+#   * clearance: a posting whose only clearance language is ELIGIBILITY
+#     ("must be eligible to obtain a security clearance", "US citizenship
+#     required") gated at 0.45x on reason "no clearance held but
+#     eligibility required" — exactly the case profile.toml's [fit]
+#     gate_penalty comment rules out ("citizenship/eligibility-only
+#     requirements never gate; holding-one-today requirements do").
+#   * geo: a multi-site req whose stored location LISTS the candidate's own
+#     city among the valid offices ("USA - New Jersey - Rahway; USA - North
+#     Carolina - Durham") still tripped the geo gate at 0.20x, as did
+#     remote-eligible rows.
+#
+# Both checks are deterministic and NARROW by construction: they only ever
+# REMOVE a gate, they read the same profile vocabulary the rest of the
+# crawl reads, and they leave the axis scores, the weights, the combiner
+# and the prompts untouched. A gate the evidence still supports survives.
+
+def _clearance_gate_holds(text: str | None) -> bool:
+    """True when a "clearance" gate on this posting stands; False only when
+    the text shows POSITIVE eligibility-only evidence.
+
+    The strip needs evidence, not just absence of evidence: at least one
+    clearance clause must be eligibility-shaped, and NO clearance clause
+    anywhere may carry holding language. So "must be eligible to obtain a
+    security clearance" strips, while a bare "Requires a TS/SCI with
+    polygraph" — no eligibility language at all — keeps the gate rather
+    than betting the candidate's shortlist on a vocabulary gap.
+
+    A holding word in any clearance clause keeps the gate, even beside
+    eligibility language. That is deliberately conservative: this is a
+    safety net that only ever REMOVES a gate, so an ambiguous posting must
+    fall on the side of keeping it.
+
+    The ADD-side regex is an absolute veto, so the two halves of the
+    backstop can never fight — a text _clearance_required() would gate on
+    is never stripped here.
+
+    >>> _clearance_gate_holds("Must currently hold an active TS/SCI clearance.")
+    True
+    >>> _clearance_gate_holds("Must be eligible to obtain a security clearance.")
+    False
+    >>> _clearance_gate_holds("Eligible to obtain a U.S. security clearance.")
+    False
+    >>> _clearance_gate_holds("Requires a TS/SCI with polygraph.")
+    True
+    >>> _clearance_gate_holds("We build scientific pipelines.")
+    True
+    """
+    # Every clause that mentions a clearance. Clause, not sentence: an ATS
+    # requirements block packs several demands into one line separated by
+    # ";" / newlines / bullets, and "must hold an active TS/SCI; must be
+    # eligible for a CI polygraph" has to read as two facts, not one.
+    # "TS/SCI" and "top secret" count as mentions on their own — a posting
+    # can demand one without ever spelling the word "clearance".
+    clearance_mention = r"clearance|ts\s*/?\s*sci|top[-\s]?secret"
+    clearance_clause_re = re.compile(rf"[^.;\n•]*(?:{clearance_mention})[^.;\n•]*",
+                                     re.I)
+    # The period inside an abbreviation is not a clause break. Without this,
+    # the single commonest eligibility sentence there is — "must be eligible
+    # to obtain and maintain a U.S. security clearance" — clause-splits at
+    # the "S." and the surviving fragment ("security clearance") carries
+    # none of the eligibility language that is the whole point of reading it.
+    abbrev_dot_re = re.compile(r"\b([A-Za-z])\.")
+    # ELIGIBILITY language: being able to GET one, or being the kind of
+    # person who could. The candidate is a US citizen, so none of this is a
+    # disqualifier — profile.toml [fit] clearance_verbs says as much.
+    clearance_eligible_re = re.compile(
+        r"\b(?:eligib\w*|clearable|ability|able|willing\w*|capable|qualify|"
+        r"qualified|obtain\w*|acquir\w*|apply\s+for|sponsor\w*|undergo|"
+        r"subject\s+to|if\s+required|may\s+be\s+required|upon\s+hire|"
+        r"citizen\w*)\b", re.I)
+    # HOLDING language: the posting wants a clearance you already have. Note
+    # what is NOT here — a bare "maintain", which is half of the extremely
+    # common eligibility phrase "able to obtain AND MAINTAIN a clearance",
+    # and a bare "required", which says nothing about whether it is
+    # required today or by the start date.
+    clearance_held_re = re.compile(
+        r"\b(?:active|current(?:ly)?|existing|present(?:ly)?|already|"
+        r"hold(?:s|ing)?|possess(?:es|ing)?|in\s+hand)\b", re.I)
+
+    text = text or ""
+    if _clearance_required(text):
+        return True
+    clauses = clearance_clause_re.findall(abbrev_dot_re.sub(r"\1", text))
+    if not any(clearance_eligible_re.search(c) for c in clauses):
+        return True
+    return any(clearance_held_re.search(c) for c in clauses)
+
+
+def _geo_gate_holds(location: str, description: str = "") -> bool:
+    """True unless the posting is deterministically somewhere the candidate
+    can work from: a stored location inside the configured locality, or a
+    US-eligible remote posting.
+
+    Reads the STORED location field for the locality half — is_nc judges it
+    per office-segment, which is what makes a multi-site req that lists the
+    candidate's own city among its offices come back local — and both the
+    location and the body for the remote half, which is where "fully
+    remote" is usually written. Deliberately does NOT clear the gate on a
+    place name found loose in the body: every JD in the region's orbit
+    names the region somewhere.
+    """
+    if locality.is_nc(location):
+        return False
+    if (locality.remote_signal(location, description)
+            and locality.us_eligible(location)):
+        return False
+    return True
+
+
+def apply_gate_overrides(gates: list[str], *, location: str = "",
+                          description: str = "") -> list[str]:
+    """The tripped gates with any the deterministic checks above refute
+    removed. Additive-free by construction: this only ever returns a subset
+    of `gates`, and it never touches the axis scores or the weights.
+
+    >>> apply_gate_overrides(["level", "geo"], location="Remote - US")
+    ['level']
+    >>> apply_gate_overrides(["clearance"],
+    ...                      description="Must be eligible for a clearance.")
+    []
+    """
+    checks = {"geo": lambda: _geo_gate_holds(location, description),
+              "clearance": lambda: _clearance_gate_holds(description)}
+    return [g for g in gates if g not in checks or checks[g]()]
+
+
+def clip_desc(text: str | None, max_chars: int | None = None) -> str:
+    """Clip a JD to the scoring budget, keeping HEAD + TAIL (never head only):
+    the head carries the role summary, the tail carries the requirements
+    block. Marks the elision so the model knows text was cut."""
+    # How much of the tail survives clipping. Corporate JDs put the
+    # requirements/qualifications block LAST, after pages of mission
+    # boilerplate — a plain head-truncation is what let a TPM posting score
+    # 0.69 on its EEG preamble while "8+ years program management" sat
+    # unseen past the cap.
+    clip_tail_chars = 3000
+    text = text or ""
+    max_chars = max_chars or _cfg("MAX_DESC_CHARS", 12000)
+    if len(text) <= max_chars:
+        return text
+    head = max(max_chars - clip_tail_chars, max_chars // 2)
+    return (text[:head] + "\n[... middle of posting elided ...]\n"
+            + text[-(max_chars - head):])
+
+
+def _user_turn(title: str, location: str | None, body_label: str, body: str) -> str:
+    """The per-posting user turn both scorers send: the title, the STORED
+    location (the ATS field, not the JD prose) when there is one, then the
+    posting text under `body_label`.
+
+    >>> _user_turn("Data Scientist", " Raleigh, NC ", "JOB DESCRIPTION", "...")
+    'JOB TITLE: Data Scientist\\nJOB LOCATION (stored): Raleigh, NC\\nJOB DESCRIPTION:\\n...'
+    >>> _user_turn("Data Scientist", None, "FULL JOB POSTING", "...")
+    'JOB TITLE: Data Scientist\\nFULL JOB POSTING:\\n...'
+
+    Notes:
+        The scorers see nothing but this turn, so without the location line
+        a posting whose prose never names a city left the geo gate guessing:
+        the Neuralink ML Engineer (onsite, out of region) passed verify at
+        0.81 with no gate, and a TARGAN Data Scientist stored at a Raleigh
+        office scored 0.07 in the screen on "no location stated" (both
+        2026-09). The value stays out of the system prompt, which prompt
+        caching needs byte-stable; the rule for reading it is in the geo
+        gate of the shared rubric (_axes_and_gates_block).
+    """
+    loc = (location or "").strip()
+    loc_line = f"JOB LOCATION (stored): {loc}\n" if loc else ""
+    return f"JOB TITLE: {title}\n{loc_line}{body_label}:\n{body}"
+
+
+def _gated(r: FitReply, gates: list[str], reason: str, model: str,
+           description: str, location: str) -> FitResult:
+    """Both scorers' FitResult for reply `r` and its `gates`, after the
+    clearance backstop and the gate overrides."""
+    # Regex backstop on the FULL pre-clip text (clipping could elide it)...
+    if _clearance_required(description) and "clearance" not in gates:
+        gates.append("clearance")
+    # ...and its strip side, on the same full text plus the stored location.
+    gates = apply_gate_overrides(gates, location=location,
+                                 description=description)
+    axes = r.axes()
+    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)
+    return FitResult(score=score, axes=axes, gates=gates, reason=reason,
+                     model=model)
+
+
+async def score_resume_fit(title: str, description: str = "", *,
+                           location: str = "", max_tokens: int=300) -> FitResult:
+    """Score one posting. Returns a None-scored result when the API is
+    unavailable OR when there is no real description to assess (callers treat a
+    None score as 'don't rank this'), so unscorable rows drop out instead of
+    floating at a fabricated cap. `location` rides in the user turn (see
+    _user_turn)."""
+    desc = (description or "").strip()
+    if len(desc) < MIN_DESC_CHARS:
+        # Visible, not silent: a job that passed discovery but arrives here
+        # with an empty/stub body would otherwise sit at a NULL score with
+        # no trace of why — exactly what hid the Neuralink/Paradromics
+        # description-hydration bug for weeks.
+        print(f"    [!] SKIP-SCORE: {len(desc)}/{MIN_DESC_CHARS} char description "
+              f"for {title!r} - unscored (check the fetcher/hydration path)")
+        return FitResult(score=None, reason="no description; unscored")
+    user = _user_turn(title, location, "JOB DESCRIPTION", clip_desc(desc))
+    # Built off the loop: the first build reads the store (_disposition_block).
+    r = await call_claude_json(await asyncio.to_thread(build_system_prompt),
+                               user, max_tokens=max_tokens, reply=FitReply)
+    if r is None:
+        # A call that never left the process -- no key, or the breaker
+        # tripped on an expired one / an exhausted balance -- is the
+        # SCORER being down, not a verdict on this posting, and both
+        # return None exactly like a refusal does. Naming them apart is
+        # what keeps ops.scoring's retry marker honest: it holds a
+        # "refused" row for UNSCORED_RETRY_DAYS, so one billing hiccup
+        # would otherwise park a whole backlog for a month (see
+        # fit.unscored_cause, which maps only the verdict reasons).
+        if api_disabled() or not have_api_key():
+            return FitResult(score=None, reason="scorer unavailable")
+        return FitResult(score=None, reason="unscored")
+    return _gated(r, list(r.gates), r.reason, _cfg("CLAUDE_MODEL", ""),
+                  description, location)
+
+
+# The two "gave up without a score" reasons score_resume_fit's own None-score
+# branches hand back, mapped to what a retry policy needs to know: is this
+# body ever going to score on its own (never — it needs to GROW), or might
+# the exact same call succeed later (maybe — ask again after a while, or the
+# instant the body changes)? "scorer unavailable" (no API key/module) is
+# deliberately NOT in this map: it isn't a verdict about the POSTING, it's
+# the whole scorer being offline, so nothing here should mark the row.
+#
+# Notes:
+#     call_claude_json (src/claude/api.py) collapses several distinct HTTP-
+#     level outcomes into the one generic "unscored" reason: a safety
+#     refusal (stop_reason=refusal, no text block at all), adaptive
+#     thinking exhausting max_tokens before any text lands
+#     (stop_reason=max_tokens), a non-JSON reply, a reply failing the
+#     schema, and a non-fatal HTTP error each print their own line there
+#     and then return None the same way. That collapse happens in a
+#     module this one does not own, so nothing on the FitResult can name
+#     the exact HTTP-level cause. It
+#     doesn't need to: a caller that already guarantees a real body before
+#     calling in (score_resume_fit's own MIN_DESC_CHARS check ahead of the
+#     API call means the "no description" branch can't ALSO fire) knows
+#     that any "unscored" reaching it is that API-level catch-all, so this
+#     module treats it as the REFUSED class for retry purposes. Evidence:
+#     data/logs/session-*.log, September 2026 — "Claude returned no text
+#     (stop_reason=refusal)" 17 times for the same 3-7 NC State rows, one
+#     per crawl, because nothing distinguished "just refused" from "never
+#     tried" and the row was re-asked every single pass.
+_UNSCORED_CAUSES = {
+    "no description; unscored": "short",
+    "unscored": "refused",
+}
+
+# The distinct causes above, derived rather than re-listed: the retry
+# marker src.ops.scoring writes into fit_reason spells one of these,
+# and its parser builds its alternation from this tuple instead of keeping
+# a second copy of the vocabulary in step by hand.
+UNSCORED_CAUSES = tuple(dict.fromkeys(_UNSCORED_CAUSES.values()))
+
+
+def unscored_cause(reason: str | None) -> str | None:
+    """"short" | "refused" | None for a None-scored FitResult's `.reason`.
+    None means the failure isn't a verdict on this posting at all (the
+    scorer was offline, or `reason` isn't one score_resume_fit produces)
+    and a caller should leave the row untouched rather than mark it.
+
+    >>> unscored_cause("no description; unscored")
+    'short'
+    >>> unscored_cause("unscored")
+    'refused'
+    >>> unscored_cause("scorer unavailable") is None
+    True
+    """
+    return _UNSCORED_CAUSES.get(reason) if reason is not None else None
+
+
+# The tag verify_fit writes at the head of a deep-pass fit_reason, and the
+# only thing any reader outside this module asks of it -- see
+# is_deep_verified below, which is how they should ask.
+DEEP_MARKER = "deep:"
+
+
+async def verify_fit(title: str, description: str = "", *, location: str = "",
+                     max_tokens: int=8000) -> FitResult:
+    """Deep second pass for ranking FINALISTS: same axes/gates as the screen,
+    but run on the (near-)full posting text with an explicit requirements
+    extraction step first — years required, seat type, must-haves, and the
+    candidate's gaps — so a role whose disqualifiers live at the bottom of a
+    long JD can't survive on its opening boilerplate. The extraction outranks
+    the model's own gate flags: a seat_type of management/program-product
+    trips the management gate even if the model forgot to set it.
+
+    `location` rides in the user turn (see _user_turn).
+
+    Returns a FitResult whose reason starts with "deep:" and whose `model`
+    names the verify model — together the mark verify_top() uses to skip
+    rows the CURRENT verify model has already checked — with years/seat/
+    gaps folded into the reason for the digest. A None score means unverifiable
+    (no API, no text): callers must keep the first-pass score."""
+    desc = (description or "").strip()
+    if len(desc) < MIN_DESC_CHARS:
+        return FitResult(score=None, reason="no description; unverified")
+    # Finalists get double the normal text budget: this pass exists precisely
+    # to read what the screen's clip may have elided.
+    desc = clip_desc(desc, max_chars=2 * _cfg("MAX_DESC_CHARS", 12000))
+    user = _user_turn(title, location, "FULL JOB POSTING", desc)
+    # Finalists get the stronger verify model WITH adaptive thinking left on
+    # (config.CLAUDE_VERIFY_MODEL, ~15-30 bounded calls/run) — max_tokens must
+    # cover thinking + the JSON on 5-family models, hence the 8000 default.
+    vmodel = verify_model()
+    r = await call_claude_json(await asyncio.to_thread(build_verify_prompt),
+                               user, max_tokens=max_tokens, model=vmodel,
+                               thinking=True, reply=VerifyReply)
+    if r is None:
+        return FitResult(score=None, reason="unverified")
+    gates = list(r.gates)
+    seat = r.seat_type
+    if seat in ("management", "program-product") and "management" not in gates:
+        gates.append("management")
+    bits = []
+    if r.years_required:
+        bits.append(f"{r.years_required:g}+yrs")
+    if seat:
+        bits.append(seat)
+    gaps = [g for g in r.candidate_gaps if g]
+    if gaps:
+        bits.append("gaps: " + "; ".join(gaps[:3]))
+    reason = f"{DEEP_MARKER} {r.reason}"
+    if bits:
+        reason += f" [{' | '.join(bits)}]"
+    return _gated(r, gates, reason, vmodel, description, location)
+
+
+def is_deep_verified(fit_reason: str | None) -> bool:
+    """Whether a stored `fit_reason` carries verify_fit's DEEP_MARKER, i.e.
+    this row's score came from the deep pass and not the screen.
+
+    The marker was a bare string tested by substring in two unrelated
+    modules -- the verify pass's own staleness check and the web UI's
+    "verified" badge -- neither of which could see where it is written:
+
+    >>> is_deep_verified("deep: strong overlap [3+yrs]")
+    True
+    >>> is_deep_verified("[dom 0.8] adjacent domain")
+    False
+
+    A row that was never scored has no marker:
+
+    >>> is_deep_verified(None), is_deep_verified("")
+    (False, False)
+    """
+    return DEEP_MARKER in (fit_reason or "")
+
+
+def verify_model() -> str:
+    """The model id the deep pass scores with: config.CLAUDE_VERIFY_MODEL,
+    else the screen model. Stored in jobs.fit_model by verify_fit so a
+    later run can tell rows verified by THIS model from rows verified by
+    an older one (or by nobody: fit_model is NULL on pre-column rows)."""
+    return _cfg("CLAUDE_VERIFY_MODEL", None) or _cfg("CLAUDE_MODEL", "")
+
+
+# --------------------------------------------------------------------------- #
+#  Calibration harness. Anchors are the roles we hand-scored against the full  #
+#  portfolio (JD-grounded where possible). Each carries the axis vector that   #
+#  reasoning implied, the gates it trips, and the holistic hand score. Run     #
+#  `python -m src.claude.fit` to see predicted-vs-hand and tune the weights.   #
+#  This tests the COMBINER offline; the LLM axis-scoring needs an API key.     #
+# --------------------------------------------------------------------------- #
+
+# name: (axes dict, failed gates, hand_score, note)
+_ANCHORS: dict[str, tuple[dict[str, float], list[str], float, str]] = {
+    "Sphere DS Biomedical Signal":  (dict(domain=.85, function=.85, stack=.60, seniority=1.0), [], .70, "remote biosignal ML, his lane"),
+    "Zyphra Research Eng BCI":      (dict(domain=.95, function=.80, stack=.55, seniority=.90), [], .66, "EEG+PyTorch; gen-model/multinode gap"),
+    "Bandwidth AI Eng R&D":         (dict(domain=.30, function=.78, stack=.68, seniority=1.0), [], .60, "R&D generalist; non-health domain"),
+    "BD Engineer II":               (dict(domain=.45, function=.72, stack=.70, seniority=1.0), [], .55, "sci-software tooling; +referral"),
+    "Pedestal Data Engineer":       (dict(domain=.55, function=.45, stack=.62, seniority=1.0), [], .50, "generic app+DB; health mission"),
+    "NVIDIA SWE AI Clusters":       (dict(domain=.15, function=.48, stack=.58, seniority=1.0), [], .42, "GPU-fleet SRE, not his build"),
+    "Epic ML Recommendations":      (dict(domain=.10, function=.42, stack=.48, seniority=1.0), [], .35, "recsys subfield he lacks"),
+    "Google SWE Cloud Storage":     (dict(domain=.10, function=.45, stack=.40, seniority=.85), [], .28, "distributed systems/Go/K8s gap"),
+    "DHHS Lead Data Engineer":      (dict(domain=.30, function=.38, stack=.25, seniority=.85), [], .22, "Salesforce/mainframe mismatch"),
+    "Sonova DSP (CA, embedded)":    (dict(domain=.55, function=.42, stack=.40, seniority=1.0), ["geo", "embedded"], .10, "embedded + out-of-state -> sinks"),
+    "Delsys R&D SWE (MA, embedded)":(dict(domain=.60, function=.55, stack=.55, seniority=1.0), ["geo", "embedded"], .12, "good domain but onsite+embedded"),
+    "Astera Research Scientist":    (dict(domain=.80, function=.70, stack=.55, seniority=.80), ["phd"], .30, "his domain but PhD-gated"),
+    # The halo-trap case that motivated the management gate: Sr Manager of
+    # internal AI tooling/GCP at an EEG company. First-pass rubric scored it
+    # 0.69 off the EEG preamble (truncated JD); the deep read found a TPM
+    # seat needing 8+ yrs program mgmt + end-to-end GCP — wrong archetype.
+    "Ceribell Sr Mgr Applied AI":   (dict(domain=.35, function=.30, stack=.35, seniority=.45), ["management"], .20, "TPM/GCP seat at an EEG company; domain halo"),
+    # ---- Aug 2026 census anchors: one per rule added 2026-08-11. ----------
+    # CoVar guards the clearance gate's NEGATIVE space: citizenship +
+    # clearance-ELIGIBILITY requirements must NOT gate (the candidate is a
+    # citizen). His DSP toolkit re-pointed at RF: function/stack high,
+    # domain rock-bottom, no gates — a contender on fit; the abysmal
+    # company MISSION (not this score) is what keeps it out of the ranking.
+    "CoVar Signal Processing Eng":  (dict(domain=.15, function=.80, stack=.70, seniority=1.0), [], .52, "his DSP toolkit at a defense shop; eligibility-only, no gate"),
+    # Vadum-class guards the clearance PENALTY as the worst (only) gate: an
+    # algorithm seat demanding an ACTIVE TS/SCI he doesn't hold. (Vadum's
+    # bench RF/FPGA variants trip embedded too; kept clearance-only here so
+    # a penalty regression can't hide behind worst-gate selection.)
+    "Vadum DSP (active TS/SCI)":    (dict(domain=.15, function=.60, stack=.55, seniority=1.0), ["clearance"], .21, "cleared-shop DSP; active clearance he lacks"),
+    # Guards the production-quality fit_cap (census screen risk #1): a
+    # design-assurance QE posting whose core is CAPA/complaints/post-market
+    # — the cap bounds FUNCTION at/below 0.45 despite the design-controls
+    # keyword overlap with his DHF/ISO 14971/510(k) background.
+    "Teleflex Sr QE (CAPA-heavy)":  (dict(domain=.45, function=.40, stack=.30, seniority=.90), [], .38, "production-quality ops core; cap holds function under .45"),
+    # Lane-2 CAD-automation seat (census Tier-1, scorer ~0.48): encodes the
+    # CURRENT profile stance that device R&D/automation without ML is
+    # mid-tier. If the strengths list is ever rewritten to elevate Python
+    # CAD/design-controls pairing, RAISE this hand score to match.
+    "restor3d Automation Engineer": (dict(domain=.42, function=.45, stack=.50, seniority=.78), [], .48, "Python CAD automation under 21 CFR 820; no ML/neural content"),
+}
+
+
+def calibrate(weights: dict[str, float] | None = None,
+              penalties: dict[str, float] | None = None) -> tuple[float, float]:
+    print(f"{'role':32} {'pred':>5} {'hand':>5} {'delta':>6}  gates")
+    print("-" * 72)
+    rows = []
+    for name, (axes, gates, hand, _note) in _ANCHORS.items():
+        pred = combine(axes, gates, weights, penalties)
+        rows.append((name, pred, hand, gates))
+        print(f"{name:32} {pred:>5.2f} {hand:>5.2f} {pred-hand:>+6.2f}  {','.join(gates) or '-'}")
+    mae = sum(abs(p - h) for _, p, h, _ in rows) / len(rows)
+    order_pred = [n for n, *_ in sorted(rows, key=lambda x: -x[1])]
+    order_hand = [n for n, *_ in sorted(_ANCHORS.items(), key=lambda kv: -kv[1][2])]
+    tau = _rank_agreement(order_pred, order_hand)
+    print("-" * 72)
+    print(f"MAE={mae:.3f}   rank-agreement={tau:.2f}   (1.0 = identical ordering)")
+    return mae, tau
+
+
+def _rank_agreement(a: list[str], b: list[str]) -> float:
+    idx = {n: i for i, n in enumerate(b)}
+    seq = [idx[n] for n in a]
+    conc = disc = 0
+    for i in range(len(seq)):
+        for j in range(i + 1, len(seq)):
+            if seq[i] < seq[j]:
+                conc += 1
+            else:
+                disc += 1
+    total = conc + disc
+    return (conc - disc) / total if total else 1.0
+
+
+if __name__ == "__main__":
+    calibrate()

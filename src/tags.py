@@ -1,0 +1,156 @@
+"""
+Canonical company scope TAGS, and the aliases that map older names onto them.
+
+A company row's `tags` column is a comma-joined token set describing HOW the
+company should be crawled, not what it does:
+
+    local   — crawl its board through the locality filter (heavyweight ATSes
+              whose whole board is expensive to pull, so we ask for a region)
+    sweep   — crawl its whole board (lightweight JSON ATSes; also the tag a
+              location-agnostic track sweeps on via [tracks.*].store_tag)
+
+Both used to be named after one user's search — "nc_local" for a
+North-Carolina local pass and "neural" for a BCI-focused sweep. They were
+never region- or field-specific in behaviour, so they now carry names that
+say what they do. `canonical()` keeps existing stores and hand-written
+profiles working, and `migrate_sql_expr` rewrites the stored tokens in place.
+
+Not a tag: `watch` (human-set: fetch this board every crawl and flag anything
+new regardless of rank or geography) and the review queue are facts of the
+employer, the `watch` and `review` columns of companies_effective. WATCH and
+PENDING below are their legacy tag spellings, which store.upsert_company still
+reads once at the write edge and never stores.
+
+This module lives at the top level beside the config package and imports nothing:
+config, the store, and the scrapers all depend on it, so it must stay a
+leaf (it used to be core.tags, which made config depend on core).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+
+
+LOCAL = "local"
+SWEEP = "sweep"
+WATCH = "watch"
+# Roster review queue (2026-09): a company an automated discovery path
+# resolved but a person has not confirmed (`review = 'pending'`). Written
+# active=0; confirming applies the mission rule; rejecting removes the row
+# and blocklists the name. Never crawled while pending.
+PENDING = "pending-review"
+#: The legacy spellings of the facts that are not scope tags.
+FACT_TOKENS = frozenset({WATCH, PENDING})
+
+# Retired name -> current name. Read-side only: nothing writes these.
+ALIASES = {
+    "nc_local": LOCAL,
+    "neural": SWEEP,
+}
+
+
+def canonical(tag: str | None) -> str:
+    """The current name for a possibly-legacy tag token.
+
+    Case- and whitespace-insensitive; unknown tokens pass through unchanged
+    so a hand-written profile is never silently rewritten.
+
+    >>> canonical("sweep")
+    'sweep'
+    >>> canonical("  NC_Local ")
+    'local'
+    >>> canonical("neural")
+    'sweep'
+    >>> canonical("something-new")
+    'something-new'
+
+    Missing input is a token-free company, not an error:
+
+    >>> canonical(None), canonical("")
+    ('', '')
+    """
+    t = (tag or "").strip().lower()
+    return ALIASES.get(t, t)
+
+
+def parse(raw: str | None) -> set[str]:
+    """A company row's `tags` string -> a set of canonical tokens.
+
+    Set order is not part of the contract, so sort before comparing —
+    the house style for any function whose output is unordered:
+
+    >>> sorted(parse("local,sweep"))
+    ['local', 'sweep']
+
+    Legacy tokens are canonicalised, and a legacy/current pair collapses
+    to one token rather than two:
+
+    >>> sorted(parse("nc_local, neural"))
+    ['local', 'sweep']
+    >>> sorted(parse("nc_local,local"))
+    ['local']
+
+    Blanks and empty fields yield the empty set:
+
+    >>> parse("local,,  ,") == {"local"}
+    True
+    >>> parse(None) == set()
+    True
+    """
+    return {canonical(t) for t in (raw or "").split(",") if t.strip()}
+
+
+def join(tags: Iterable[str | None]) -> str | None:
+    """A set of tokens -> the stored `tags` string (None when empty).
+
+    Output is sorted, so the same token set always stores the same string
+    and a row does not churn between crawls:
+
+    >>> join({"sweep", "local"})
+    'local,sweep'
+    >>> join(["neural", "nc_local"])
+    'local,sweep'
+
+    Empty means SQL NULL, not the empty string — `tags IS NULL` is how the
+    store asks "no scope tokens":
+
+    >>> join([]) is None
+    True
+    >>> join(["", None]) is None
+    True
+
+    join/parse round-trip on any canonical token set:
+
+    >>> parse(join({"local", "sweep"})) == {"local", "sweep"}
+    True
+    """
+    return ",".join(sorted({canonical(t) for t in tags if t})) or None
+
+
+def has(raw: str | Mapping[str, object] | None, tag: str) -> bool:
+    """True if a company's stored `tags` -- the column, or the whole row --
+    includes `tag`, legacy names too.
+
+    Either side may be legacy — a stored `nc_local` answers to `local`, and
+    a caller still asking for `nc_local` gets the row stored as `local`:
+
+    >>> has("local,sweep", "sweep")
+    True
+    >>> has("nc_local", "local")
+    True
+    >>> has("local", "nc_local")
+    True
+    >>> has("local", "sweep")
+    False
+
+    A NULL tags column is simply no tokens, and so is a missing row:
+
+    >>> has(None, "local")
+    False
+    >>> has({"name": "Acme", "tags": "sweep"}, "sweep"), has({}, "sweep")
+    (True, False)
+    """
+    col = raw.get("tags") if isinstance(raw, Mapping) else raw
+    if col is not None and not isinstance(col, str):
+        raise TypeError(f"tags must be a str, not {type(col).__name__}")
+    return canonical(tag) in parse(col)

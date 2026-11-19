@@ -1,0 +1,379 @@
+{
+ "offers": [
+  {
+   "translations": {
+    "en": {
+     "description": "<h3 class=\"PDq2pG_selectionAnchorContainer\">Job Description</h3><p>We are seeking a <strong>Senior Informatica Developer with BDM (Big Data Management)</strong> experience to support large-scale integration and data transformation initiatives.</p><h3>Responsib",
+     "title": "Senior Informatica Developer – BDM",
+     "highlight": "<p><strong>10+ yrs Informatica Integration | BDM | Python | BigQuery | High-volume data | XML/JSON/CSV | Application Integration | 2+ complete Integration Programs | Chesapeake, VA Hybrid</strong></p>",
+     "requirements": "<h3>Required Technical Skills</h3><ul><li><p><strong>Expert-level Informatica</strong> experience.</p></li><li><p>Strong experience with <strong>Python</strong>.</p></li><li><p>Strong experience with <strong>Google BigQuery</strong>.</p></li><li><p>Strong expe",
+     "sharing_image": null,
+     "sharing_title": "Senior Informatica Developer – BDM",
+     "sharing_description": "Job DescriptionWe are seeking a Senior Informatica Developer with BDM (Big Data Management) experience to support large-scale integration and data transformation initiatives.ResponsibilitiesBuild inte",
+     "locations_question": "What is your preferred work location?"
+    }
+   },
+   "country": "United States",
+   "dynamic_fields": [],
+   "position": 1402,
+   "careers_url": "https://hudsonmanpower.recruitee.com/o/senior-informatica-developer-bdm",
+   "open_questions": [
+    {
+     "id": 4409675,
+     "position": 1,
+     "options": {},
+     "required": true,
+     "body": "Do you have authorization to work in the United States?",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Do you have authorization to work in the United States?"
+      }
+     },
+     "open_question_options": []
+    }
+   ],
+   "guid": "7ed1k",
+   "min_hours_per_week": "40",
+   "options_phone": "required",
+   "salary": {
+    "max": null,
+    "min": null,
+    "period": "year",
+    "currency": "USD"
+   },
+   "cover_image": null,
+   "highlight": "<p><strong>10+ yrs Informatica Integration | BDM | Python | BigQuery | High-volume data | XML/JSON/CSV | Application Integration | 2+ complete Integration Programs | Chesapeake, VA Hybrid</strong></p>",
+   "country_code": "US",
+   "options_title": "off",
+   "employment_type_code": "fulltime_permanent",
+   "mailbox_email": "job.7ed1k@hudsonmanpower.recruitee.com",
+   "max_hours": 40,
+   "department": "Information Technology",
+   "experience_code": "experienced",
+   "locations": [
+    {
+     "id": 248831,
+     "name": "Arlington, VA ",
+     "state": "Virginia",
+     "country": "United States",
+     "city": "Arlington",
+     "translations": {
+      "en": {
+       "name": "Arlington, VA ",
+       "city": "Arlington",
+       "postal_code": "22201",
+       "street": null,
+       "note": null
+      }
+     },
+     "country_code": "US",
+     "state_code": "VA",
+     "postal_code": "22201",
+     "street": null,
+     "note": null
+    },
+    {
+     "id": 287730,
+     "name": "Charlottesville, Virginia",
+     "state": "Virginia",
+     "country": "United States",
+     "city": "Charlottesville",
+     "translations": {
+      "en": {
+       "name": "Charlottesville, Virginia",
+       "city": "Charlottesville",
+       "postal_code": null,
+       "street": null,
+       "note": null
+      }
+     },
+     "country_code": "US",
+     "state_code": "VA",
+     "postal_code": null,
+     "street": null,
+     "note": null
+    },
+    {
+     "id": 235513,
+     "name": "Fairfax, Virginia",
+     "state": "Virginia",
+     "country": "United States",
+     "city": "Fairfax",
+     "translations": {
+      "en": {
+       "name": "Fairfax, Virginia",
+       "city": "Fairfax",
+       "postal_code": null,
+       "street": null,
+       "note": null
+      }
+     },
+     "country_code": "US",
+     "state_code": "VA",
+     "postal_code": null,
+     "street": null,
+     "note": null
+    }
+   ],
+   "created_at": "2026-10-01 20:57:05 UTC",
+   "locations_question_type": "multiple_choice",
+   "options_salutation": "off",
+   "city": "Arlington",
+   "max_hours_per_week": "40",
+   "category_code": "information_technology",
+   "education_code": "bachelor_degree",
+   "options_cover_letter": "optional",
+   "careers_apply_url": "https://hudsonmanpower.recruitee.com/o/senior-informatica-developer-bdm/c/new",
+   "hybrid": true,
+   "close_at": null,
+   "requirements": "<h3>Required Technical Skills</h3><ul><li><p><strong>Expert-level Informatica</strong> experience.</p></li><li><p>Strong experience with <strong>Python</strong>.</p></li><li><p>Strong experience with <strong>Google BigQuery</strong>.</p></li><li><p>Strong expe",
+   "sharing_description": "Job DescriptionWe are seeking a Senior Informatica Developer with BDM (Big Data Management) experience to support large-scale integration and data transformation initiatives.ResponsibilitiesBuild inte",
+   "updated_at": "2026-10-01 21:01:46 UTC",
+   "sharing_image": null,
+   "min_hours": 40,
+   "description": "<h3 class=\"PDq2pG_selectionAnchorContainer\">Job Description</h3><p>We are seeking a <strong>Senior Informatica Developer with BDM (Big Data Management)</strong> experience to support large-scale integration and data transformation initiatives.</p><h3>Responsib",
+   "locations_question": "What is your preferred work location?",
+   "slug": "senior-informatica-developer-bdm",
+   "location_question_visible": true,
+   "options_cv": "required",
+   "remote": false,
+   "postal_code": "22201",
+   "on_site": true,
+   "id": 2767886,
+   "options_photo": "off",
+   "published_at": "2026-10-01 21:01:46 UTC",
+   "location": "Arlington, Virginia, United States",
+   "state_code": "VA",
+   "locations_question_required": true,
+   "title": "Senior Informatica Developer – BDM",
+   "status": "published",
+   "state_name": "Virginia",
+   "company_name": "Hudson Manpower",
+   "tags": [],
+   "sharing_title": "Senior Informatica Developer – BDM"
+  },
+  {
+   "translations": {
+    "en": {
+     "description": "<p><strong><u>Job Description</u></strong></p><p>We are seeking an experienced <strong>SAP IS-U &amp; SAP S/4HANA Consultant</strong> with deep functional expertise in <strong>SAP IS-U Billing &amp; Invoicing</strong> and the utility industry. The ideal candid",
+     "title": "SAP IS-U & SAP S/4HANA Consultant",
+     "highlight": "<p>SAP IS-U &amp; S/4HANA Consultant | Remote | 6–12+ Months | 8–10 Yrs | IS-U Billing/Invoicing, Meter-to-Cash, Utilities, S/4HANA, Fiori, Bill Print, FICA, Device Management &amp; integrations.</p>",
+     "requirements": "<p><strong><u>Required Technical Skills</u></strong></p><ul><li><p>Hands-on experience in <strong>SAP IS-U Billing &amp; Invoicing</strong> with deep functional expertise across the <strong>Meter-to-Cash lifecycle</strong> in the utility industry.</p></li><li>",
+     "sharing_image": null,
+     "sharing_title": "SAP IS-U & SAP S/4HANA Consultant",
+     "sharing_description": "Job DescriptionWe are seeking an experienced SAP IS-U &amp; SAP S/4HANA Consultant with deep functional expertise in SAP IS-U Billing &amp; Invoicing and the utility industry. The ideal candidate shou",
+     "locations_question": "What is your preferred work location?"
+    }
+   },
+   "country": "United States",
+   "dynamic_fields": [],
+   "position": 1396,
+   "careers_url": "https://hudsonmanpower.recruitee.com/o/sap-is-u-sap-s4hana-consultant",
+   "open_questions": [
+    {
+     "id": 4400027,
+     "position": 1,
+     "options": {},
+     "required": true,
+     "body": "Are you a U.S. Citizen, Green Card holder, GC-EAD, H4EAD? Please respond Yes or No!",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Are you a U.S. Citizen, Green Card holder, GC-EAD, H4EAD? Please respond Yes or No!"
+      }
+     },
+     "open_question_options": []
+    }
+   ],
+   "guid": "6t61r",
+   "min_hours_per_week": "40",
+   "options_phone": "required",
+   "salary": {
+    "max": "55",
+    "min": "50",
+    "period": "hour",
+    "currency": "USD"
+   },
+   "cover_image": null,
+   "highlight": "<p>SAP IS-U &amp; S/4HANA Consultant | Remote | 6–12+ Months | 8–10 Yrs | IS-U Billing/Invoicing, Meter-to-Cash, Utilities, S/4HANA, Fiori, Bill Print, FICA, Device Management &amp; integrations.</p>",
+   "country_code": "US",
+   "options_title": "off",
+   "employment_type_code": "contract",
+   "mailbox_email": "job.6t61r@hudsonmanpower.recruitee.com",
+   "max_hours": 40,
+   "department": "Information Technology",
+   "experience_code": "mid_level",
+   "locations": [
+    {
+     "id": 217725,
+     "name": "Remote",
+     "state": "New York",
+     "country": "United States",
+     "city": "New York",
+     "translations": {
+      "en": {
+       "name": "Remote",
+       "city": "New York",
+       "postal_code": null,
+       "street": null,
+       "note": null
+      }
+     },
+     "country_code": "US",
+     "state_code": "NY",
+     "postal_code": null,
+     "street": null,
+     "note": null
+    }
+   ],
+   "created_at": "2026-09-28 17:50:26 UTC",
+   "locations_question_type": "multiple_choice",
+   "options_salutation": "off",
+   "city": "New York",
+   "max_hours_per_week": "40",
+   "category_code": "information_technology",
+   "education_code": "bachelor_degree",
+   "options_cover_letter": "optional",
+   "careers_apply_url": "https://hudsonmanpower.recruitee.com/o/sap-is-u-sap-s4hana-consultant/c/new",
+   "hybrid": false,
+   "close_at": null,
+   "requirements": "<p><strong><u>Required Technical Skills</u></strong></p><ul><li><p>Hands-on experience in <strong>SAP IS-U Billing &amp; Invoicing</strong> with deep functional expertise across the <strong>Meter-to-Cash lifecycle</strong> in the utility industry.</p></li><li>",
+   "sharing_description": "Job DescriptionWe are seeking an experienced SAP IS-U &amp; SAP S/4HANA Consultant with deep functional expertise in SAP IS-U Billing &amp; Invoicing and the utility industry. The ideal candidate shou",
+   "updated_at": "2026-09-28 18:17:17 UTC",
+   "sharing_image": null,
+   "min_hours": 40,
+   "description": "<p><strong><u>Job Description</u></strong></p><p>We are seeking an experienced <strong>SAP IS-U &amp; SAP S/4HANA Consultant</strong> with deep functional expertise in <strong>SAP IS-U Billing &amp; Invoicing</strong> and the utility industry. The ideal candid",
+   "locations_question": "What is your preferred work location?",
+   "slug": "sap-is-u-sap-s4hana-consultant",
+   "location_question_visible": false,
+   "options_cv": "required",
+   "remote": true,
+   "postal_code": null,
+   "on_site": false,
+   "id": 2762216,
+   "options_photo": "off",
+   "published_at": "2026-09-28 18:17:17 UTC",
+   "location": "Remote job",
+   "state_code": "NY",
+   "locations_question_required": true,
+   "title": "SAP IS-U & SAP S/4HANA Consultant",
+   "status": "published",
+   "state_name": "New York",
+   "company_name": "Hudson Manpower",
+   "tags": [],
+   "sharing_title": "SAP IS-U & SAP S/4HANA Consultant"
+  },
+  {
+   "translations": {
+    "en": {
+     "description": "<h2>Job Description</h2><p class=\"isSelectedEnd\">We are seeking a highly skilled <strong>Sr OT Network Engineer</strong> to support the design, deployment, and ongoing reliability of Operational Technology (OT) network infrastructure in a manufacturing environ",
+     "title": "Sr Network OT Engineer",
+     "highlight": "<p>Sr OT Network Engineer with 10+ years of network experience, specializing in manufacturing OT, LAN/WAN, segmentation, IDMZ, firewalls, routing, switching, HA, and troubleshooting.</p>",
+     "requirements": "<h2>Job Description</h2><p class=\"isSelectedEnd\">We are seeking a highly skilled <strong>Sr OT Network Engineer</strong> to support the design, deployment, and ongoing reliability of Operational Technology (OT) network infrastructure in a manufacturing environ",
+     "sharing_image": null,
+     "sharing_title": "Sr Network OT Engineer",
+     "sharing_description": "Job DescriptionWe are seeking a highly skilled Sr OT Network Engineer to support the design, deployment, and ongoing reliability of Operational Technology (OT) network infrastructure in a manufacturin",
+     "locations_question": "What is your preferred work location?"
+    }
+   },
+   "country": "United States",
+   "dynamic_fields": [],
+   "position": 1401,
+   "careers_url": "https://hudsonmanpower.recruitee.com/o/sr-network-ot-engineer",
+   "open_questions": [
+    {
+     "id": 4409663,
+     "position": 1,
+     "options": {},
+     "required": true,
+     "body": "Do you have authorization to work in the United States?",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Do you have authorization to work in the United States?"
+      }
+     },
+     "open_question_options": []
+    }
+   ],
+   "guid": "rbm3t",
+   "min_hours_per_week": "40",
+   "options_phone": "required",
+   "salary": {
+    "max": "60",
+    "min": "55",
+    "period": "hour",
+    "currency": "USD"
+   },
+   "cover_image": null,
+   "highlight": "<p>Sr OT Network Engineer with 10+ years of network experience, specializing in manufacturing OT, LAN/WAN, segmentation, IDMZ, firewalls, routing, switching, HA, and troubleshooting.</p>",
+   "country_code": "US",
+   "options_title": "off",
+   "employment_type_code": "fulltime_permanent",
+   "mailbox_email": "job.rbm3t@hudsonmanpower.recruitee.com",
+   "max_hours": 40,
+   "department": "Information Technology",
+   "experience_code": "experienced",
+   "locations": [
+    {
+     "id": 249569,
+     "name": "Indiana",
+     "state": "Indiana",
+     "country": "United States",
+     "city": "Indianapolis",
+     "translations": {
+      "en": {
+       "name": "Indiana",
+       "city": "Indianapolis",
+       "postal_code": null,
+       "street": null,
+       "note": null
+      }
+     },
+     "country_code": "US",
+     "state_code": "IN",
+     "postal_code": null,
+     "street": null,
+     "note": null
+    }
+   ],
+   "created_at": "2026-10-01 20:47:50 UTC",
+   "locations_question_type": "multiple_choice",
+   "options_salutation": "off",
+   "city": "Indianapolis",
+   "max_hours_per_week": "40",
+   "category_code": "information_technology",
+   "education_code": "bachelor_degree",
+   "options_cover_letter": "optional",
+   "careers_apply_url": "https://hudsonmanpower.recruitee.com/o/sr-network-ot-engineer/c/new",
+   "hybrid": false,
+   "close_at": null,
+   "requirements": "<h2>Job Description</h2><p class=\"isSelectedEnd\">We are seeking a highly skilled <strong>Sr OT Network Engineer</strong> to support the design, deployment, and ongoing reliability of Operational Technology (OT) network infrastructure in a manufacturing environ",
+   "sharing_description": "Job DescriptionWe are seeking a highly skilled Sr OT Network Engineer to support the design, deployment, and ongoing reliability of Operational Technology (OT) network infrastructure in a manufacturin",
+   "updated_at": "2026-10-01 20:54:11 UTC",
+   "sharing_image": null,
+   "min_hours": 40,
+   "description": "<h2>Job Description</h2><p class=\"isSelectedEnd\">We are seeking a highly skilled <strong>Sr OT Network Engineer</strong> to support the design, deployment, and ongoing reliability of Operational Technology (OT) network infrastructure in a manufacturing environ",
+   "locations_question": "What is your preferred work location?",
+   "slug": "sr-network-ot-engineer",
+   "location_question_visible": false,
+   "options_cv": "required",
+   "remote": false,
+   "postal_code": null,
+   "on_site": true,
+   "id": 2767885,
+   "options_photo": "off",
+   "published_at": "2026-10-01 20:54:11 UTC",
+   "location": "Indianapolis, Indiana, United States",
+   "state_code": "IN",
+   "locations_question_required": true,
+   "title": "Sr Network OT Engineer",
+   "status": "published",
+   "state_name": "Indiana",
+   "company_name": "Hudson Manpower",
+   "tags": [],
+   "sharing_title": "Sr Network OT Engineer"
+  }
+ ]
+}

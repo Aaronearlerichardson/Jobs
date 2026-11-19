@@ -1,0 +1,224 @@
+"""The one operation table behind the web UI's buttons and the CLIs' flags.
+
+Three front ends used to carry their own dispatch over the same functions
+and drifted (a UI helper was lost in a refactor while its button survived;
+the CLI and the UI passed different defaults to one call). These tests pin
+the properties that make a single table safe: every front end reaches the
+registry, and the params each front end passes are the ones the target
+accepts.
+"""
+
+import inspect
+from types import SimpleNamespace
+
+import pytest
+
+from src import config
+import discover
+import run_scraper
+from src.dispatch import registry
+
+
+def _kwargs(model, always=False):
+    """The target keywords `model` can pass; `always` keeps only those it
+    passes on every call (not left out while absent)."""
+    names = {n for n, f in model.model_fields.items()
+             if n != "track" and not (always and f.exclude_if)}
+    return names | ({model.track_kw} if model.track_kw else set())
+
+
+class TestTable:
+    def test_every_entry_is_well_formed(self):
+        for name, e in registry.REGISTRY.items():
+            assert set(e) >= {"label", "engine", "target", "params"}, name
+            assert e["engine"] in (None, "local", "sweep"), name
+            assert callable(e["target"]), name
+            assert issubclass(e["params"], registry.OpParams), name
+
+    def test_every_param_names_a_real_keyword_of_its_target(self):
+        """A typo in a field name would surface only when someone clicked
+        the button: the call would raise TypeError inside the op thread."""
+        for name, e in registry.REGISTRY.items():
+            sig = inspect.signature(e["target"])
+            accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                              for p in sig.parameters.values())
+            for kw in _kwargs(e["params"]):
+                assert accepts_any or kw in sig.parameters, (name, kw)
+
+    def test_required_target_arguments_are_always_supplied(self):
+        """A target parameter with no default must come from a field that
+        is passed on every call."""
+        for name, e in registry.REGISTRY.items():
+            sig = inspect.signature(e["target"])
+            supplied = _kwargs(e["params"], always=True)
+            required = {n for n, prm in sig.parameters.items()
+                        if prm.default is inspect.Parameter.empty
+                        and prm.kind not in (inspect.Parameter.VAR_KEYWORD,
+                                             inspect.Parameter.VAR_POSITIONAL)}
+            assert required <= supplied, (name, required - supplied)
+
+    def test_ui_view_hides_only_the_flagged_entries(self):
+        hidden = {n for n, e in registry.REGISTRY.items()
+                  if e.get("ui") is False}
+        assert hidden, "expected at least one CLI-only op"
+        assert set(registry.ui_ops()) == set(registry.REGISTRY) - hidden
+
+    def test_check_closed_label_names_what_it_actually_does(self):
+        """check_closed_jobs probes stale URLs AND closes every OPEN row at
+        a dead-board company with no URL probe at all (its own docstring's
+        "dead-board half"); "Probe stale URLs" named only the first half."""
+        label = registry.REGISTRY["check-closed"]["label"].lower()
+        assert "probe" in label and "dead" in label
+
+
+class TestInvoke:
+    async def test_resolves_the_track_from_params_or_the_default(self, patch_op):
+        seen = {}
+        patch_op("sync", lambda **kw: seen.update(kw))
+        await registry.invoke("sync", {"top": "7"})
+        assert seen == {"top_n": 7, "t": config.UI_TRACKS[config.DEFAULT_TRACK]}
+        await registry.invoke("sync", {}, track=None)
+        assert seen == {"top_n": 15, "t": None}
+
+    async def test_unknown_op_raises(self):
+        with pytest.raises(KeyError):
+            await registry.invoke("no-such-op", {})
+
+    async def test_blank_is_absent_but_false_is_a_value(self, patch_op):
+        """A blank web field takes the default (a blank `workers` leaves
+        max_workers to the target); argparse's False for an unset
+        store_true flag is a real value (rescore's described_only)."""
+        seen = {}
+        patch_op("rescore", lambda **kw: seen.update(kw))
+        await registry.invoke("rescore", {"described_only": False, "workers": ""},
+                              track=None)
+        assert seen == {"described_only": False, "t": None}
+
+    async def test_bad_params_fail_by_key_before_the_target_runs(self, patch_op):
+        seen = []
+        patch_op("check-closed", lambda **kw: seen.append(kw))
+        with pytest.raises(registry.ParamError) as err:
+            await registry.invoke("check-closed", {"limit": "many", "stale": 3})
+        assert [ln.split(":")[0] for ln in err.value.lines] == ["limit", "stale"]
+        assert seen == []
+
+
+class TestWebView:
+    def test_ops_is_the_ui_subset_with_the_legacy_shape(self):
+        from src import web
+        assert set(web.OPS) == set(registry.ui_ops())
+        for name, o in web.OPS.items():
+            assert set(o) == {"label", "engine", "params", "fn"}, name
+            assert o["label"] == registry.REGISTRY[name]["label"]
+
+    async def test_fn_runs_the_registry_with_the_posted_params(self, patch_op):
+        from src import web
+        seen = {}
+        patch_op("check-closed", lambda **kw: seen.update(kw))
+        await web.OPS["check-closed"]["fn"]({
+            "stale_days": "3", "limit": "", "track": config.DEFAULT_TRACK})
+        assert seen["stale_days"] == 3 and seen["limit"] is None
+        assert seen["t"].id == config.DEFAULT_TRACK
+
+
+def _args(**given):
+    """An argparse-shaped namespace: every dest a command reads, defaulted
+    the way run_scraper's parser defaults it, with `given` overriding."""
+    base = dict(workers=6, top=15, limit=None, stale_days=2, score_cap=None,
+                described_only=False, verify_all=False, miss_days=None,
+                reresolve_families=None,
+                prune_offmission=False, no_fit=False, preview=False,
+                send=False, no_verify=False,
+                refresh=False, requeue=False,
+                requeue_apply=False, rekey_apply=False,
+                restamp_apply=False, restamp_undo="")
+    base.update(given)
+    return SimpleNamespace(**base)
+
+
+class TestCliDispatch:
+    """run_scraper's flag table is generated over the registry: every
+    registry-backed flag reaches invoke() with the parameters the old
+    if-chain passed by hand."""
+
+    @pytest.fixture
+    def calls(self, monkeypatch):
+        seen = []
+
+        async def invoke(name, params, track=None):
+            seen.append((name, params, track))
+        monkeypatch.setattr(registry, "invoke", invoke)
+        return seen
+
+    def _handler(self, dest):
+        return dict(run_scraper._COMMANDS)[dest]
+
+    def test_verify_top_passes_n_workers_and_force(self, calls):
+        self._handler("verify_top")(_args(verify_top=20, verify_all=True), None)
+        assert calls == [("verify", {"top": 20, "workers": 6, "force": True}, None)]
+
+    def test_check_closed_passes_the_probe_knobs(self, calls):
+        t = {"id": "x"}
+        self._handler("check_closed")(_args(limit=40, stale_days=5), t)
+        assert calls == [("check-closed",
+                          {"limit": 40, "stale_days": 5}, t)]
+
+    def test_triage_forwards_score_cap(self, calls):
+        self._handler("triage")(_args(score_cap=50), None)
+        assert calls[0][1] == {"limit": None, "workers": 6, "score_cap": 50,
+                               "requeue": False, "requeue_apply": False}
+
+    def test_triage_forwards_requeue_flags(self, calls):
+        self._handler("triage")(_args(requeue=True, requeue_apply=True), None)
+        assert calls[0][1] == {"limit": None, "workers": 6, "score_cap": None,
+                               "requeue": True, "requeue_apply": True}
+
+    def test_every_registry_backed_flag_names_a_registered_op(self, calls):
+        for dest, handler in run_scraper._COMMANDS:
+            if handler.__name__.startswith("_cmd_"):
+                continue          # store-backed commands, not registry ops
+            calls.clear()
+            handler(_args(**{dest: True, "verify_top": 15,
+                             "reresolve_misses": 50, "nlx": "A,B"}), None)
+            assert calls, dest
+            for name, _params, _t in calls:
+                assert name in registry.REGISTRY, (dest, name)
+
+    def test_selected_treats_zero_as_given(self):
+        assert run_scraper._selected(_args(verify_top=0), "verify_top")
+        assert not run_scraper._selected(_args(verify_top=None), "verify_top")
+        assert not run_scraper._selected(_args(rescore=False), "rescore")
+
+
+class TestDiscoverDispatch:
+    def test_flags_map_onto_registry_ops(self, monkeypatch):
+        seen = []
+
+        async def invoke(name, params, track=None):
+            seen.append((name, params))
+        monkeypatch.setattr(registry, "invoke", invoke)
+        cmds = dict(discover.__dict__["_COMMANDS"])
+        cmds["add_board"](SimpleNamespace(add_board=["Acme", "https://x"], capture=True))
+        cmds["rescore_missions"](SimpleNamespace(rescore_missions=True))
+        cmds["dork"](SimpleNamespace())
+        assert seen == [
+            ("add-board", {"name": "Acme", "url": "https://x", "capture": True}),
+            ("score-missions", {"rescore": True}),
+            ("dork", {}),
+        ]
+
+
+class TestDbOverride:
+    def test_a_track_and_a_db_together_point_the_track_at_the_db(
+            self, monkeypatch, tmp_path, local_track):
+        from src import session_log
+        from src.config import bootstrap
+        seen = []
+        monkeypatch.setattr(bootstrap, "ensure_profile", lambda: None)
+        monkeypatch.setattr(session_log, "start", lambda argv: None)
+        monkeypatch.setattr(config, "STORE_DB_PATH", config.STORE_DB_PATH)  # main() rebinds it
+        monkeypatch.setattr(run_scraper, "_COMMANDS",
+                            [("pipeline", lambda args, t: seen.append(t))])
+        run_scraper.main(["--track", local_track.id, "--db", str(tmp_path / "x.db"),
+                          "--pipeline"])
+        assert [(t.id, t.db_path) for t in seen] == [(local_track.id, tmp_path / "x.db")]

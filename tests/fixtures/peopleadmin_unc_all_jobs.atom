@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xml:lang="en-US" xmlns="http://www.w3.org/2005/Atom" xmlns:pa="unc.peopleadmin.com">
+  <id>tag:unc.peopleadmin.com,2005:/postings/all_jobs</id>
+  <link rel="alternate" type="text/html" href="https://unc.peopleadmin.com"/>
+  <link rel="self" type="application/atom+xml" href="https://unc.peopleadmin.com/postings/all_jobs.atom"/>
+  <title>University of North Carolina- Chapel Hill: All Jobs</title>
+  <updated>2026-07-28T11:52:20-04:00</updated>
+  <entry>
+    <id>https://unc.peopleadmin.com/postings/323091</id>
+    <published>2026-07-28T11:52:19-04:00</published>
+    <updated>2026-07-28T11:52:20-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://unc.peopleadmin.com/postings/323091"/>
+    <title>Surgical Oncologist Faculty Appointment</title>
+    <content>&lt;div&gt;[posting text redacted] Position type: Faculty.&lt;/div&gt;</content>
+    <author>
+      <name>Surgery - Surgical Oncology - 414020</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://unc.peopleadmin.com/postings/324820</id>
+    <published>2026-09-01T16:12:46-04:00</published>
+    <updated>2026-09-01T16:12:46-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://unc.peopleadmin.com/postings/324820"/>
+    <title>Cogeneration Systems Facility Planner</title>
+    <content>&lt;div&gt;[posting text redacted]&lt;/div&gt;</content>
+    <author>
+      <name>ES CG - 227110</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://unc.peopleadmin.com/postings/314245</id>
+    <published>2026-03-09T11:18:56-04:00</published>
+    <updated>2026-03-09T11:18:57-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://unc.peopleadmin.com/postings/314245"/>
+    <title>Post-Doc Research Associate</title>
+    <content>&lt;div&gt;[posting text redacted] Position type: Postdoctoral.&lt;/div&gt;</content>
+    <author>
+      <name>Epidemiology - 463501</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://unc.peopleadmin.com/postings/324171</id>
+    <published>2026-08-18T19:57:24-04:00</published>
+    <updated>2026-08-18T19:57:25-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://unc.peopleadmin.com/postings/324171"/>
+    <title>Assistant Director of Annual Giving and Alumni Engagement</title>
+    <content>&lt;div&gt;[posting text redacted]&lt;/div&gt;</content>
+    <author>
+      <name>SPH - Advancement - 460125</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://unc.peopleadmin.com/postings/318761</id>
+    <published>2026-05-14T11:22:39-04:00</published>
+    <updated>2026-05-14T11:22:39-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://unc.peopleadmin.com/postings/318761"/>
+    <title>UNC Gynecologic Oncologist</title>
+    <content>&lt;div&gt;[posting text redacted] Location: Raleigh, NC.&lt;/div&gt;</content>
+    <author>
+      <name>OBGYN-GYN Oncology - 412430</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://unc.peopleadmin.com/postings/324511</id>
+    <published>2026-08-26T10:09:56-04:00</published>
+    <updated>2026-08-26T10:09:57-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://unc.peopleadmin.com/postings/324511"/>
+    <title>Health Services Coordinator</title>
+    <content>&lt;div&gt;[posting text redacted]&lt;/div&gt;</content>
+    <author>
+      <name>OBGYN-Horizons - 412480</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://unc.peopleadmin.com/postings/318749</id>
+    <published>2026-05-14T11:18:51-04:00</published>
+    <updated>2026-05-14T11:18:52-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://unc.peopleadmin.com/postings/318749"/>
+    <title>Professor and Chair of Pharmacology</title>
+    <content>&lt;div&gt;[posting text redacted] Location: Chapel Hill. Position type: Faculty.&lt;/div&gt;</content>
+    <author>
+      <name>Med Ad-Deans Office - 420104</name>
+    </author>
+  </entry>
+</feed>

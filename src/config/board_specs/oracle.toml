@@ -1,0 +1,69 @@
+# Notes:
+#     Endpoint shapes credited to kalil0321/ats-scrapers (MIT). A tenant
+#     host serves several sites, so the handle is the host and the site
+#     number. The server serves at most 200 rows a page, whatever the limit.
+
+eager = true
+
+# Oracle Recruiting Cloud; endpoint shapes credited to kalil0321/ats-scrapers (MIT).
+# A tenant host serves several sites, so the handle is the host and the site number.
+[[detect]]
+host = "oraclecloud.com"
+re = [
+    '(?i)([a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?oraclecloud\.com)/hcmUI/CandidateExperience/[A-Za-z_-]+/sites/([A-Za-z0-9_-]+)'
+]
+transform = ["lower", "keep"]
+
+[[detect]]
+host = "oraclecloud.com"
+re = [
+    '''(?i)([a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?oraclecloud\.com)/?\?(?:[^\s\"'<>#]*&)?site_number=([A-Za-z0-9_-]+)'''
+]
+transform = ["lower", "keep"]
+
+[canary]
+name = "UL Solutions"
+handle = "fa-eups-saasfaprod1.fa.ocs.oraclecloud.com|ULSolutionsCareers"
+min_jobs = 20
+
+[handle]
+parts = ["host", "site"]
+
+[job_ref]
+re = '(?i)^https?://([a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?oraclecloud\.com)/hcmUI/CandidateExperience/[A-Za-z_-]+/sites/([^/?#]+)/job/(\d+)'
+parts = ["host", "site", "jid"]
+
+[listing]
+url = "https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&expand=requisitionList.secondaryLocations&finder=findReqs;siteNumber={site},limit={size},offset={offset}"
+# One search wrapper holds the whole board: its total, then the page.
+decoder = { entries = "items[0].requisitionList" }
+# The server serves at most 200 rows a page, whatever the limit.
+pager = { kind = "offset", size = 200, pages = 40, total = "items[0].TotalJobsCount" }
+
+[listing.fields]
+_tenant = { format = "{host}", transform = "host_label" }
+id = { format = "oracle_{_tenant}_{Id}" }
+title = "Title"
+url = { format = "https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{Id}" }
+location = { merge = { primary = "PrimaryLocation", extras = "secondaryLocations[].Name" } }
+posted_at = "PostedDate"
+remote_hint = { const = "oracle:workplaceType", when = { eq = ["WorkplaceTypeCode", "ORA_REMOTE"] } }
+department = { join = ["JobFamily", "JobFunction"] }
+
+[detail]
+url = "https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails"
+params = { expand = "all", onlyData = "true", finder = 'ById;Id="{jid}",siteNumber={site}' }
+record = "items[0]"
+
+# The corporate boilerplate stays out; the fit model reads the rest.
+[detail.fields]
+description = { join = [
+    "ExternalDescriptionStr",
+    "ExternalResponsibilitiesStr",
+    "ExternalQualificationsStr"
+], sep = "\n", transform = "html_text" }
+
+[closure]
+open = { truthy = "Id" }
+unmatched = "requisition no longer served"
+why = "a pulled requisition answers 200 with no items, 2026-10"

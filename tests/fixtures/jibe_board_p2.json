@@ -1,0 +1,88 @@
+{
+ "jobs": [
+  {
+   "data": {
+    "slug": "19368",
+    "language": "en-us",
+    "req_id": "19368",
+    "title": "BLE Senior Software Engineer/Developer",
+    "description": "<p>Description [redacted for the fixture]</p>",
+    "responsibilities": "<p>Responsibilities [redacted for the fixture]</p>",
+    "qualifications": "<p>Qualifications [redacted for the fixture]</p>",
+    "location_name": "Cochrane",
+    "city": "Cochrane",
+    "state": "Alberta",
+    "country": "Canada",
+    "country_code": "CA",
+    "postal_code": "T4C 2N1",
+    "full_location": "Cochrane, Canada",
+    "short_location": "Cochrane, Canada",
+    "multipleLocations": false,
+    "categories": [
+     {
+      "name": "Engineering"
+     }
+    ],
+    "category": [
+     " Engineering"
+    ],
+    "hiring_organization": "Garmin International, Inc.",
+    "posted_date": "2026-07-22T17:05:00+0000",
+    "create_date": "2026-09-22T21:52:47+0000",
+    "update_date": "2026-09-23T16:30:39+0000",
+    "apply_url": "https://canada-garmin.icims.com/jobs/19368/login",
+    "ats_code": "icims",
+    "tags1": [
+     "Software Engineering"
+    ],
+    "meta_data": {
+     "canonical_url": "https://careers.garmin.com/jobs/19368?lang=en-us",
+     "client_code": "garmin"
+    }
+   }
+  },
+  {
+   "data": {
+    "slug": "18573",
+    "language": "en-us",
+    "req_id": "18573",
+    "title": "Senior Aircraft Systems Engineer",
+    "description": "<p>Description [redacted for the fixture]</p>",
+    "responsibilities": "<p>Responsibilities [redacted for the fixture]</p>",
+    "qualifications": "<p>Qualifications [redacted for the fixture]</p>",
+    "location_name": "Salem",
+    "city": "Salem",
+    "state": "Oregon",
+    "country": "United States",
+    "country_code": "US",
+    "postal_code": "97302",
+    "full_location": "Salem, Oregon",
+    "short_location": "Salem, Oregon",
+    "multipleLocations": false,
+    "categories": [
+     {
+      "name": "Engineering"
+     }
+    ],
+    "category": [
+     " Engineering"
+    ],
+    "hiring_organization": "Garmin International, Inc.",
+    "posted_date": "2026-04-30T23:18:00+0000",
+    "create_date": "2026-04-30T23:18:54+0000",
+    "update_date": "2026-06-26T15:40:15+0000",
+    "apply_url": "https://careers-garmin.icims.com/jobs/18573/login",
+    "ats_code": "icims",
+    "tags1": [
+     "Aviation Operations & Aircraft Certification"
+    ],
+    "meta_data": {
+     "canonical_url": "https://careers.garmin.com/jobs/18573?lang=en-us",
+     "client_code": "garmin"
+    }
+   }
+  }
+ ],
+ "totalCount": 5,
+ "count": 5
+}

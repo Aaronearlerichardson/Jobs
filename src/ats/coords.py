@@ -1,0 +1,212 @@
+"""Board coordinates as the store's columns.
+
+`signatures.detect` reads an ATS and a handle off a URL or a page; the
+resolvers in src/discovery/ return the same pair plus a careers URL. Every
+path that then writes, probes or de-duplicates that board has to spell the
+handle out as store columns -- and because Workday's handle is a (tenant,
+pod, site) triple while most platforms have one slug, that spelling
+is a conditional. It was written out at seven call sites across
+three modules, each with its own small variation: one forgot the careers
+URL, one built the Workday branch without it, one only filled the columns
+it happened to need.
+
+One function now. Callers say what they resolved; this says what the
+store calls it.
+"""
+
+from __future__ import annotations
+
+from typing import Unpack, cast
+
+from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
+from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn, Slug
+from .board import BOARDS
+from .board.spec import Handle
+
+
+def _handle(ats: str | None) -> tuple[tuple[HandleColumn, ...], str]:
+    """(columns, sep) of `ats`'s handle (`spec.Handle`; default the slug)."""
+    board = BOARDS.get(ats) if ats else None
+    h = board.spec.handle if board else Handle()
+    return h.columns, h.sep
+
+
+def _multi(ats: str | None) -> bool:
+    """Whether `ats`'s handle is several parts stored in the `handle` column."""
+    board = BOARDS.get(ats) if ats else None
+    return bool(board and board.multi_column)
+
+
+def columns(ats: str | None, slug: Slug | list[str | int] = None,
+            careers_url: str | None = None, /, **extra: Unpack[CompanyIn]) -> CompanyIn:
+    """One board's coordinates as store company columns: a multi-part handle
+    (a tuple, or already `sep`-joined) goes in `handle`, joined by its spec's
+    `sep`; any other in `slug`.
+
+    Most platforms carry a single slug:
+
+    >>> columns("greenhouse", "acmebio")["slug"]
+    'acmebio'
+    >>> columns("greenhouse", "acmebio")["handle"] is None
+    True
+
+    Workday's handle is a (tenant, pod, site) triple, and it goes in
+    `handle` -- never in `slug`, which must stay NULL or the row carries two
+    contradictory identities:
+
+    >>> wd = columns("workday", ("acme", 5, "External"))
+    >>> wd["slug"] is None, wd["handle"]
+    (True, 'acme|5|External')
+    >>> columns("workday", "acme|5|External")["handle"]
+    'acme|5|External'
+
+    A self-hosted board has no handle at all; its identity is the URL
+    (core.store.board_key), and the same is true of a hosted PeopleAdmin
+    tenant:
+
+    >>> c = columns("custom", None, "https://jobs.ncsu.edu/")
+    >>> c["slug"] is None, c["careers_url"]
+    (True, 'https://jobs.ncsu.edu/')
+
+    `name` and any further keyword go straight through, so a caller
+    building an upsert row writes one dict rather than merging two:
+
+    >>> row = columns("lever", "acme", name="Acme", active=1, source="manual")
+    >>> row["name"], row["active"], row["source"]
+    ('Acme', 1, 'manual')
+    """
+    text, multi = slug_text(ats, slug), _multi(ats)
+    out: CompanyIn = {"ats": ats, "slug": None if multi else text,
+                      "handle": text if multi else None, "careers_url": careers_url}
+    out.update(extra)
+    return out
+
+
+def slug_text(ats: str | None, slug: Slug | list[str | int]) -> str | None:
+    """A detection's handle as one string: a multi-part handle (Workday's
+    (tenant, pod, site)) joined with its spec's `handle.sep`, the plain slug
+    for everything else, None for none.
+
+    >>> slug_text("workday", ("acme", 5, "External"))
+    'acme|5|External'
+    >>> slug_text("greenhouse", "acmebio"), slug_text("custom", None)
+    ('acmebio', None)
+    """
+    if isinstance(slug, (tuple, list)):
+        return _handle(ats)[1].join(map(str, slug))
+    return slug or None
+
+
+def board_slug(company: BoardCoords) -> str | tuple[str | int, ...]:
+    """The one string that names this board on its own host, independent of
+    which coordinate column carries it (a tuple for a hit with a multi-part
+    handle): a stored multi-part handle's first part (Workday's tenant), else
+    the first of its handle's columns, else the ordinary `slug`. '' for a
+    careers_url-keyed board (custom, successfactors, peopleadmin, wpjson,
+    CAPTURE_ATS) that has no slug.
+
+    >>> board_slug({"ats": "workday", "handle": "aah|5|Ext", "slug": None})
+    'aah'
+    >>> board_slug({"ats": "lever", "slug": "dominos"})
+    'dominos'
+    >>> board_slug({"ats": "custom", "slug": None, "handle": None,
+    ...             "careers_url": "https://x.org/careers"})
+    ''
+    """
+    ats = company.get("ats")
+    cols, sep = _handle(ats)
+    held = cols[0] != "careers_url" and company.get(cols[0])
+    if isinstance(held, str) and _multi(ats):
+        held = held.split(sep)[0]
+    return cast(str | tuple[str | int, ...], held or company.get("slug") or "")
+
+
+def slug_title(company: BoardCoords) -> str:
+    """A board's name from its `board_slug` alone, '' without one.
+
+    >>> slug_title({"ats": "lever", "slug": "acme-bio"})
+    'Acme Bio'
+    """
+    slug = board_slug(company)
+    return str(slug).replace("-", " ").title() if slug else ""
+
+
+def slug_named(company: CompanyRow) -> bool:
+    """True when a roster row is named after nothing but its own board
+    slug/tenant AND was named from that slug in the first place -- the one
+    rule behind the HARVEST SUMMARY's "still named after their own
+    slug/tenant" tally (src.crawl.harvest.run) and the op that repairs
+    those rows (src.ops.repair.rename_slug_boards).
+
+    >>> slug_named({"name": "Aah", "ats": "workday", "handle": "aah|5|Ext",
+    ...             "source": "ats_dork"})
+    True
+    >>> slug_named({"name": "Precision for Medicine", "ats": "greenhouse",
+    ...             "slug": "pfm", "source": "ats_dork"})
+    False
+
+    Both halves are load-bearing. `name_is_own_slug` alone also matches a
+    company legitimately named after a single word that happens to equal
+    its slug, so a row a human (or local_sourcing) named for real is not
+    a candidate:
+
+    >>> slug_named({"name": "Ceribell", "ats": "greenhouse",
+    ...             "slug": "ceribell", "source": "local_sourcing"})
+    False
+
+    Notes:
+        On 2026-09-17 name_is_own_slug alone matched 321 of 579
+        harvestable rows, most of them correctly named; restricted to the
+        rows src.discovery.dork titled from the slug itself
+        (names.SLUG_NAME_SOURCE) it matched 183, which is the list worth
+        renaming. See names.name_is_own_slug for what the name half can
+        and cannot tell.
+    """
+    return (company.get("source") == SLUG_NAME_SOURCE
+            and name_is_own_slug(company.get("name"), str(board_slug(company))))
+
+
+def from_hit(hit: BoardCoords, **extra: Unpack[CompanyIn]) -> CompanyIn:
+    """The same, from a resolver's hit dict ({ats, slug, careers_url, ...}).
+
+    >>> hit = {"ats": "workday", "slug": ("acme", 5, "Ext"),
+    ...        "careers_url": "https://acme.com/careers", "nc": 3}
+    >>> row = from_hit(hit, name="Acme")
+    >>> row["name"], row["handle"], row["careers_url"]
+    ('Acme', 'acme|5|Ext', 'https://acme.com/careers')
+
+    Only the coordinates are read; the rest of the hit (counts, provenance)
+    is the caller's to carry, so nothing leaks into the row by accident:
+
+    >>> "nc" in row
+    False
+    """
+    return columns(hit["ats"], hit.get("slug"), hit.get("careers_url"), **extra)
+
+
+def board_context(board: BoardCoords) -> str:
+    """A board's address, worded for the mission scorer to read when no
+    posting could be sampled from it (the caller prefers real titles).
+    `board` is a resolver hit or a store row. '' when it has no address at
+    all.
+
+    The address is often the one fact that names the employer: a display
+    name like "Studycast" says nothing, `ats.rippling.com/core-sound-imaging`
+    says Core Sound Imaging.
+
+    >>> board_context({"ats": "rippling", "slug": "core-sound-imaging",
+    ...                "careers_url": "https://ats.rippling.com/core-sound-imaging/jobs"})
+    '(no open postings could be read) careers board: https://ats.rippling.com/core-sound-imaging/jobs'
+    >>> board_context({"ats": "bamboohr", "slug": "npi"})
+    '(no open postings could be read) careers board: bamboohr "npi"'
+    >>> board_context({"ats": "workday", "slug": ("aah", 5, "Ext")})
+    '(no open postings could be read) careers board: workday "aah"'
+    >>> board_context({"ats": "custom"})
+    ''
+    """
+    slug = board_slug(board)
+    if isinstance(slug, tuple):        # a hit's Workday (tenant, pod, site)
+        slug = slug[0]
+    address = board.get("careers_url") or (
+        f'{board.get("ats")} "{slug}"' if slug else "")
+    return f"(no open postings could be read) careers board: {address}" if address else ""

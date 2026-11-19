@@ -1,60 +1,200 @@
 #!/usr/bin/env python3
 """Job crawler — daily refresh + maintenance CLI.
 
-    python run_scraper.py                        # crawl EVERY configured track
-    python run_scraper.py --track local_tech     # crawl one track
-    python run_scraper.py --track remote_neural --preview --no-fit
-    python run_scraper.py --sync-status          # maintenance (add --track)
+    python run_scraper.py                   # crawl EVERY configured track
+    python run_scraper.py --track local     # crawl one track
+    python run_scraper.py --track remote --preview --no-fit
+    python run_scraper.py --sync-status     # maintenance (add --track)
     python run_scraper.py --mark applied <job|url> --why "..."
+    python run_scraper.py --where           # where are my profile and data?
 
-Tracks come from profile.toml [tracks.*] (any id you define); legacy names
-("local-tech"/"remote-neural") match a track's jobs.track value. The old
-crawler.py forwards here, so scheduled tasks keep working.
+Tracks come from your profile's [tracks.*] tables — the ids are whatever you
+named them, and a track's jobs.track value works too.
+
+Most flags are the CLI spelling of an operation in src/dispatch/registry.py,
+the same table the web UI's buttons run from, so a flag and a button pass
+the same parameters to the same function. The few commands below that are
+not registry ops (watch, mark, pipeline, export/import) are store
+queries and edits with their own positional arguments.
 """
 
+from __future__ import annotations
+
 import argparse
+import sqlite3
+import io
 import sys
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
-import config
+from src import config, runstate
+from src.gil import relaunch_without_gil
+from src.config import RuntimeTrack
+from src.dispatch import registry
 
-try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
+if isinstance(sys.stdout, io.TextIOWrapper):  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
 
 
-def _resolve_track(name):
-    """A configured track by id (local_tech) or jobs.track value (local-tech)."""
+def _resolve_track(name: str) -> RuntimeTrack:
+    """A configured track by its id, or by its jobs.track value."""
     t = config.UI_TRACKS.get(name)
     if t:
         return t
     for t in config.UI_TRACKS.values():
-        if t["track"] == name:
+        if t.track == name:
             return t
     raise SystemExit(f"  [!] unknown track {name!r}; configured: "
                      f"{', '.join(config.UI_TRACKS)}")
 
 
-def main(argv=None):
+def _op(name: str, params: Callable[[argparse.Namespace], dict[str, Any]]
+        ) -> Callable[[argparse.Namespace, RuntimeTrack | None], None]:
+    """A command handler that runs registry op `name` with the params
+    `params(args)` draws off the parsed arguments, against the --track
+    selection (None = the op's own default-track rule): the process's one
+    run (src/runstate.py)."""
+    def run(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
+        runstate.run(registry.invoke(name, params(args), track=t))
+    return run
+
+
+def _store(t: RuntimeTrack | None) -> sqlite3.Connection:
+    from src import store
+    return store.connect(t.db_path if t else None)
+
+
+def _cmd_watch(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
+    from src import store
+    name = args.watch or args.unwatch
+    conn = _store(t)
+    cid = store.company_id_by_name(conn, name)
+    if cid is not None:
+        store.set_watch(conn, cid, bool(args.watch))
+    conn.close()
+    if cid is None:
+        print(f"  [!] no company named {name!r} in the store "
+              f"(names are matched case-insensitively but exactly).")
+    else:
+        verb = "watching" if args.watch else "unwatched"
+        print(f"  {verb} {name}")
+
+
+def _cmd_mark(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
+    from src import store
+    disp, ref = args.mark
+    conn = _store(t)
+    row, err = store.set_disposition(conn, ref, disp, note=args.why, reason=args.reason)
+    conn.close()
+    if err:
+        print(f"  [!] {err}")
+        raise SystemExit(1)
+    act = ("cleared" if disp.strip().lower() in ("none", "clear")
+           else f"marked {disp.strip().lower()}")
+    print(f"  {act}: {row['title']} @ {row['company_name']}")
+    print(f"    {row['job_id']}")
+    if args.why:
+        print(f"    why: {args.why}")
+
+
+def _cmd_pipeline(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
+    from src import store
+    conn = _store(t)
+    rows = store.get_pipeline(conn)
+    conn.close()
+    if not rows:
+        print("  pipeline empty - record decisions with: "
+              "python run_scraper.py --mark applied <job_id|url>")
+    for p in rows:
+        state = "CLOSED" if p.get("status") == "closed" else "open"
+        note = f"  - {p['disposition_note']}" if p.get("disposition_note") else ""
+        print(f"  {p['disposition']:<12} {(p.get('disposition_at') or '')[:10]}"
+              f"  [{state:<6}] {(p['title'] or '')[:44]} @ "
+              f"{p['company_name']}{note}")
+
+
+def _cmd_companies_io(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
+    from pydantic import ValidationError
+    from src import store
+    from src.validation import error_lines
+    conn = _store(t)
+    try:
+        if args.export_companies:
+            n = store.export_companies(conn, args.export_companies)
+            print(f"  exported {n} compan(ies) -> {args.export_companies}")
+        if args.import_companies:
+            n = store.import_companies(conn, args.import_companies)
+            print(f"  imported/refreshed {n} compan(ies) from {args.import_companies}")
+    except ValidationError as e:
+        print(f"  [!] {args.import_companies}: nothing imported")
+        for line in error_lines(e):
+            print(f"    {line}")
+        raise SystemExit(1) from None
+    finally:
+        conn.close()
+
+
+# One-shot commands, in precedence order: the first whose flag is set runs
+# and the process exits. `dest` is the argparse attribute that selects it.
+_COMMANDS = [
+    ("dedup", _op("dedup", lambda a: {})),
+    ("watch", _cmd_watch),
+    ("unwatch", _cmd_watch),
+    ("mark", _cmd_mark),
+    ("pipeline", _cmd_pipeline),
+    ("prune", _op("prune", lambda a: {"offmission": a.prune_offmission})),
+    ("export_companies", _cmd_companies_io),
+    ("import_companies", _cmd_companies_io),
+    ("nlx", _op("nlx", lambda a: {"companies": a.nlx})),
+    ("reresolve_misses", _op("reresolve", lambda a: {
+        "limit": a.reresolve_misses, "workers": a.workers, "days": a.miss_days,
+        "families": a.reresolve_families, "preview": a.preview})),
+    ("verify_top", _op("verify", lambda a: {
+        "top": a.verify_top, "workers": a.workers, "force": a.verify_all})),
+    ("sync_status", _op("sync", lambda a: {"top": a.top})),
+    ("check_closed", _op("check-closed", lambda a: {
+        "limit": a.limit, "stale_days": a.stale_days})),
+    ("backfill_board_descriptions", _op("backfill-descriptions", lambda a: {
+        "workers": a.workers, "limit": a.limit})),
+    ("triage", _op("triage", lambda a: {
+        "limit": a.limit, "workers": a.workers, "score_cap": a.score_cap,
+        "requeue": a.requeue, "requeue_apply": a.requeue_apply})),
+    ("rescore", _op("rescore", lambda a: {
+        "workers": a.workers, "described_only": a.described_only})),
+    ("rekey_jobs", _op("rekey-jobs", lambda a: {
+        "ats": a.rekey_jobs, "apply": a.rekey_apply})),
+    *((dest, _op(dest.replace("_", "-"), lambda a: {"apply": a.restamp_apply,
+                                                    "undo": a.restamp_undo}))
+      for dest in ("restamp_geo", "restamp_tiers", "link_employers")),
+]
+
+
+def _selected(args: argparse.Namespace, dest: str) -> bool:
+    """True when the flag behind `dest` was given: store_true flags are
+    True, valued flags are non-None (an explicit 0 still counts)."""
+    v = getattr(args, dest)
+    return v is not None and v is not False
+
+
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         description="Job crawler — daily refresh + maintenance",
         epilog="No flags = crawl every configured track (the daily refresh).")
     # ── crawl scope ─────────────────────────────────────────────────────
     ap.add_argument("--track", metavar="ID",
-                    help="Operate on ONE configured track (profile.toml "
-                         "[tracks.*] id, or its jobs.track value)")
+                    help="Operate on ONE configured track (a [tracks.*] id "
+                         "from your profile, or its jobs.track value)")
     ap.add_argument("--preview", action="store_true",
-                    help="Crawl without DB writes or email")
+                    help="Crawl (or --reresolve-misses) without DB "
+                         "writes or email")
     ap.add_argument("--no-fit", action="store_true",
                     help="Crawl without resume-fit scoring (no Claude spend)")
     ap.add_argument("--send", action="store_true",
                     help="Email the digest even if the track config says not to")
-    ap.add_argument("--no-websearch", action="store_true",
-                    help="Skip the web-search sources this run")
-    ap.add_argument("--confirm-cost", action="store_true",
-                    help="Allow scoring past the track's cost_guard threshold")
-    ap.add_argument("--samples", type=int, default=5,
-                    help="Sample matches printed for sweep tracks (default 5)")
+    ap.add_argument("--refresh", action="store_true",
+                    help="Crawl: pull every board, not only the ones not "
+                         "pulled in the last few hours")
     ap.add_argument("--top", type=int, default=15, help="Top-N for digests")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--no-verify", action="store_true",
@@ -65,22 +205,81 @@ def main(argv=None):
     ap.add_argument("--verify-top", type=int, nargs="?", const=15,
                     default=None, metavar="N",
                     help="Deep-verify the current top N stored jobs, no crawl")
+    ap.add_argument("--verify-all", action="store_true",
+                    help="With --verify-top: re-verify rows the current "
+                         "verify model already checked")
     ap.add_argument("--check-closed", action="store_true",
                     help="Probe stale job URLs and close the provably dead")
     ap.add_argument("--stale-days", type=int, default=2)
+    ap.add_argument("--triage", action="store_true",
+                    help="Gate, hydrate and score the harvester's pending "
+                         "rows (src/crawl/triage.py); --limit caps rows, "
+                         "--score-cap caps fit calls")
+    ap.add_argument("--score-cap", type=int, default=None, metavar="N",
+                    help="With --triage: Claude fit calls this pass")
+    ap.add_argument("--requeue", action="store_true",
+                    help="With --triage: report rows an earlier rule "
+                         "mis-judged (an unresolved Workday geo drop, or a "
+                         "surfaced row whose location is not actually "
+                         "local/remote -- src.crawl.triage.requeue_reasons) "
+                         "instead of the normal gate pass. Report-only "
+                         "unless --requeue-apply is also given")
+    ap.add_argument("--requeue-apply", action="store_true",
+                    help="With --triage --requeue: reset the reported "
+                         "rows' track/triage/fit columns so the NEXT plain "
+                         "--triage pass re-judges them; without this flag "
+                         "--requeue only reports and changes nothing")
     ap.add_argument("--rescore", action="store_true",
                     help="Re-score every stored job with the current rubric")
     ap.add_argument("--described-only", action="store_true",
                     help="With --rescore: only rows with a real JD body")
-    ap.add_argument("--backfill-descriptions", action="store_true",
-                    help="Fetch missing Workday JD text (CXS endpoint)")
     ap.add_argument("--backfill-board-descriptions", action="store_true",
                     help="Fetch missing JD text via each company's own board")
-    ap.add_argument("--backfill-axes", action="store_true",
-                    help="Populate per-axis fit columns from fit_reason (offline)")
+    ap.add_argument("--rekey-jobs", metavar="ATS",
+                    help="Report the stored jobs under ATS companies whose id "
+                         "the board spec now spells differently; writes "
+                         "only with --rekey-apply")
+    ap.add_argument("--rekey-apply", action="store_true",
+                    help="With --rekey-jobs: re-key (or merge) the rows")
+    ap.add_argument("--restamp-geo", action="store_true",
+                    help="Report the open jobs whose stored geo_mode the "
+                         "current rule would change; writes only with "
+                         "--restamp-apply")
+    ap.add_argument("--restamp-tiers", action="store_true",
+                    help="Report the companies whose mission_tier is not the "
+                         "tier their mission_score falls in; writes only with "
+                         "--restamp-apply")
+    ap.add_argument("--link-employers", action="store_true",
+                    help="Report the companies that are boards of one employer "
+                         "(shared postings) and would share an employer_id, "
+                         "so the ranking shows a posting once; writes "
+                         "only with --restamp-apply")
+    ap.add_argument("--restamp-apply", action="store_true",
+                    help="With --restamp-geo/--restamp-tiers/--link-employers: save the old "
+                         "stamps to db_backups, then rewrite them")
+    ap.add_argument("--restamp-undo", metavar="FILE", default="",
+                    help="With --restamp-geo/--restamp-tiers/--link-employers: restore the "
+                         "stamps in a restamp backup file (--restamp-apply "
+                         "to write)")
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap rows processed (backfills / probes)")
     # ── roster / dispositions / store ───────────────────────────────────
+    ap.add_argument("--reresolve-misses", type=int, nargs="?", const=50,
+                    metavar="N",
+                    help="Retry the N oldest roster rows that never resolved "
+                         "to a board (miss_reason no-board-found/board-dead); "
+                         "hits are queued for review, not activated. "
+                         "--miss-days D retries only misses at least D days "
+                         "old")
+    ap.add_argument("--miss-days", type=int, default=None, metavar="D",
+                    help="With --reresolve-misses: skip misses newer than D "
+                         "days")
+    ap.add_argument("--reresolve-families", metavar="FAM[,FAM]",
+                    help="With --reresolve-misses: which families to retry "
+                         "(default no-board-found,board-dead; also fetch-error, "
+                         "ats-unsupported; silent-board "
+                         "= harvested boards that listed nothing in 7+ "
+                         "days)")
     ap.add_argument("--dedup", action="store_true",
                     help="Merge duplicate company rows pointing at one board")
     ap.add_argument("--watch", metavar="COMPANY",
@@ -91,6 +290,11 @@ def main(argv=None):
                          "+ job_id/fragment/URL. Pair with --why.")
     ap.add_argument("--why", metavar="TEXT",
                     help="With --mark: one-line reason (teaches the scorer)")
+    ap.add_argument("--reason", metavar="CODE", default=None,
+                    help="With --mark dismissed: closed|sibling|location|"
+                         "function|seniority|other. closed and sibling are "
+                         "not fit signals and never reach the scorer; closed "
+                         "also closes the row")
     ap.add_argument("--pipeline", action="store_true",
                     help="Print every dispositioned job, then exit")
     ap.add_argument("--prune", action="store_true",
@@ -102,195 +306,48 @@ def main(argv=None):
                     help="Ingest NLx feed postings for comma-separated employers")
     ap.add_argument("--db", metavar="PATH",
                     help="Override the store DB path (isolates concurrent runs)")
-    # ── keyword tools ───────────────────────────────────────────────────
-    ap.add_argument("--expand", metavar="TERM",
-                    help="Expand a term into titles/keywords/sectors and exit")
-    ap.add_argument("--expand-location", metavar="TERM")
-    ap.add_argument("--keyword-report", action="store_true",
-                    help="Bulk-expand every configured keyword into a report")
-    ap.add_argument("--score", metavar="TEXT",
-                    help="Score one title/description on technical bar (0..1)")
+    ap.add_argument("--where", action="store_true",
+                    help="Print where this install keeps your profile and "
+                         "data, then exit")
     args = ap.parse_args(argv)
+
+    from src import session_log
+    session_log.start(list(argv) if argv is not None else sys.argv[1:])
+
+    from src.config import bootstrap
+    bootstrap.ensure_profile()
+    if args.where:
+        for line in bootstrap.status_lines():
+            print(f"  {line}")
+        return
 
     t = _resolve_track(args.track) if args.track else None
     if args.db:
-        from pathlib import Path
         config.STORE_DB_PATH = Path(args.db)
         if t is not None:
-            t = dict(t, db_path=Path(args.db))
+            t = t.model_copy(update={"db_path": Path(args.db)})
 
-    # ── one-shot store / roster commands ────────────────────────────────
-    if args.dedup:
-        from core import store
-        conn = store.connect(t["db_path"] if t else None)
-        n = store.dedup_companies(conn)
-        conn.close()
-        print(f"\n  merged {n} duplicate company row(s) into their canonical board.")
-        return
+    try:
+        # ── one-shot store / roster / maintenance commands ──────────────
+        for dest, handler in _COMMANDS:
+            if _selected(args, dest):
+                handler(args, t)
+                return
 
-    if args.watch or args.unwatch:
-        from core import store
-        name = args.watch or args.unwatch
-        conn = store.connect(t["db_path"] if t else None)
-        tags = store.set_company_tag(conn, name, "watch", add=bool(args.watch))
-        conn.close()
-        if tags is None:
-            print(f"  [!] no company named {name!r} in the store "
-                  f"(names are matched case-insensitively but exactly).")
-        else:
-            verb = "watching" if args.watch else "unwatched"
-            print(f"  {verb} {name}  (tags: {tags or 'none'})")
-        return
+        # ── the crawl (daily refresh): one track, or every configured track
+        params = {"no_fit": args.no_fit, "preview": args.preview,
+                  "send": args.send, "no_verify": args.no_verify,
+                  "refresh": args.refresh, "workers": args.workers,
+                  "top": args.top}
 
-    if args.mark:
-        from core import store
-        disp, ref = args.mark
-        conn = store.connect(t["db_path"] if t else None)
-        row, err = store.set_disposition(conn, ref, disp, note=args.why)
-        conn.close()
-        if err:
-            print(f"  [!] {err}")
-            raise SystemExit(1)
-        act = ("cleared" if disp.strip().lower() in ("none", "clear")
-               else f"marked {disp.strip().lower()}")
-        print(f"  {act}: {row['title']} @ {row['company_name']}")
-        print(f"    {row['job_id']}")
-        if args.why:
-            print(f"    why: {args.why}")
-        return
-
-    if args.pipeline:
-        from core import store
-        conn = store.connect(t["db_path"] if t else None)
-        rows = store.get_pipeline(conn)
-        conn.close()
-        if not rows:
-            print("  pipeline empty - record decisions with: "
-                  "python run_scraper.py --mark applied <job_id|url>")
-        for p in rows:
-            state = "CLOSED" if p.get("status") == "closed" else "open"
-            note = f"  - {p['disposition_note']}" if p.get("disposition_note") else ""
-            print(f"  {p['disposition']:<12} {(p.get('disposition_at') or '')[:10]}"
-                  f"  [{state:<6}] {(p['title'] or '')[:44]} @ "
-                  f"{p['company_name']}{note}")
-        return
-
-    if args.prune:
-        from core import store
-        conn = store.connect(t["db_path"] if t else None)
-        n_dead, n_off = store.prune_dead_boards(
-            conn, deactivate_offmission=args.prune_offmission)
-        conn.close()
-        print(f"\n  deactivated {n_dead} dead-board compan(ies)"
-              + (f" + {n_off} off-mission" if args.prune_offmission else "")
-              + ".")
-        return
-
-    if args.export_companies or args.import_companies:
-        from core import store
-        conn = store.connect(t["db_path"] if t else None)
-        if args.export_companies:
-            n = store.export_companies(conn, args.export_companies)
-            print(f"  exported {n} compan(ies) -> {args.export_companies}")
-        if args.import_companies:
-            n = store.import_companies(conn, args.import_companies)
-            print(f"  imported/refreshed {n} compan(ies) from {args.import_companies}")
-        conn.close()
-        return
-
-    if args.score:
-        from core.claude import score_technical_bar
-        score, reason, mission = score_technical_bar(args.score)
-        if score is None:
-            print("  [!] Scorer unavailable (set ANTHROPIC_API_KEY).")
-        else:
-            print(f"  technical-bar score: {score:.2f}  [{mission or 'mission?'}]  ({reason})")
-        return
-
-    if args.nlx:
-        from scrapers.fetchers.careeronestop import fetch_nlx_company
-        from scrapers.ops import ingest_external_jobs
-        total = 0
-        for name in [n.strip() for n in args.nlx.split(",") if n.strip()]:
-            jobs = fetch_nlx_company(name)
-            print(f"  {name}: {len(jobs)} NLx posting(s)")
-            if jobs:
-                total += ingest_external_jobs(jobs, source="nlx", t=t)
-        print(f"\n  {total} new job(s) ingested from the NLx feed.")
-        return
-
-    # ── keyword expansion tools ─────────────────────────────────────────
-    if args.expand:
-        from core.claude import expand_search
-        from core.expand import print_expansion
-        expanded = expand_search(args.expand)
-        if expanded:
-            print_expansion(args.expand, expanded)
-        return
-
-    if args.expand_location:
-        from core.claude import expand_location
-        from core.expand import print_location_expansion
-        expanded = expand_location(args.expand_location)
-        if expanded:
-            print_location_expansion(args.expand_location, expanded)
-        return
-
-    if args.keyword_report:
-        from core.expand import generate_keyword_report
-        generate_keyword_report()
-        return
-
-    # ── maintenance ─────────────────────────────────────────────────────
-    if args.verify_top is not None:
-        from scrapers.ops import verify_top_cli
-        verify_top_cli(top_n=args.verify_top, max_workers=args.workers, t=t)
-        return
-    if args.sync_status:
-        from scrapers.ops import sync_status_all
-        sync_status_all(top_n=args.top, t=t)
-        return
-    if args.check_closed:
-        from scrapers.ops import check_closed_jobs
-        check_closed_jobs(max_workers=args.workers, limit=args.limit,
-                          stale_days=args.stale_days, t=t)
-        return
-    if args.backfill_descriptions:
-        from scrapers.fetchers.workday import backfill_workday_descriptions
-        backfill_workday_descriptions(max_workers=args.workers,
-                                      limit=args.limit)
-        return
-    if args.backfill_board_descriptions:
-        from scrapers.ops import backfill_board_descriptions
-        backfill_board_descriptions(max_workers=args.workers,
-                                    limit=args.limit, t=t)
-        return
-    if args.backfill_axes:
-        from core import store
-        conn = store.connect(t["db_path"] if t else None)
-        store.backfill_axis_columns(conn)
-        conn.close()
-        return
-    if args.rescore:
-        from scrapers.ops import rescore_all
-        rescore_all(max_workers=args.workers,
-                    described_only=args.described_only, t=t)
-        return
-
-    # ── the crawl (daily refresh): one track, or every configured track ──
-    from scrapers import runner
-    tracks = [t] if t else list(config.UI_TRACKS.values())
-    for tcfg in tracks:
-        runner.run_track(tcfg,
-                         fit=not args.no_fit,
-                         commit=not args.preview,
-                         send=args.send or None,
-                         verify=False if args.no_verify else None,
-                         websearch=False if args.no_websearch else None,
-                         confirm_cost=args.confirm_cost,
-                         max_workers=args.workers, top_n=args.top,
-                         samples=args.samples)
+        async def crawl() -> None:
+            for tcfg in ([t] if t else list(config.UI_TRACKS.values())):
+                await registry.invoke("crawl", params, track=tcfg)
+        runstate.run(crawl())
+    except registry.ParamError as e:
+        ap.error(str(e))
 
 
 if __name__ == "__main__":
+    relaunch_without_gil()
     main()

@@ -1,0 +1,60 @@
+<!-- One posting page on a hosted board (jobs.polymer.co kind). The page
+     carries a schema.org JobPosting block whose hiringOrganization names the
+     employer's OWN site (sameAs / url) -- the hint capture.py uses to file
+     the job under the roster row for that domain even though the page host
+     is the board vendor's. Trimmed from a live posting (2026-09-02); the
+     tenant, title and description are renamed / shortened. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Microfabrication Cleanroom Manager at Acme Neuro</title>
+<link rel="canonical" href="https://jobs.polymer.co/acmeneuro/40863">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org/",
+  "@type": "JobPosting",
+  "title": "Microfabrication Cleanroom Manager ",
+  "description": "<h3><strong>Summary</strong></h3><p>Acme Neuro is building infrastructure for implantable brain-machine interfaces. You will own the cleanroom.</p>",
+  "datePosted": "2026-08-19",
+  "employmentType": "FULL_TIME",
+  "hiringOrganization": {
+    "@type": "Organization",
+    "name": "Acme Neuro",
+    "sameAs": "https://acmeneuro.com/",
+    "url": "https://acmeneuro.com/",
+    "logo": "https://cdn.example.invalid/logo.jpeg"
+  },
+  "url": "https://jobs.polymer.co/acmeneuro/40863",
+  "directApply": true,
+  "jobLocation": {
+    "@type": "Place",
+    "address": {
+      "@type": "PostalAddress",
+      "addressLocality": "Cambridge",
+      "addressRegion": "MA",
+      "addressCountry": "US"
+    }
+  },
+  "baseSalary": {
+    "@type": "MonetaryAmount",
+    "value": {"@type": "QuantitativeValue", "unitText": "YEAR",
+              "minValue": "100000.0", "maxValue": "120000.0"},
+    "currency": "USD"
+  }
+}
+</script>
+</head>
+<body>
+<header class="job-header">
+<a class="job-header__company" href="https://jobs.polymer.co/acmeneuro">Acme Neuro</a>
+<a href="https://jobs.polymer.co/acmeneuro">View jobs</a>
+</header>
+<main class="job-post">
+<h1 class="job-post__title">Microfabrication Cleanroom Manager</h1>
+<div class="job-post__traits">Full-time &middot; Cambridge, MA</div>
+<div class="job-post__body"><h3>Summary</h3><p>Acme Neuro is building infrastructure for implantable brain-machine interfaces. You will own the cleanroom.</p></div>
+<a class="job-post__apply" href="https://jobs.polymer.co/acmeneuro/40863/apply">Apply</a>
+</main>
+</body>
+</html>

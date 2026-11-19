@@ -1,4 +1,4 @@
-"""profile.toml editing (core/profile_edit.py) — validation, comment-
+"""profile.toml editing (src/config/profile_edit.py) — validation, comment-
 preserving updates, and the backup-then-atomic-write the Settings tab
 relies on. Writes are redirected to tmp_path; the real profile is never
 touched."""
@@ -7,7 +7,7 @@ import tomllib
 
 import pytest
 
-from core import profile_edit
+from src.config import profile_edit
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def raw():
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch, raw):
     """A throwaway copy of the profile that write tests may clobber."""
-    import config
+    from src import config
     target = tmp_path / "profile.toml"
     target.write_text(raw, encoding="utf-8")
     monkeypatch.setattr(config, "PROFILE_PATH", target)
@@ -37,35 +37,28 @@ class TestRead:
 
 
 class TestValidate:
+    """The Settings tab's validator is the loader's schema; the rules
+    themselves are pinned by src/config/profile_schema.problems' doctest."""
+
     def test_rejects_bad_toml(self):
         errs = profile_edit.validate("not [valid")
         assert any("syntax" in e for e in errs)
 
-    def test_requires_core_sections(self):
-        errs = profile_edit.validate("x = 1")
-        assert any("keywords" in e for e in errs)
+    def test_rejects_unknown_sections(self):
+        assert profile_edit.validate("x = 1") == ["x: unknown key"]
 
-    def test_rejects_out_of_range_weight(self):
+    def test_messages_name_every_bad_path(self):
         errs = profile_edit.validate(
-            "[keywords]\n[locations]\n[locality]\n[fit]\nweights = {domain = 1.5}")
-        assert any("0..1" in e for e in errs)
-
-    def test_rejects_non_string_keyword_list(self):
-        errs = profile_edit.validate(
-            "[locations]\n[locality]\n[keywords]\ncore = [1, 2]")
-        assert any("list of strings" in e for e in errs)
+            '[tracks.x]\ndb = ""\n[fit]\nweights = {domain = 1.5}')
+        assert [e.split(":")[0] for e in errs] == ["tracks.x.db",
+                                                  "fit.weights.domain"]
 
     def test_allows_arrays_of_tables(self):
-        # discovery.priority_companies is [{name=..,ats=..,slug=..}, ...]
+        # discovery.seed_companies is [{name=.., notes=..}, ...]
         errs = profile_edit.validate(
-            '[keywords]\n[locations]\n[locality]\n[discovery]\n'
-            'priority_companies = [{name="A", ats="greenhouse", slug="a"}]')
+            '[discovery]\n'
+            'seed_companies = [{name="A", notes="n"}]')
         assert errs == []
-
-    def test_requires_a_track_db(self):
-        errs = profile_edit.validate(
-            '[keywords]\n[locations]\n[locality]\n[tracks.x]\ndb = ""')
-        assert any("db" in e for e in errs)
 
 
 class TestApplyUpdates:

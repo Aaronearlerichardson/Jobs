@@ -1,0 +1,54 @@
+{
+  "filterGroups": {
+    "departments": [
+      {"serverId": "1", "value": "1023-Clin Ops - R&D"},
+      {"serverId": "2", "value": "1024-Regulatory Affairs - R&D"}
+    ],
+    "sites": [{"serverId": "1", "value": "USA"}],
+    "jobTypes": [{"serverId": "Permanent", "value": "Regular Full Time"}],
+    "workspaceTypes": [
+      {"serverId": "hybrid", "value": "Hybrid"},
+      {"serverId": "remote", "value": "Remote"}
+    ]
+  },
+  "jobAdDetails": [
+    {
+      "id": "05ee8195-b8d4-4590-a36e-5187cd4974b2",
+      "title": "Senior Clinical Trial Associate",
+      "departmentId": "1",
+      "department": "1023-Clin Ops - R&D",
+      "employmentTypeId": "Permanent",
+      "employmentType": "Regular Full Time",
+      "siteId": 1,
+      "site": "USA",
+      "country": "United States",
+      "language": "en",
+      "description": "<p>Job description redacted for testing.</p>",
+      "requirements": "<p>Requirements redacted.</p>",
+      "responsibilities": "",
+      "benefits": "",
+      "publishedAt": "2026-07-17T00:00:00Z",
+      "workspaceTypeId": "hybrid",
+      "workspaceType": "Hybrid"
+    },
+    {
+      "id": "b501c19b-6400-4a12-8298-b93dab3b537c",
+      "title": "Senior Director, Medical Writing",
+      "departmentId": "2",
+      "department": "1024-Regulatory Affairs - R&D",
+      "employmentTypeId": "Permanent",
+      "employmentType": "Regular Full Time",
+      "siteId": 1,
+      "site": "USA",
+      "country": "United States",
+      "language": "en",
+      "description": "<p>Another redacted description.</p>",
+      "requirements": "",
+      "responsibilities": "",
+      "benefits": "",
+      "publishedAt": "2026-08-21T00:00:00Z",
+      "workspaceTypeId": "remote",
+      "workspaceType": "Remote"
+    }
+  ]
+}

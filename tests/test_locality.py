@@ -1,8 +1,10 @@
-"""Locality + geo classification (core/locality.py) — the single source of
+"""Locality + geo classification (src/match/locality.py) — the single source of
 truth for "is this job where I live?". Fixtures come from the active
 profile, so these pass for any configured region."""
 
-import core.locality as locality
+import pytest
+
+import src.match.locality as locality
 
 
 def test_configured_place_is_local(local_addr):
@@ -23,6 +25,15 @@ def test_short_tokens_need_word_boundaries(cfg):
 class TestGeoMode:
     def test_local_address_is_onsite(self, local_addr):
         assert locality.geo_mode(local_addr) == "onsite"
+        # geo_mode's lowered scan agrees with the re.I regex it stands in
+        # for, including text carrying a character re.I folds onto ASCII.
+        for term in locality._WB + locality._SUB + ["clinic", "anywhere"]:
+            folded = (term.replace("i", "\u0131").replace("s", "\u017f")
+                      .replace("k", "\u212a"))
+            for s in (term, f"at {term.upper()}.", f"x{term}x", folded,
+                      f"{term} \u0130"):
+                assert locality._names_place(s) == bool(
+                    locality._NC_TOKEN_RE.search(s)), s
 
     def test_remote_location_is_remote(self):
         assert locality.geo_mode("Remote - US") == "remote"
@@ -37,3 +48,140 @@ class TestGeoMode:
     def test_onsite_wins_over_remote_when_both(self, local_addr):
         # "Remote; Durham, NC" is LOCAL material, not a remote drop.
         assert locality.geo_mode(f"Remote; {local_addr}") == "onsite"
+
+
+@pytest.fixture(scope="module")
+def local_city(cfg):
+    """A configured locality substring that names a city rather than a
+    state, title-cased ('Durham', 'Oakland'). Skips if there is none."""
+    states = set(locality._ALL_US_STATES)
+    states |= {s.lower() for s in cfg.LOCALITY_STATE_SUFFIX}
+    city = next((s for s in cfg.LOCALITY_SUBSTRINGS
+                 if len(s) > 4 and s.lower() not in states), None)
+    if not city:
+        pytest.skip("profile configures no city-like locality substring")
+    return city.title()
+
+
+@pytest.fixture(scope="module")
+def other_state():
+    """(name, postal code) of a US state that is not the profile's own and
+    contains no locality token, e.g. ('Alabama', 'AL')."""
+    name = next(n for n in sorted(locality._OTHER_STATES)
+                if not locality._NC_TOKEN_RE.search(n))
+    return name.title(), locality._OTHER_STATES[name].upper()
+
+
+@pytest.fixture(scope="module")
+def same_name_elsewhere(local_city, other_state):
+    """The configured city's name in another US state ('Durham, Alabama'):
+    local by name only."""
+    return f"{local_city}, {other_state[0]}"
+
+
+@pytest.fixture(scope="module")
+def own(cfg):
+    """The profile's own two-letter state suffix, upper-cased ('NC')."""
+    abbr = next((s for s in cfg.LOCALITY_STATE_SUFFIX if len(s) == 2), None)
+    if not abbr:
+        pytest.skip("profile configures no two-letter state suffix")
+    return abbr.upper()
+
+
+class TestSegments:
+    """is_nc and NC_RE judge a location one ";"/"|" segment at a time."""
+
+    def test_city_named_in_another_state_is_not_local(
+            self, same_name_elsewhere, local_city, other_state):
+        assert not locality.is_nc(same_name_elsewhere)
+        assert not locality.is_nc(f"{local_city}, {other_state[1]}")
+        assert not locality.is_nc(f"US - {other_state[1]} - {local_city}")
+
+    def test_city_named_in_another_country_is_not_local(self, local_city):
+        assert not locality.is_nc(f"UK - County {local_city} - Barnard Castle")
+        assert not locality.is_nc(f"US, Blue Bell; Canada, {local_city}")
+
+    def test_a_province_or_state_code_in_address_position_is_not_local(
+            self, local_city, own):
+        # non_us_place is doctested; this is the end-to-end verdict.
+        for s in (f"{local_city}, ON", f"Analyst ({local_city}, ON)",
+                  f"{local_city}, Ontario", f"{local_city} VIC",
+                  f"{local_city} House, Cape Town"):
+            assert not locality.is_nc(s), s
+        assert locality.is_nc(f"{local_city}, {own} 27703; Remote, US")
+
+    def test_one_local_segment_keeps_the_row_local(self, local_city, own,
+                                                    other_state):
+        assert locality.is_nc(f"{local_city}, {own}; Springfield, {other_state[1]}")
+        assert locality.is_nc(f"Springfield, {other_state[1]} | {local_city}, {own}")
+
+    def test_naming_the_configured_state_wins_within_a_segment(
+            self, local_city, own, other_state):
+        assert locality.is_nc(f"{other_state[0]} County, {local_city}, {own}")
+
+    def test_a_bare_city_stays_local(self, local_city):
+        # Including the one false positive the rule cannot see: a
+        # same-named city elsewhere, written with no state at all.
+        assert locality.is_nc(local_city)
+        assert locality.is_nc(f"Medical Center {local_city} - 252 Main St")
+
+    def test_search_matches_inside_the_local_segment_only(
+            self, local_city, own, same_name_elsewhere):
+        m = locality.NC_RE.search(f"{same_name_elsewhere}; {local_city}, {own}")
+        assert m is not None and m.start() == len(same_name_elsewhere) + 2
+        assert locality.NC_RE.search(same_name_elsewhere) is None
+
+
+class TestSnippet:
+    """location_snippet keeps a place and its address tail, nothing more."""
+
+    def test_stops_at_a_glued_on_posting_date(self, local_city, own):
+        place = f"{local_city}, {own}, US, 27710"
+        text = f"{place} Aug 31, 2026 {local_city}, {own}"
+        assert locality.location_snippet(text) == place
+
+    def test_stops_where_prose_starts(self, local_city):
+        assert locality.location_snippet(
+            f"{local_city} is seeking two tenure-tr") == local_city
+        assert locality.location_snippet(
+            f"{local_city} School of Nursing is searching") == f"{local_city} School"
+
+
+class TestUsEligibilityVocabulary:
+    """[locations] us_markers and non_us_regions ADD to the built-in lists.
+
+    They replaced them until 2026-09-30, so a profile naming Canada alone
+    made Israeli and Emirati seats US-eligible again. The vocabulary is built
+    when `locality` is imported, so this reads it in a process started with
+    the profile.
+    """
+
+    @staticmethod
+    def ask(tmp_path, toml, *locations):
+        import os
+        import subprocess
+        import sys
+        profile = tmp_path / "profile.toml"
+        profile.write_text(toml, encoding="utf-8")
+        code = ("import sys; from src.match import locality as L; "
+                "print(*[L.us_eligible(x) for x in sys.argv[1:]])")
+        done = subprocess.run([sys.executable, "-c", code, *locations], capture_output=True, text=True,
+                              check=True, env={**os.environ, "JOBS_PROFILE": str(profile)})
+        return [word == "True" for word in done.stdout.split()]
+
+    def test_a_profiles_regions_join_the_built_in_ones(self, tmp_path):
+        toml = '[locations]\nnon_us_regions = ["Narnia", " Mordor "]\n'
+        assert self.ask(tmp_path, toml, "Israel, Yokneam", "UAE, Dubai", "Narnia, Cair Paravel",
+                        "Mordor", "Durham, NC", "Remote - US or Canada") == [
+            False, False, False, False, True, True]
+
+    def test_a_profiles_markers_join_the_built_in_ones(self, tmp_path):
+        toml = '[locations]\nus_markers = ["Gondor"]\n'
+        assert self.ask(tmp_path, toml, "Gondor or Canada", "Canada, Remote", "Worldwide or Europe",
+                        "Europe") == [True, False, True, False]
+
+    def test_what_the_loaded_profile_names_is_in_the_vocabulary(self):
+        from src import config
+        assert set(config.NON_US_PLACES["regions"]) <= set(locality._NON_US_REGIONS)
+        assert {t.strip().lower() for t in config.REMOTE_NON_US_REGIONS} <= set(locality._NON_US_REGIONS)
+        assert {t.strip().lower() for t in config.REMOTE_US_MARKERS} <= set(locality._US_MARKERS)

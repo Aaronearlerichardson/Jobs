@@ -1,0 +1,69 @@
+<!-- A company's own WordPress careers page whose job table is rendered in
+     the browser by a theme script that proxies the company's Workday tenant
+     (a plain fetch gets an empty <div id="workday-job-list">). Saved from a
+     browser the table is in the DOM: one <tr> per posting, three cells that
+     each link the same Workday job URL (title / type / location).
+     Reconstructed from that theme script's own row template (read from the
+     live site, 2026-09-02); the company and postings are invented. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Open Positions | Acme Diagnostics</title>
+<link rel="canonical" href="https://www.acmedx.com/careers/jobs/">
+</head>
+<body>
+<nav><a href="https://www.acmedx.com/careers/">Careers</a> <a href="https://www.acmedx.com/about/">About</a></nav>
+<div id="workday-job-search">
+<form class="srSearchForm"><input id="filter-by" class="srSearchInput" placeholder="Filter by title, expertise"></form>
+<div class="pt-4"><p>Not seeing the right fit today?</p>
+<a class="link--text" href="https://crm.example.invalid/community/signup/abc" rel="nofollow">Join Our Talent Community</a></div>
+</div>
+<div id="workday-job-list" class="px-lg-0">
+<table class="srJobListTable">
+<thead>
+<tr class="srJobListTitles">
+<th class="srJobListJobTitle"><nobr>Job Title</nobr></th>
+<th class="srJobListTypeOfEmployment"><nobr>Type of Employment</nobr></th>
+<th class="srJobListLocation"><nobr>Location</nobr></th>
+</tr>
+</thead>
+<tbody>
+<tr class="srJobListJobOdd">
+<td class="srJobListJobTitle">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Research-Triangle-Park-NC/Senior-Data-Engineer_JR-12345" target="_blank" rel="noopener">Senior Data Engineer</a>
+</td>
+<td class="srJobListTypeOfEmployment">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Research-Triangle-Park-NC/Senior-Data-Engineer_JR-12345" target="_blank" rel="noopener nofollow">Full time</a>
+</td>
+<td class="srJobListLocation " title="Research Triangle Park, NC">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Research-Triangle-Park-NC/Senior-Data-Engineer_JR-12345" target="_blank" rel="noopener nofollow">Research Triangle Park, NC</a>
+</td>
+</tr>
+<tr class="srJobListJobEven">
+<td class="srJobListJobTitle">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Palo-Alto-CA/Bioinformatics-Scientist_JR-12346" target="_blank" rel="noopener">Bioinformatics Scientist</a>
+</td>
+<td class="srJobListTypeOfEmployment">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Palo-Alto-CA/Bioinformatics-Scientist_JR-12346" target="_blank" rel="noopener nofollow">Full time</a>
+</td>
+<td class="srJobListLocation " title="Palo Alto, CA, Research Triangle Park, NC">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Palo-Alto-CA/Bioinformatics-Scientist_JR-12346" target="_blank" rel="noopener nofollow">Palo Alto, CA &bull; Research Triangle Park, NC</a>
+</td>
+</tr>
+<tr class="srJobListJobOdd">
+<td class="srJobListJobTitle">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Remote-USA/Clinical-Data-Analyst_JR-12347" target="_blank" rel="noopener">Clinical Data Analyst</a>
+</td>
+<td class="srJobListTypeOfEmployment">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Remote-USA/Clinical-Data-Analyst_JR-12347" target="_blank" rel="noopener nofollow">Full time</a>
+</td>
+<td class="srJobListLocation srRemoteLocation" title="Remote USA">
+<a href="https://acmedx.wd5.myworkdayjobs.com/en-US/Acme_Careers/job/Remote-USA/Clinical-Data-Analyst_JR-12347" target="_blank" rel="noopener nofollow">Remote USA</a>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</body>
+</html>

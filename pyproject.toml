@@ -1,0 +1,6 @@
+# Not a package to build or install: this only declares the Python floor.
+# `type X = ...` aliases and `def f[T]` need 3.12; CI runs 3.12 to 3.14.
+[project]
+name = "jobs"
+version = "0"
+requires-python = ">=3.12"

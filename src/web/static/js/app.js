@@ -1,0 +1,1348 @@
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+const state = { jobs: [], pipeline: [], pipelineDue: [], conversion: [],
+                companies: [], pending: [], stats: {},
+                tracks: [], track: null, config: null, names: null,
+                expanded: null, logTotal: 0, cursorTask: "", runKey: "", queueSig: "",
+                inflight: new Set() };
+
+const currentTrack = () => state.tracks.find(t => t.id === state.track);
+
+/* ---------------- theme ---------------- */
+const themeBtn = $("#themebtn");
+function applyTheme(t) {
+  if (t) document.documentElement.setAttribute("data-theme", t);
+  else document.documentElement.removeAttribute("data-theme");
+}
+applyTheme(localStorage.getItem("theme") || "");
+themeBtn.onclick = () => {
+  const cur = localStorage.getItem("theme") || "";
+  const next = cur === "" ? "dark" : cur === "dark" ? "light" : "";
+  if (next) localStorage.setItem("theme", next); else localStorage.removeItem("theme");
+  applyTheme(next);
+};
+
+/* ---------------- plumbing ---------------- */
+let toastTimer;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.status);
+  return data;
+}
+async function post(path, body) {
+  return api(path, { method: "POST", headers: {"Content-Type": "application/json"},
+                     body: JSON.stringify(body || {}) });
+}
+async function put(path, body) {
+  return api(path, { method: "PUT", headers: {"Content-Type": "application/json"},
+                     body: JSON.stringify(body || {}) });
+}
+/* Append the active track to an API path (all data routes are track-scoped). */
+function withTrack(path) {
+  if (!state.track) return path;
+  return path + (path.includes("?") ? "&" : "?") +
+         "track=" + encodeURIComponent(state.track);
+}
+
+/* ---------------- tabs ---------------- */
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  for (const s of ["jobs", "pipeline", "companies", "ops", "settings"])
+    $("#tab-" + s).hidden = b.dataset.tab !== s;
+  if (b.dataset.tab === "settings" && !state.config) loadSettings();
+});
+
+/* ---------------- stats tiles ---------------- */
+function renderTiles() {
+  const s = state.stats;
+  const dated = s.open ? Math.round(100 * s.dated / s.open) : 0;
+  $("#tiles").innerHTML = [
+    [s.open, "open jobs"], [s.new_today, "new today"],
+    [s.pipeline, "in pipeline"], [s.saved, "saved"],
+    [s.applied_7d ?? 0, "applied this week"],
+    [s.closed, "closed"], [dated + "%", "have post date"],
+    [s.companies_active, "boards harvested"], [s.watched, "watched"],
+  ].map(([v, l]) => `<div class="tile"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("")
+    + ((s.platform_alerts || []).length ? `<div class="tile" title="${esc(s.platform_alerts.join("; "))}"><b>${s.platform_alerts.length}</b><span>platforms failing</span></div>` : "");
+  $("#keywarn").hidden = !!s.api_key;
+  $("#dbpath").textContent =
+    `${s.screen_model} screen · ${s.verify_model} verify · ${s.db}`;
+  // Both paths matter and can live in different places (per-user data dir vs
+  // a profile kept beside the code), so name the profile rather than let the
+  // Settings tab save somewhere the user can't find.
+  $("#dbpath").title = `store: ${s.db}\nprofile: ${s.profile || "(example)"}`;
+}
+
+/* ---------------- jobs ---------------- */
+function ageChip(age) {
+  if (age === "NEW") return `<span class="chip age-new">NEW</span>`;
+  if (age && age.endsWith("!")) return `<span class="chip age-stale">⏳ ${esc(age)}</span>`;
+  if (age === "?") return `<span class="chip">?</span>`;
+  return `<span class="chip">${esc(age)}</span>`;
+}
+function priorChip(p) {
+  if (!p) return "";
+  return `<span class="chip prior" title="${esc(p.disposition)} ${esc(p.when)}: ${esc(p.title)}">↻ ${esc(p.label)} ${esc(p.when.slice(5))}</span>`;
+}
+function cleanReason(r) { return (r || "").replace(/^\[[^\]]*\]\s*/, ""); }
+function geoChip(bucket) {
+  if (bucket === "local")  return `<span class="chip geo-local">local</span>`;
+  if (bucket === "remote") return `<span class="chip geo-remote">remote</span>`;
+  if (bucket === "relocation")
+    return `<span class="chip geo-reloc" title="onsite outside your configured locality — you would have to move">relocation</span>`;
+  return `<span class="chip">?</span>`;
+}
+const watchedNames = () =>
+  new Set(state.companies.filter(c => c.watched).map(c => c.name));
+
+/* The mid-fit local band: fit in [0.40, 0.70), local, open, undecided. The
+   interviews so far came from applications in this range, not from the top
+   of the ranking, so the "apply band" quick filter shows exactly these rows
+   (and ignores the min-fit cutoff, which would otherwise truncate it). */
+const APPLY_BAND = [0.40, 0.70];
+const bandOn = () => $("#f-band").checked;
+function inApplyBand(j) {
+  const f = j.resume_fit_score;
+  return f != null && f >= APPLY_BAND[0] && f < APPLY_BAND[1]
+      && j.geo_bucket === "local" && j.status !== "closed" && !j.disposition;
+}
+
+function jobFilters(j) {
+  const q = $("#f-search").value.trim().toLowerCase();
+  if (q && !(`${j.title} ${j.company_name}`.toLowerCase().includes(q))) return false;
+  if (bandOn() && !inApplyBand(j)) return false;
+  const mf = parseFloat($("#f-fit").value || "0");
+  if (mf > 0 && !bandOn() && !(j.resume_fit_score >= mf)) return false;
+  const geo = $("#f-geo").value;
+  if (geo && j.geo_bucket !== geo) return false;
+  // Relocation gate: hidden unless the user is willing to move (or is
+  // explicitly browsing the relocation bucket via the dropdown).
+  if (!geo && !$("#f-move").checked && j.geo_bucket === "relocation") return false;
+  if (j.geo_bucket === "remote") {
+    // Non-US remotes aren't takeable for a US applicant; always hide.
+    if (!j.us_ok) return false;
+    // Precision rule (per track config): remote rows only where the server
+    // says a remote row is worth showing (remote_ok = watched, or
+    // core-mission at the track's remote_mission_floor) — unless the user
+    // explicitly selected the remote bucket.
+    const t = currentTrack();
+    if (t && t.remote_requires_watch && !j.remote_ok && geo !== "remote") return false;
+  }
+  const age = $("#f-age").value;
+  if (age === "new" && j.age !== "NEW") return false;
+  if (age === "fresh") {
+    const d = parseInt(j.age); if (!(j.age === "NEW" || (d >= 0 && d <= 7))) return false;
+  }
+  if (age === "stale" && !(j.age || "").endsWith("!")) return false;
+  if ($("#f-repeats").checked && j.prior) return false;
+  if ($("#f-verified").checked && !j.verified) return false;
+  if ($("#f-watched").checked && !watchedNames().has(j.company_name)) return false;
+  return true;
+}
+
+/* Say WHY rows are missing, and offer the one-click undo. A count that
+   silently drops from 1400 to 690 reads as a bug; naming the filter that
+   did it doesn't. */
+function renderFilterSummary(shown) {
+  const el = $("#filtersummary");
+  if (!el) return;
+  const hidden = state.jobs.length - shown.length;
+  if (!hidden) { el.textContent = ""; return; }
+  const t = currentTrack();
+  const geo = $("#f-geo").value;
+  const bits = [];
+  if (!geo && !$("#f-move").checked) {
+    const n = state.jobs.filter(j => j.geo_bucket === "relocation").length;
+    if (n) bits.push(`<b>${n}</b> would need relocating (<button data-fix="move">show them</button>)`);
+  }
+  if (t?.remote_requires_watch && geo !== "remote") {
+    const n = state.jobs.filter(j => j.geo_bucket === "remote" && j.us_ok && !j.remote_ok).length;
+    if (n) bits.push(`<b>${n}</b> remote at companies you neither watch nor rate core-mission (<button data-fix="remote">show them</button>)`);
+  }
+  const nonUs = state.jobs.filter(j => j.geo_bucket === "remote" && !j.us_ok).length;
+  if (nonUs) bits.push(`<b>${nonUs}</b> remote outside the US`);
+  const mf = parseFloat($("#f-fit").value || "0");
+  if (mf > 0 && !bandOn()) {
+    const n = state.jobs.filter(j => !(j.resume_fit_score >= mf)).length;
+    if (n) bits.push(`<b>${n}</b> below the ${mf} fit cutoff`);
+  }
+  if ($("#f-repeats").checked) {
+    const n = state.jobs.filter(j => j.prior).length;
+    if (n) bits.push(`<b>${n}</b> repeat a role you applied to (<button data-fix="repeats">show them</button>)`);
+  }
+  if (bandOn()) {
+    const n = state.jobs.filter(j => !inApplyBand(j)).length;
+    if (n) bits.push(`<b>${n}</b> outside the apply band`);
+  }
+  el.innerHTML = bits.length
+    ? `${hidden} hidden — ${bits.join(" · ")}`
+    : `${hidden} hidden by the filters above.`;
+  el.querySelectorAll("button[data-fix]").forEach(b => b.onclick = () => {
+    if (b.dataset.fix === "move") $("#f-move").checked = true;
+    if (b.dataset.fix === "remote") $("#f-geo").value = "remote";
+    if (b.dataset.fix === "repeats") $("#f-repeats").checked = false;
+    renderJobs();
+  });
+}
+
+function renderJobs() {
+  const rows = state.jobs.filter(jobFilters);
+  $("#jobcount").textContent = `${rows.length} of ${state.jobs.length} shown` +
+    (bandOn() ? ` — apply band (fit ${APPLY_BAND[0].toFixed(2)} to ` +
+                `${APPLY_BAND[1].toFixed(2)}, local, undecided)` : "");
+  renderFilterSummary(rows);
+  if (!rows.length) { $("#jobs").innerHTML = `<div class="empty">No jobs match.</div>`; return; }
+  const body = rows.map(j => {
+    const fit = j.resume_fit_score == null ? "–" : j.resume_fit_score.toFixed(2);
+    const comb = j.combined_score == null ? "–" : j.combined_score.toFixed(2);
+    const gates = (j.fit_gates || "").split(",").filter(Boolean)
+      .map(g => `<span class="chip gate">${esc(g)}</span>`).join(" ");
+    const chips = [
+      j.status === "closed" ? `<span class="chip closed">closed</span>` : "",
+      j.disposition ? `<span class="chip disp">${esc(j.disposition)}</span>` : "",
+      j.verified ? `<span class="chip ver">✓ verified</span>` : "",
+      priorChip(j.prior),
+      gates,
+    ].filter(Boolean).join(" ");
+    const expanded = state.expanded === j.job_id ? renderDetail(j) : "";
+    return `
+      <tr class="jobrow" data-id="${esc(j.job_id)}">
+        <td class="num">${j.rank ?? ""}</td>
+        <td class="num fit">${fit}</td>
+        <td class="num comb">${comb}</td>
+        <td>${ageChip(j.age)}</td>
+        <td class="title-cell">
+          <a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
+          <div class="co">${esc(j.company_name)}
+            <span class="chip tier">${esc(j.mission_tier || "?")}</span> ${chips}</div>
+        </td>
+        <td>${geoChip(j.geo_bucket)}<div class="loc">${esc(j.location || "")}</div></td>
+        <td><div class="acts">
+          <button data-act="saved" title="shortlist — stays ranked">☆ save</button>
+          <button data-act="applied" title="move to pipeline">applied</button>
+          <button data-act="interviewing" title="move to pipeline">interview</button>
+          <button data-act="dismissed" title="hide + teach the scorer why">dismiss</button>
+          <button data-act="rejected" title="they said no">rejected</button>
+        </div></td>
+      </tr>${expanded}`;
+  }).join("");
+  $("#jobs").innerHTML = `<table>
+    <thead><tr><th class="num">#</th><th class="num">Fit</th><th class="num">Comb</th>
+    <th>Age</th><th>Job</th><th>Geo</th><th>Decide</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
+
+  document.querySelectorAll(".jobrow").forEach(tr => {
+    tr.onclick = e => {
+      if (e.target.closest("a, button")) return;
+      const id = tr.dataset.id;
+      state.expanded = state.expanded === id ? null : id;
+      renderJobs();
+      if (state.expanded === id) loadDetail(id);
+    };
+    tr.querySelectorAll("button[data-act]").forEach(btn => {
+      btn.onclick = e => { e.stopPropagation(); mark(tr.dataset.id, btn.dataset.act); };
+    });
+  });
+}
+
+function meterRow(label, v) {
+  const pct = v == null ? 0 : Math.round(v * 100);
+  const val = v == null ? "–" : v.toFixed(2);
+  return `<div class="meter"><span class="lab">${label}</span>
+    <span class="track"><span class="fill" style="width:${pct}%"></span></span>
+    <span class="val">${val}</span></div>`;
+}
+function renderDetail(j) {
+  return `<tr class="detail"><td colspan="7">
+    <div class="meters">
+      ${meterRow("domain", j.fit_domain)}${meterRow("function", j.fit_function)}
+      ${meterRow("stack", j.fit_stack)}${meterRow("seniority", j.fit_seniority)}
+    </div>
+    <div class="reason">${esc(cleanReason(j.fit_reason)) || "<i>unscored</i>"}</div>
+    <div class="meta">posted ${esc(j.posted_at || "?")} · first seen ${esc((j.first_seen || "").slice(0,10))}
+      · last seen ${esc((j.last_seen || "").slice(0,10))} · status ${esc(j.status || "open")}
+      ${j.disposition ? `· <b>${esc(j.disposition)}</b> ${esc(j.disposition_note || "")}
+        <button class="clearbtn" data-id="${esc(j.job_id)}">clear</button>` : ""}
+      · <span style="user-select:all">${esc(j.job_id)}</span></div>
+    <div class="descr" id="descr-${esc(j.job_id)}">loading description…</div>
+  </td></tr>`;
+}
+async function loadDetail(id) {
+  try {
+    const d = await api(withTrack(`/api/job/${encodeURIComponent(id)}`));
+    const el = document.getElementById(`descr-${id}`);
+    if (el) el.textContent = (d.description || "(no description stored)").slice(0, 4000);
+  } catch (e) { toast("detail failed: " + e.message); }
+  document.querySelectorAll(".clearbtn").forEach(b =>
+    b.onclick = () => mark(b.dataset.id, "clear"));
+}
+
+/* Must match store.DISMISS_REASONS. The first two say nothing about fit
+   (a dead posting, a sibling of a role already applied to), so the server
+   keeps them out of the scorer's examples; "closed" also closes the row. */
+const DISMISS_REASONS = [
+  ["closed", "posting is closed"], ["sibling", "applied to a sibling role"],
+  ["location", "wrong location"], ["function", "wrong kind of job"],
+  ["seniority", "wrong level"], ["other", "other"]];
+
+/* Ask why a job is being dismissed: resolves {reason, note}, or null. */
+function askDismiss() {
+  const dlg = $("#dismissdlg");
+  $("#dismissnote").value = "";
+  $("#dismissreasons").innerHTML = DISMISS_REASONS.map(
+    ([k, label]) => `<button data-reason="${k}">${esc(label)}</button>`).join("");
+  return new Promise(resolve => {
+    const done = v => { dlg.close(); resolve(v); };
+    dlg.querySelectorAll("button[data-reason]").forEach(b =>
+      b.onclick = () => done({ reason: b.dataset.reason,
+                               note: $("#dismissnote").value.trim() || null }));
+    $("#dismisscancel").onclick = () => done(null);
+    dlg.oncancel = () => resolve(null);
+    dlg.showModal();
+  });
+}
+
+async function mark(id, disp) {
+  let note = null, reason = null;
+  if (disp === "dismissed") {
+    const d = await askDismiss();
+    if (!d) return;                         // cancelled
+    ({ reason, note } = d);
+  } else if (disp === "rejected") {
+    note = prompt("Why rejected? (optional)");
+    if (note === null) return;              // cancelled
+  }
+  try {
+    await post(withTrack(`/api/job/${encodeURIComponent(id)}/disposition`),
+               { disposition: disp, note, reason });
+    toast(disp === "clear" ? "cleared" : `marked ${disp}`);
+    await refreshData();
+  } catch (e) { toast("failed: " + e.message); }
+}
+
+/* ---------------- pipeline ---------------- */
+/* Must match store.OUTCOME_REASONS: the API validates against that tuple,
+   so a value invented here is refused rather than written. */
+const OUTCOME_REASONS = ["no-response", "rejected-screen", "rejected-interview",
+                         "withdrew", "closed", "other"];
+
+function pipeRow(j, g) {
+  return `
+      <tr data-job="${esc(j.job_id)}">
+        <td style="width:110px">${esc((j.disposition_at || "").slice(0,10))}</td>
+        <td class="title-cell">
+          <a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
+          <div class="co">${esc(j.company_name)}</div></td>
+        <td>${j.status === "closed"
+              ? `<span class="chip closed">${g === "applied" || g === "interviewing"
+                  ? "closed after apply" : "closed"}</span>` : ageChip(j.age)}</td>
+        <td class="note">${esc(j.disposition_note || "")}</td>
+        <td><div class="acts">
+          ${g !== "applied" ? `<button data-d="applied">applied</button>` : ""}
+          ${g !== "interviewing" ? `<button data-d="interviewing">interview</button>` : ""}
+          ${g !== "rejected" ? `<button data-d="rejected">rejected</button>` : ""}
+          <button data-d="clear">clear</button>
+        </div></td>
+      </tr>`;
+}
+
+/* The tracking editor under one pipeline row. Every control saves on its
+   own `change`, so there is no save button to forget — and no half-filled
+   row that never reached the store. */
+function pipeEditor(j) {
+  return `
+      <tr class="pedit" data-job="${esc(j.job_id)}"><td colspan="5">
+        <label>follow-up <input type="date" data-f="followup_at"
+          value="${esc((j.followup_at || "").slice(0, 10))}"></label>
+        <label>contact <input type="text" data-f="contact"
+          placeholder="recruiter / referrer" value="${esc(j.contact || "")}"></label>
+        <label><input type="checkbox" data-f="referral"
+          ${j.referral ? "checked" : ""}> referral</label>
+        <label>outcome <select data-f="outcome_reason">
+          <option value="">—</option>
+          ${OUTCOME_REASONS.map(o =>
+            `<option ${j.outcome_reason === o ? "selected" : ""}>${o}</option>`).join("")}
+        </select></label>
+        ${j.applied_at
+           ? `<span class="chip tier">applied ${esc(j.applied_at.slice(0, 10))}</span>`
+           : ""}
+      </td></tr>`;
+}
+
+/* Follow-ups whose date has arrived, straight from the server's list (it
+   owns "today" and the still-live rule). Rendered into its own container so
+   an edit can refresh it without tearing down the editors. */
+function renderDue() {
+  const el = $("#pipe-due");
+  if (!el) return;
+  const due = new Set(state.pipelineDue || []);
+  const rows = state.pipeline.filter(j => due.has(j.job_id));
+  el.innerHTML = !rows.length ? "" : `
+    <div class="pgroup"><h3>follow-ups due (${rows.length})</h3>
+    <table><tbody>${rows.map(j => `
+      <tr>
+        <td style="width:110px">${esc((j.followup_at || "").slice(0,10))}</td>
+        <td class="title-cell">
+          <a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
+          <div class="co">${esc(j.company_name)}</div></td>
+        <td><span class="chip disp">${esc(j.disposition)}</span></td>
+        <td class="note">${esc(j.contact || "")}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+}
+
+/* Which KIND of application converts, not which job scored best: the
+   interview rate per fit band x geo is the one number the ranking cannot
+   tell you. */
+function renderConv() {
+  const el = $("#pipe-conv");
+  if (!el) return;
+  const rows = state.conversion || [];
+  el.innerHTML = !rows.length ? "" : `
+    <div class="pgroup"><h3>conversion — fit band × geo</h3>
+    <table><thead><tr>
+      <th>fit</th><th>geo</th><th class="num">apps</th><th class="num">live</th>
+      <th class="num">rejected</th><th class="num">interviews</th>
+      <th class="num">rate</th></tr></thead>
+    <tbody>${rows.map(r => `
+      <tr>
+        <td>${esc(r.band)}</td><td>${esc(r.geo_mode)}</td>
+        <td class="num">${r.applications}</td>
+        <td class="num">${r.applied + r.interviewing}</td>
+        <td class="num">${r.rejected}</td>
+        <td class="num">${r.interviews}</td>
+        <td class="num">${Math.round(r.interview_rate * 100)}%</td>
+      </tr>`).join("")}</tbody></table></div>`;
+}
+
+function renderPipeline() {
+  const groups = ["applied", "interviewing", "saved", "rejected", "dismissed"];
+  const byDisp = Object.fromEntries(groups.map(g => [g, []]));
+  state.pipeline.forEach(j => (byDisp[j.disposition] || []).push(j));
+  const total = state.pipeline.length;
+  if (!total) {
+    $("#pipeline").innerHTML =
+      `<div class="empty">Nothing decided yet — use the buttons on the Jobs tab.
+       Applied/interviewing land here; dismissals teach the scorer.</div>`;
+    return;
+  }
+  $("#pipeline").innerHTML =
+    `<div id="pipe-due"></div><div id="pipe-groups"></div><div id="pipe-conv"></div>`;
+  $("#pipe-groups").innerHTML = groups.filter(g => byDisp[g].length).map(g => `
+    <div class="pgroup"><h3>${g} (${byDisp[g].length})</h3>
+    <table><tbody>${byDisp[g].map(j => pipeRow(j, g) + pipeEditor(j)).join("")}
+    </tbody></table></div>`).join("");
+  renderDue();
+  renderConv();
+  document.querySelectorAll("#pipe-groups button[data-d]").forEach(b =>
+    b.onclick = () => mark(b.closest("tr").dataset.job, b.dataset.d));
+  document.querySelectorAll("#pipe-groups [data-f]").forEach(el =>
+    el.onchange = () => savePipelineField(el));
+}
+
+async function savePipelineField(el) {
+  const id = el.closest("[data-job]").dataset.job;
+  const f = el.dataset.f;
+  const v = el.type === "checkbox" ? (el.checked ? 1 : 0) : el.value;
+  try {
+    await post(withTrack(`/api/job/${encodeURIComponent(id)}/pipeline`), { [f]: v });
+    toast(`saved ${f.replace(/_/g, " ")}`);
+    await refreshPipelineDerived();
+  } catch (e) { toast("save failed: " + e.message); }
+}
+
+/* Refresh ONLY the two views derived from the tracking fields. A full
+   renderPipeline() here would rebuild the editor the user just tabbed out
+   of — and pull its replacement out from under whatever they clicked
+   next. */
+async function refreshPipelineDerived() {
+  try {
+    const [p, c] = await Promise.all([api(withTrack("/api/pipeline")),
+                                      api(withTrack("/api/report/conversion"))]);
+    state.pipeline = p.rows;
+    state.pipelineDue = p.followups_due;
+    state.conversion = c;
+    renderDue();
+    renderConv();
+  } catch (e) { toast("pipeline refresh failed: " + e.message); }
+}
+
+/* ---------------- review queue ---------------- */
+/* Nothing an automated path finds joins the roster by itself. Proving a board
+   exists at a guessed domain proves a board exists — never that the NAME was
+   an employer: one pasted page yielded 15 names that were not companies
+   ("Oncology", "Job Location", "Who You Are") and four of them landed on the
+   roster with real boards. Candidates wait here instead, uncrawled. */
+function reviewBoard(c) {
+  return esc(c.slug || c.handle || c.careers_url || "—");
+}
+
+function renderReview() {
+  const rows = state.pending || [];
+  const badge = $("#pendingbadge");
+  if (badge) { badge.textContent = rows.length; badge.hidden = !rows.length; }
+  const box = $("#review");
+  if (!box) return;
+  if (!rows.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="reviewbox">
+    <h3>Review queue <span class="pill">${rows.length} waiting</span></h3>
+    <p class="fieldhelp">Boards discovery resolved but nobody has confirmed yet.
+       They are never crawled while they sit here. <b>Confirm</b> puts the company
+       on the roster; <b>reject</b> deletes it and blocklists the name so discovery
+       stops spending requests on it.</p>
+    <table>
+      <thead><tr><th>Company</th><th>ATS</th><th>Board</th>
+        <th class="num">local</th><th class="num">total</th><th>Mission</th>
+        <th>Found by</th><th></th></tr></thead>
+      <tbody>${rows.map(c => `
+        <tr>
+          <td>${esc(c.name)}</td>
+          <td class="loc">${esc(c.ats || "—")}</td>
+          <td class="loc">${reviewBoard(c)}</td>
+          <td class="num">${c.local_job_count ?? 0}</td>
+          <td class="num">${c.total_job_count ?? 0}</td>
+          <td><span class="chip tier">${esc(c.mission_tier || "?")}</span>
+              ${c.mission_score == null ? "" : c.mission_score.toFixed(2)}</td>
+          <td class="loc">${esc(c.source || "?")}</td>
+          <td><div class="acts">
+            <button data-ok="${c.id}">confirm</button>
+            <button data-no="${c.id}">reject</button>
+          </div></td>
+        </tr>`).join("")}</tbody></table></div>`;
+  box.querySelectorAll("button[data-ok]").forEach(b => b.onclick = async () => {
+    try {
+      const d = await post(withTrack(`/api/company/${b.dataset.ok}/confirm`), {});
+      toast(d.active ? `${d.name} added to the roster`
+                     : `${d.name} confirmed but off-mission — not crawled`);
+    } catch (e) { toast("failed: " + e.message); }
+    await refreshData();
+  });
+  box.querySelectorAll("button[data-no]").forEach(b => b.onclick = async () => {
+    const reason = prompt("Reject and blocklist this name. Why?", "not a company");
+    if (reason === null) return;
+    try {
+      const d = await post(withTrack(`/api/company/${b.dataset.no}/reject`), { reason });
+      toast(`${d.name} rejected and blocklisted`);
+    } catch (e) { toast("failed: " + e.message); }
+    await refreshData();
+  });
+}
+
+/* ---------------- companies ---------------- */
+
+/* Harvest cell: when the board was last pulled, and whether the harvest's
+   dead-board cycle has marked it failing or dead. Without this the roster
+   gave no clue why a board had gone quiet. */
+function crawlCell(c) {
+  // Capture-only: a board no fetcher can reach (bot challenge, JS-only
+  // page). Never harvested — the person saves its pages by
+  // hand with capture.py and the jobs land here under this row.
+  if (c.ats === "capture") {
+    return `<span class="chip tier" title="not crawled: browse the board yourself and save pages into ./captures (python capture.py --watch)">capture</span>`;
+  }
+  const miss = c.miss_reason || "";
+  const state = miss.startsWith("board-dead") ? `<span class="chip age-stale" title="${esc(miss)}">dead</span> `
+    : miss.startsWith("fetch-error") ? `<span class="chip age-stale" title="${esc(miss)}">failing</span> ` : "";
+  const when = (c.last_harvested_at || "").slice(0, 10);
+  return `${state}<span class="loc" title="last harvested">${esc(when || "never")}</span>`;
+}
+
+/* Fit at which the roster suggests watching a company. The watch list is
+   hand-maintained and lags the data — a company that has already produced a
+   job this good is one whose whole board is worth fetching. */
+const SUGGEST_WATCH_FIT = 0.4;
+
+function suggestChip(c) {
+  if (c.watched || !(c.best_fit >= SUGGEST_WATCH_FIT)) return "";
+  return ` <button class="star suggest" data-id="${c.id}"
+    title="best fit here is ${c.best_fit.toFixed(2)} — watch it to fetch the whole board">suggest watch</button>`;
+}
+
+function renderCompanies() {
+  const q = $("#c-search").value.trim().toLowerCase();
+  const activeOnly = $("#c-activeonly").checked;
+  let rows = state.companies
+    .filter(c => (!activeOnly || c.active) && (!q || c.name.toLowerCase().includes(q)));
+  rows.sort((a, b) => (b.watched - a.watched) || (b.open_jobs - a.open_jobs)
+                      || ((b.mission_score || 0) - (a.mission_score || 0)));
+  $("#companies").innerHTML = `<table>
+    <thead><tr><th></th><th>Company</th><th>ATS</th><th>Mission</th>
+    <th class="num">Score</th><th class="num">Open jobs</th><th>Tags</th>
+    <th>Harvested</th><th>Active</th></tr></thead>
+    <tbody>${rows.map(c => `
+      <tr>
+        <td><button class="star ${c.watched ? "on" : ""}" data-id="${c.id}"
+             title="watch: whole board fetched, new technical postings flagged">${c.watched ? "★" : "☆"}</button></td>
+        <td>${esc(c.name)}${suggestChip(c)}</td>
+        <td class="loc">${esc(c.ats || "—")}</td>
+        <td><span class="chip tier">${esc(c.mission_tier || "?")}</span></td>
+        <td class="num">${c.mission_score == null ? "–" : c.mission_score.toFixed(2)}</td>
+        <td class="num">${c.open_jobs}</td>
+        <td class="loc">${esc([...(c.tags || []), ...(c.review === "pending" ? ["pending-review"] : [])].join(", "))}</td>
+        <td>${crawlCell(c)}</td>
+        <td><input type="checkbox" data-active="${c.id}" ${c.active ? "checked" : ""}></td>
+      </tr>`).join("")}</tbody></table>`;
+  document.querySelectorAll(".star").forEach(b => b.onclick = async () => {
+    try {
+      await post(withTrack(`/api/company/${b.dataset.id}/watch`), { on: !b.classList.contains("on") });
+      toast(b.classList.contains("on") ? "unwatched" : "watching");
+      await refreshData();
+    } catch (e) { toast("failed: " + e.message); }
+  });
+  document.querySelectorAll("input[data-active]").forEach(cb => cb.onchange = async () => {
+    try { await post(withTrack(`/api/company/${cb.dataset.active}/active`), { on: cb.checked }); }
+    catch (e) { toast("failed: " + e.message); }
+    await refreshData();
+  });
+}
+
+/* ---------------- operations ---------------- */
+/* Operation groups, in display order. `open` = expanded on load — the two
+   you actually run day to day; everything else is one click away. */
+const OP_GROUPS = [
+  ["routine",   "Everyday",            "What you run to get fresh jobs.", true],
+  ["scoring",   "Re-score",            "Redo the fit judgement after changing your résumé, rubric, or keywords.", false],
+  ["repair",    "Fill gaps & verify",  "Fix rows with missing text or a stale open/closed state.", false],
+  ["roster",    "Find more employers", "Grow the company list the crawl walks. Every path here writes to the Review queue; nothing goes live until you confirm it.", false],
+  ["cleanup",   "Roster cleanup",      "Prune and de-duplicate the company list.", false],
+];
+
+/* [id, title, "what it does", params, group, "when to use it"] */
+const OPS = [
+  ["crawl", "Crawl", "Fetches every company board this track follows, keeps the postings that pass its filters, and scores the new ones against your résumé.",
+   [["top", "top N", 15], ["workers", "workers", 6], ["no_verify", "skip verify", false, "check"],
+    ["no_fit", "skip fit scoring", false, "check"]],
+   "routine", "The main one — run it daily. Uses the Claude API."],
+  ["sync", "Refresh open/closed", "Re-checks the same boards and marks vanished postings closed, without re-scoring anything.",
+   [["top", "top N", 15]],
+   "routine", "Cheap and free — run when you just want the list to be accurate."],
+  ["triage", "Triage harvested rows", "Runs the harvester's unscored rows through the crawl's gates cheapest-first (company mission, title, geography, excludes), fetches descriptions only for the survivors, and fit-scores only those. Every row records the gate that dropped it.",
+   [["limit", "rows", ""], ["score_cap", "fit calls", 300]],
+   "scoring", "After a harvest pass, or whenever the store has unjudged rows. The harvester runs it itself at the end of each pass."],
+  ["rescore", "Re-score every job", "Re-runs the fit score on every open, undecided job using the current résumé and rubric.",
+   [["described_only", "described only", true, "check"]],
+   "scoring", "After you edit your résumé, the fit weights, or your keywords. Costs one API call per job."],
+  ["verify", "Deep-verify the top N", "Re-reads the FULL posting for the highest-ranked jobs and re-scores them — catches disqualifiers buried at the bottom of long descriptions. Skips rows the current verify model has already checked; tick <b>re-verify all</b> to redo the whole top N.",
+   [["top", "top N", 15], ["force", "re-verify all", false, "check"]],
+   "scoring", "Before you start applying, so the top of your list is trustworthy. Left unticked after a model change, it re-reads only what the old model scored."],
+  ["backfill-descriptions", "Fetch missing descriptions", "Finds stored jobs with no description text and pulls it from the company's board.",
+   [["limit", "limit", ""]],
+   "repair", "When jobs show 'no description; unscored'."],
+  ["check-closed", "Probe stale postings", "Opens the URL of anything no board has confirmed lately and closes what's provably gone.",
+   [["stale_days", "stale days", 2], ["limit", "limit", ""]],
+   "repair", "When you suspect dead links are still ranking."],
+  ["discover-local", "Find new companies", "Full sourcing pass — directories, web search, an LLM brainstorm, and a board-URL sweep. Everything it finds lands in the Review queue.",
+   [["no_dork", "skip dork sweep", false, "check"]],
+   "roster", "Occasionally, to widen the search. Slow (many minutes), uses the API, and holds the operation slot until it finishes. Same as python discover.py --local."],
+  ["dork", "Find boards by posting", "Searches DuckDuckGo for job-board URLs in your area instead of guessing company names; hits land in the Review queue.",
+   [],
+   "roster", "A faster, cheaper alternative to the full pass. Same as python discover.py --dork."],
+  ["discover-term", "Discover by sector", "Asks the model for likely employers matching a free-text sector or niche, probes them against the ATS platforms, and queues the confirmed ones for review.",
+   [["term", "sector or term, e.g. 'medical device companies'", "", "wide"],
+    ["dry_run", "preview only, don't write", false, "check"],
+    ["no_report", "skip markdown report", false, "check"]],
+   "roster", "When you want employers in a niche the roster lacks."],
+  ["reresolve", "Retry unresolved companies", "Re-runs board resolution over roster rows that died at 'no board found' or 'board dead', oldest first; hits land in the Review queue.",
+   [["limit", "limit", 50], ["days", "older than N days", ""]],
+   "roster", "After a resolver change, or every few weeks."],
+  ["score-missions", "Score company missions", "Asks the model how well each company matches the mission tiers you defined, which feeds ranking.",
+   [["rescore", "re-score all", false, "check"]],
+   "roster", "After adding companies, so they can be ranked."],
+  ["nlx", "Import from the NLx feed", "Pulls local postings for employers whose own site blocks crawlers (Meta, Google…) from the federal job feed.",
+   [["companies", "company names, comma-separated", "", "wide"]],
+   "roster", "For big employers you can't otherwise see. Needs a free CareerOneStop key."],
+  ["prune", "Deactivate dead boards", "Turns off companies whose board no longer loads, so the crawl stops wasting time on them.",
+   [["offmission", "also off-mission", false, "check"]],
+   "cleanup", "When crawls report many fetch errors."],
+  ["dedup", "Merge duplicate companies", "Combines company rows that point at the same board.",
+   [],
+   "cleanup", "If the same employer appears twice."],
+];
+
+function opParam([k, lab, dv, type]) {
+  if (type === "check")
+    return `<label class="loc"><input type="checkbox" data-p="${k}" ${dv ? "checked" : ""}> ${lab}</label>`;
+  if (type === "wide")
+    return `<input class="wide" data-p="${k}" placeholder="${lab}" value="${dv}">`;
+  return `<label class="loc">${lab} <input data-p="${k}" value="${dv}"></label>`;
+}
+
+function opCard(name, label, desc, params, when, allowed) {
+  const off = !allowed.has(name);
+  return `<div class="op ${off ? "dim" : ""}"><h3>${label}</h3><p>${desc}</p>
+      ${when ? `<p class="fieldhelp"><b>When:</b> ${when}</p>` : ""}
+      ${params.filter(p => p[3] === "wide").map(opParam).join("")}
+      <div class="row">
+        ${params.filter(p => p[3] !== "wide").map(opParam).join("")}
+        <button class="run" data-op="${name}" ${off ? "disabled title='not available on this track'" : ""}>Run</button>
+      </div></div>`;
+}
+
+function renderOps() {
+  const allowed = new Set(currentTrack()?.ops || OPS.map(o => o[0]));
+  // "Add by hand" cards are hand-written (multi-field forms), grouped last.
+  const manual = `
+    <div class="op ${allowed.has("add-job") ? "" : "dim"}"><h3>Add one job</h3>
+      <p>Adds a posting you found yourself, registers its company, and pulls that company's other in-scope jobs.</p>
+      <p class="fieldhelp"><b>When:</b> you spotted something the crawl missed.</p>
+      <input class="wide" data-a="url" placeholder="posting URL">
+      <input class="wide" data-a="title" placeholder="title">
+      <input class="wide" data-a="company" placeholder="company">
+      <div class="row">
+        <input data-a="location" placeholder="location" style="width:150px">
+        <button class="run" data-op="add-job" ${allowed.has("add-job") ? "" : "disabled"}>Add</button>
+      </div></div>
+    <div class="op ${allowed.has("add-names") ? "" : "dim"}"><h3>Add companies from a page</h3>
+      <p>Paste text from anywhere — a LinkedIn search, a Built In list, a conference exhibitor list. <b>Parse</b> pulls the candidate names out; you tick the real employers and only those are resolved to a job board.</p>
+      <p class="fieldhelp"><b>When:</b> you're browsing somewhere the crawler can't reach. Nothing is fetched or written until you press Resolve — one bad paste used to cost about a thousand requests and put four non-companies on the roster.</p>
+      <textarea class="wide" id="n-text" rows="6" placeholder="Paste the page text here - job titles, dates and locations are ignored"></textarea>
+      <div class="row">
+        <label title="Skip the model and use the free text parser only. Left off, the model reads the paste whenever an API key is configured."><input type="checkbox" id="n-nollm"> text parser only</label>
+        <button class="run runx" id="n-parse" ${allowed.has("add-names") ? "" : "disabled"}>Parse</button>
+      </div>
+      <div id="n-list"></div>
+    </div>
+    <div class="op ${allowed.has("add-board") ? "" : "dim"}"><h3>Add one company</h3>
+      <p>Give a careers-page URL: it works out which job board the company uses, counts local openings, and scores its mission.</p>
+      <p class="fieldhelp"><b>When:</b> you know an employer worth following.</p>
+      <input class="wide" data-a="name" placeholder="company name">
+      <input class="wide" data-a="url" placeholder="careers / board URL">
+      <div class="row"><button class="run" data-op="add-board" ${allowed.has("add-board") ? "" : "disabled"}>Add</button></div>
+    </div>`;
+
+  const groups = OP_GROUPS.map(([id, title, hint, open]) => {
+    const cards = OPS.filter(o => o[4] === id)
+      .map(([n, l, d, p, , when]) => opCard(n, l, d, p, when, allowed)).join("");
+    const body = id === "roster" ? cards + manual : cards;
+    if (!body) return "";
+    return `<details class="grp" ${open ? "open" : ""}>
+      <summary>${esc(title)} <span class="hint">${esc(hint)}</span></summary>
+      <div class="grpbody"><div class="ops">${body}</div></div></details>`;
+  }).join("");
+
+  $("#opcards").innerHTML = `
+    <div class="primer"><h3>Running things</h3>
+      <p>Everything here runs on the <b>${esc(currentTrack()?.label || "current")}</b> track
+         and streams its output to the log below. One at a time.</p>
+      <p>Greyed-out cards don't apply to this track — switch tracks in the header.
+         Anything that scores jobs uses the Claude API and costs money; the rest is free.</p>
+    </div>${groups}`;
+  const parseBtn = $("#n-parse");
+  if (parseBtn) parseBtn.onclick = parseNames;
+  renderNames();
+  document.querySelectorAll("button[data-op]").forEach(b => b.onclick = async () => {
+    const card = b.closest(".op");
+    const params = {};
+    card.querySelectorAll("input[data-p]").forEach(i =>
+      params[i.dataset.p] = i.type === "checkbox" ? i.checked : i.value);
+    // textarea included: the paste-a-page card's payload is a whole block of
+    // text, which does not fit an <input>.
+    card.querySelectorAll("input[data-a], textarea[data-a]")
+      .forEach(i => params[i.dataset.a] = i.value);
+    // Debounce this ONE button's in-flight POST, and nothing else. A second
+    // click before the first answer came back used to start a second crawl;
+    // now it would only add a second queue entry, which is still not what the
+    // click meant. Every other button stays live on purpose: a busy server
+    // queues the request instead of refusing it.
+    const op = b.dataset.op;
+    if (state.inflight.has(op)) return;
+    state.inflight.add(op);
+    b.disabled = true;
+    try {
+      const r = await post(withTrack(`/api/run/${op}`), params);
+      if (r.queued) {
+        flashNote(b, r.duplicate ? "already queued" : `queued #${r.position}`);
+      } else {
+        toast(`started: ${op}`);
+        // Only a real start clears the log: when the request was queued the
+        // log still belongs to the operation that is running right now.
+        state.logTotal = 0; state.cursorTask = ""; $("#oplog").textContent = "";
+      }
+    } catch (e) {
+      toast(e.message);
+    }
+    state.inflight.delete(op);
+    b.disabled = false;
+    await pollOps();   // show the new pill/queue without waiting for the timer
+  });
+}
+
+/* Step one of the paste flow. Resolving is the expensive half, so the parsed
+   names are shown first: `state` says what the store already knows about each
+   one, and a per-row "not a company" toggle blocklists the junk on the way
+   past. */
+const NAME_CHIPS = {
+  tracked: `<span class="chip tier">already tracked</span>`,
+  blocked: `<span class="chip gate">blocked</span>`,
+  missed:  `<span class="chip age-stale">missed recently</span>`,
+  junk:    `<span class="chip gate" title="a section heading, category or location, not an employer - tick it to resolve anyway">not a company?</span>`,
+};
+const nameLocked = r => !!r.reject || r.state === "tracked" || r.state === "blocked";
+
+function renderNames() {
+  const box = $("#n-list");
+  if (!box) return;
+  const rows = state.names;
+  if (!rows) { box.innerHTML = ""; return; }
+  if (!rows.length) {
+    box.innerHTML = `<p class="fieldhelp">No company names found in that text.</p>`;
+    return;
+  }
+  const picked = rows.filter(r => r.pick && !nameLocked(r)).length;
+  const rejected = rows.filter(r => r.reject).length;
+  box.innerHTML = `<div class="namepick">${rows.map((r, i) => `
+    <div class="namerow ${nameLocked(r) ? "off" : ""}">
+      <label><input type="checkbox" data-n="${i}"
+        ${r.pick && !nameLocked(r) ? "checked" : ""}
+        ${nameLocked(r) ? "disabled" : ""}> <span class="nm">${esc(r.name)}</span></label>
+      ${r.reject ? `<span class="chip gate">not a company</span>`
+                 : (NAME_CHIPS[r.state] || "")}
+      <button class="notco ${r.reject ? "on" : ""}" data-x="${i}"
+        ${r.state === "blocked" ? "disabled" : ""}
+        title="blocklist this name so no discovery pass spends requests on it again"
+        >not a company</button>
+    </div>`).join("")}</div>
+    <div class="row">
+      <button class="run" id="n-run" ${picked ? "" : "disabled"}>Resolve ${picked}</button>
+      ${rejected ? `<span class="fieldhelp">${rejected} to blocklist</span>` : ""}
+    </div>`;
+  box.querySelectorAll("input[data-n]").forEach(cb => cb.onchange = () => {
+    state.names[+cb.dataset.n].pick = cb.checked;
+    renderNames();
+  });
+  box.querySelectorAll("button[data-x]").forEach(b => b.onclick = () => {
+    const r = state.names[+b.dataset.x];
+    r.reject = !r.reject;
+    if (r.reject) r.pick = false;
+    renderNames();
+  });
+  const run = $("#n-run");
+  if (run) run.onclick = resolveNames;
+}
+
+async function parseNames() {
+  const text = $("#n-text").value;
+  if (!text.trim()) { toast("paste some page text first"); return; }
+  const btn = $("#n-parse");
+  btn.disabled = true;
+  try {
+    const body = { text };
+    if ($("#n-nollm").checked) body.use_llm = false;   // omitted = auto
+    const rows = await post(withTrack("/api/names/preview"), body);
+    state.names = rows.map(r => ({ ...r, pick: r.state === "new", reject: false }));
+    renderNames();
+    toast(`${rows.length} name(s) found — tick the real employers`);
+  } catch (e) { toast("parse failed: " + e.message); }
+  btn.disabled = false;
+}
+
+async function resolveNames() {
+  const rows = state.names || [];
+  const names = rows.filter(r => r.pick && !nameLocked(r)).map(r => r.name);
+  const reject = rows.filter(r => r.reject).map(r => r.name);
+  if (!names.length) { toast("tick at least one company"); return; }
+  try {
+    // Blocklist first: the resolve run may only be QUEUED behind another
+    // op, so recording the junk names here is what keeps them out of every
+    // later discovery path, whenever the run itself gets its turn.
+    if (reject.length) await post(withTrack("/api/names/block"), { names: reject });
+    const r = await post(withTrack("/api/run/add-names"), { names });
+    if (r.queued) {
+      // The picked names are already in the queued entry's params, so the
+      // list is done either way; the note hangs off the pill because the
+      // Resolve button it was clicked on is about to be re-rendered away.
+      flashNote($("#oppill"), r.duplicate ? "already queued" : `queued #${r.position}`);
+      toast(`queued: resolving ${names.length} name(s)`);
+    } else {
+      toast(`started: resolving ${names.length} name(s)`);
+      state.logTotal = 0; state.cursorTask = ""; $("#oplog").textContent = "";
+    }
+    state.names = null;
+    renderNames();
+    await pollOps();
+  } catch (e) { toast(e.message); }
+}
+
+/* A short-lived note pinned beside the element that was just clicked. The
+   toast is global and one-at-a-time, so clicking three run buttons in a row
+   leaves only the last message on screen; each click deserves its own answer
+   where it happened. */
+function flashNote(anchor, text) {
+  if (!anchor) return;
+  let n = anchor.nextElementSibling;
+  if (!n || !n.classList.contains("qnote")) {
+    n = document.createElement("span");
+    n.className = "qnote";
+    anchor.after(n);
+  }
+  clearTimeout(+n.dataset.timer || 0);
+  n.textContent = text;
+  n.classList.remove("fade");
+  n.dataset.timer = setTimeout(() => {
+    n.classList.add("fade");                      // CSS fades it out, then
+    setTimeout(() => n.remove(), 800);            // it stops taking up room
+  }, 2600);
+}
+
+/* The run queue, drawn from the status payload. Re-rendered only when it
+   actually changed: the poller fires every 1.5s and replacing the markup
+   every time would drop the hover state and re-enable a drop button the
+   user just clicked. */
+function renderQueue(queue) {
+  const box = $("#opqueue");
+  if (!box) return;
+  const q = queue || [];
+  const sig = JSON.stringify(q.map(e => [e.id, e.name, e.position]));
+  if (sig === state.queueSig) return;
+  state.queueSig = sig;
+  box.hidden = !q.length;
+  if (!q.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<span class="qlab">next up:</span>` + q.map(e => `
+    <span class="qitem" title="queued ${esc(e.enqueued_at || "")}">
+      <span class="qpos">#${esc(e.position)}</span> ${esc(e.name)}
+      <button class="qdrop" data-qid="${esc(e.id)}"
+              title="drop this from the run queue">×</button></span>`).join("") +
+    (q.length > 1 ? `<button class="qclear">clear queue</button>` : "");
+  box.querySelectorAll("button[data-qid]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await api(`/api/run/queue/${encodeURIComponent(b.dataset.qid)}`,
+                { method: "DELETE" });
+    } catch (e) {
+      // 404 means it started (or finished) between the poll and the click.
+      toast("could not drop it: " + e.message);
+      b.disabled = false;
+    }
+    await pollOps();
+  });
+  const clear = box.querySelector(".qclear");
+  if (clear) clear.onclick = async () => {
+    clear.disabled = true;
+    try {
+      const d = await api("/api/run/queue", { method: "DELETE" });
+      toast(`cleared ${d.removed} queued`);
+    } catch (e) { toast("clear failed: " + e.message); clear.disabled = false; }
+    await pollOps();
+  };
+}
+
+async function pollOps() {
+  try {
+    const s = await api(`/api/run/status?since=${state.logTotal}`);
+    const queue = s.queue || [];
+    const pill = $("#oppill");
+    const qtail = queue.length ? ` +${queue.length} queued` : "";
+    $("#opstop").hidden = !s.running;
+    if (s.running) {
+      pill.textContent = `running: ${s.name}${qtail}`; pill.className = "pill running";
+    } else if (s.stopped) {
+      pill.textContent = `stopped: ${s.name}${qtail}`; pill.className = "pill";
+    } else if (s.error) {
+      pill.textContent = `failed: ${s.name}${qtail}`; pill.className = "pill err";
+    } else {
+      pill.textContent = (s.name ? `idle (last: ${s.name})` : "idle") + qtail;
+      pill.className = "pill";
+    }
+    renderQueue(queue);
+    $("#opinfo").textContent = s.error || "";
+    const allowed = new Set(currentTrack()?.ops || []);
+    // Run buttons stay live while an operation runs: the server queues the
+    // request instead of refusing it. The only thing that disables one is the
+    // track it doesn't belong to, or its own POST still being in flight.
+    document.querySelectorAll("button.run[data-op]").forEach(b =>
+      b.disabled = state.inflight.has(b.dataset.op) || !allowed.has(b.dataset.op));
+    // The paste card drives itself (parse -> pick -> resolve), so it has no
+    // data-op. Only ever DISABLE here: re-enabling would fight renderNames.
+    if (!allowed.has("add-names"))
+      document.querySelectorAll("button.runx, #n-run").forEach(b => b.disabled = true);
+    // Saving the config restarts the server, which would lose whatever is
+    // running AND whatever is waiting, so it stays refused until the queue is
+    // empty too (the route enforces this; this only greys the button out).
+    document.querySelectorAll("#setcards button.run").forEach(b =>
+      b.disabled = s.running || queue.length > 0);
+    // The server empties its log whenever an op starts, including a queued op
+    // the finished worker hands off to with no request from here. Our cursor
+    // still counts the previous op's lines, so since= points past the end of
+    // the new log and every poll came back empty: queued ops never showed.
+    // A changed (name, started) means these lines were cut at a stale cursor;
+    // drop them and read the new op from line 0 on the next poll.
+    const taskKey = `${s.name}|${s.started || ""}`;
+    const stale = state.cursorTask && taskKey !== state.cursorTask;
+    state.cursorTask = taskKey;
+    if (stale) {
+      state.logTotal = 0; $("#oplog").textContent = "";
+    } else if (s.lines.length) {
+      const log = $("#oplog");
+      const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+      log.textContent += s.lines.join("\n") + "\n";
+      state.logTotal = s.total;
+      if (atBottom) log.scrollTop = log.scrollHeight;
+    }
+    // Refresh on any change of RUN IDENTITY, not just on `running` going
+    // false. With a queue the next entry starts as soon as the last one ends,
+    // so two chained ops can begin and end between two polls and `running` is
+    // never observed false in between; (name, started) still changes, and a
+    // changed key with a non-empty previous key means something finished.
+    const runKey = s.running ? `${s.name}|${s.started || ""}` : "";
+    if (state.runKey && runKey !== state.runKey) await refreshData();
+    state.runKey = runKey;
+  } catch (e) { /* server briefly busy — next poll catches up */ }
+}
+
+/* ---------------- settings (profile.toml editor) ---------------- */
+const getPath = (o, p) => p.split(".").reduce((x, k) => (x == null ? x : x[k]), o);
+const chipVals = {};          // dotted path -> live array of strings
+let rawDirty = false;
+
+/* Plain-language help per config key, shown under its label. Keyed by the
+   LAST path segment so it covers the global and per-track copies alike. */
+const FIELD_HELP = {
+  core: "Strong terms. One hit anywhere in a posting makes it relevant on its own.",
+  domain: "Weak terms — an industry or subject. Only counts when a skill term also appears near the top.",
+  skill: "Weak terms — tools and methods. Only counts when a domain term also appears.",
+  phrases: "Drops a posting if the phrase appears anywhere in it.",
+  title_phrases: "Drops a posting only if the phrase is in the job TITLE.",
+  title_exempt_phrases: "Titles that survive a title phrase above — the phrase is blanked out of the title first (e.g. keep “Clinical Data Manager” while “manager” still drops the rest).",
+  boilerplate_phrases: "Regex patterns blanked out before matching, so benefits/EEO wording can't trigger your keywords.",
+  role_phrases: "Job kinds you never want, matched anywhere in the posting.",
+  title_tokens: "Short abbreviations that only make sense in a title (e.g. CRA).",
+  defense_strong: "One hit is enough to drop the posting.",
+  defense_weak: "Innocent on their own — takes two different hits to drop a posting.",
+  nonclinical: "Off-topic industries to drop even when they use your keywords.",
+  onsite: "Places you'd commute to. Postings must name one of these.",
+  remote: "Words in a location field that mean remote.",
+  exclude: "Locations to always reject.",
+  word_tokens: "Short/ambiguous local terms, matched as whole words only (so “nc” can't hit “clinic”).",
+  substrings: "Distinctive place names, matched anywhere in the text.",
+  state_suffix: "State abbreviation(s) used to recognise a “City, ST” address.",
+};
+
+function chipField(path, label) {
+  chipVals[path] = (getPath(state.config, path) || []).slice();
+  const help = FIELD_HELP[path.split(".").pop()];
+  return `<div class="chipfield" data-path="${esc(path)}">
+    <div class="chiplab">${esc(label)}</div>
+    ${help ? `<div class="fieldhelp">${esc(help)}</div>` : ""}
+    <div class="chips"></div>
+    <input class="chipadd" placeholder="type + Enter to add"></div>`;
+}
+function renderChips(cf) {
+  const path = cf.dataset.path;
+  cf.querySelector(".chips").innerHTML = (chipVals[path] || []).map((v, i) =>
+    `<span class="chip">${esc(v)}<button data-i="${i}" title="remove">×</button></span>`).join("")
+    || `<span class="loc">empty</span>`;
+  cf.querySelectorAll(".chips button").forEach(b => b.onclick = () => {
+    chipVals[path].splice(+b.dataset.i, 1); renderChips(cf);
+  });
+}
+function wireChipFields(root) {
+  root.querySelectorAll(".chipfield").forEach(cf => {
+    renderChips(cf);
+    cf.querySelector(".chipadd").addEventListener("keydown", e => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const vals = e.target.value.split(",").map(s => s.trim()).filter(Boolean);
+      if (vals.length) { chipVals[cf.dataset.path].push(...vals); e.target.value = ""; renderChips(cf); }
+    });
+  });
+}
+const numField = (path, label, val, dflt) =>
+  `<label>${esc(label)}<input type="number" min="0" max="1" step="0.01"
+     data-num="${esc(path)}" value="${val ?? ""}" placeholder="${dflt ?? ""}"></label>`;
+const chkField = (path, label, val) =>
+  `<label class="loc"><input type="checkbox" data-chk="${esc(path)}" ${val ? "checked" : ""}> ${esc(label)}</label>`;
+const txtField = (path, label, val) =>
+  `<input class="txt" data-txt="${esc(path)}" placeholder="${esc(label)}" value="${esc(val ?? "")}" title="${esc(label)}">`;
+
+/* A track id ("local_tech") shown the way the user named it ("Local clinical"). */
+function trackLabel(id) {
+  return (state.tracks.find(t => t.id === id) || {}).label
+      || (state.config?.tracks?.[id] || {}).label || id;
+}
+
+function settingsCard(title, desc, body) {
+  return `<div class="setcard"><h3>${esc(title)}</h3>${desc ? `<p>${esc(desc)}</p>` : ""}
+    ${body}<div class="row"><button class="run savecard">Save &amp; restart</button></div></div>`;
+}
+
+function renderSettings() {
+  const c = state.config || {};
+  const isTable = v => v && typeof v === "object" && !Array.isArray(v);
+  // group id -> cards
+  const g = {terms: [], filters: [], scoring: [], advanced: []};
+
+  // Keywords: global tiers + one card per track sub-table — built from
+  // whatever the profile actually contains, nothing hardcoded.
+  const kw = c.keywords || {};
+  g.terms.push(settingsCard("Keywords", "The words that decide whether a posting is relevant at all.",
+    ["core", "domain", "skill"].map(k => chipField(`keywords.${k}`, k)).join("")));
+  for (const [sub, tbl] of Object.entries(kw)) {
+    if (!isTable(tbl)) continue;
+    g.terms.push(settingsCard(`Keywords — ${trackLabel(sub)}`,
+      `Extra terms used only while the ${trackLabel(sub)} track runs.`,
+      Object.keys(tbl).map(k => chipField(`keywords.${sub}.${k}`, k)).join("")));
+  }
+
+  // Excludes: global lists + track sub-tables.
+  const exc = c.exclude || {};
+  const excLists = Object.entries(exc).filter(([, v]) => Array.isArray(v));
+  g.filters.push(settingsCard("Excludes", "Wording that disqualifies a posting even if the keywords matched.",
+    excLists.map(([k]) => chipField(`exclude.${k}`, k)).join("")));
+  for (const [sub, tbl] of Object.entries(exc)) {
+    if (!isTable(tbl)) continue;
+    g.filters.push(settingsCard(`Excludes — ${trackLabel(sub)}`,
+      `Extra exclusions used only while the ${trackLabel(sub)} track runs.`,
+      Object.keys(tbl).filter(k => Array.isArray(tbl[k]))
+        .map(k => chipField(`exclude.${sub}.${k}`, k)).join("")));
+  }
+
+  // Locations + locality.
+  const loc = c.locations || {};
+  g.filters.push(settingsCard("Locations", "Which location strings a posting may carry.",
+    ["onsite", "remote", "exclude"].map(k => chipField(`locations.${k}`, k)).join("") +
+    `<div class="row">${chkField("locations.accept_remote", "accept remote listings", loc.accept_remote)}</div>`));
+  const lcl = c.locality || {};
+  g.filters.push(settingsCard("Your area", "What counts as “local”. Decides which jobs are marked local, remote, or would-need-relocation.",
+    txtField("locality.name", "area name (label only)", lcl.name) +
+    ["word_tokens", "substrings", "state_suffix"].map(k => chipField(`locality.${k}`, k)).join("")));
+
+  // Fit scoring: weights + gate penalties, keys from the profile itself.
+  // An absent group isn't broken — the built-in defaults apply; say so
+  // instead of rendering an empty grid.
+  const fit = c.fit || {};
+  const numGrid = (group) => {
+    const entries = Object.entries(fit[group] || {});
+    if (!entries.length)
+      return `<p class="loc" style="margin:0 0 10px">not set — built-in defaults
+              apply (add a [fit] ${group} table via the raw editor to override)</p>`;
+    return `<div class="numgrid">${
+      entries.map(([k, v]) => numField(`fit.${group}.${k}`, k, v)).join("")}</div>`;
+  };
+  g.scoring.push(settingsCard("Fit scoring", "How much each part of the résumé judgement counts, 0–1.",
+    `<div class="chiplab">weights</div>
+     <div class="fieldhelp">Relative importance of each axis. They don't need to add up to 1.</div>
+     ${numGrid("weights")}
+     <div class="chiplab">gate penalties</div>
+     <div class="fieldhelp">What a dealbreaker does to the score — lower bites harder. 0.2 means “cut the score to a fifth”.</div>
+     ${numGrid("gate_penalty")}`));
+
+  // Tracks: label + UI defaults per configured track.
+  for (const [tid, t] of Object.entries(c.tracks || {})) {
+    if (!isTable(t)) continue;
+    g.scoring.push(settingsCard(`Track — ${t.label || tid}`,
+      `Runs the ${t.engine || "local"} crawl over ${t.db || "?"}. Rename it or change its starting filters and deep-verify floor here; sources and gates live in the raw editor.`,
+      txtField(`tracks.${tid}.label`, "name shown in the header", t.label) +
+      `<div class="numgrid">${numField(`tracks.${tid}.min_fit_default`, "opening min-fit filter", t.min_fit_default)}
+       ${numField(`tracks.${tid}.verify_floor`, "deep-verify floor", t.verify_floor,
+                  state.tracks.find(x => x.id === tid)?.verify_floor)}</div>
+       <div class="fieldhelp">Where the Jobs tab's filters start when you switch to this track. The deep-verify floor is the lowest fit score Deep-verify re-scores outside the top ranks; blank keeps the value shown.</div>
+       <div class="row">${chkField(`tracks.${tid}.willing_to_move_default`, "show relocation jobs by default", t.willing_to_move_default)}
+       ${chkField(`tracks.${tid}.remote_requires_watch`, "only show remote jobs at watched companies", t.remote_requires_watch)}</div>`));
+  }
+
+  // Raw TOML editor — the escape hatch for everything else.
+  g.advanced.push(`<div class="setcard rawcard"><h3>Raw profile.toml</h3>
+    <p>The whole file (currently: ${esc(state.configSource || "?")}). Everything the cards
+       above cover, plus the parts they don't: who you are, mission tiers, discovery
+       sources, the domain ladder, and each track's engine/sources/gates.</p>
+    <p class="fieldhelp">Validate before saving — a syntax error is refused, not written.</p>
+    <textarea id="rawtoml" spellcheck="false">${esc(state.configRaw || "")}</textarea>
+    <div class="valerrs" id="valerrs"></div>
+    <div class="row">
+      <button class="run" id="rawvalidate">Validate</button>
+      <button class="run" id="rawsave">Save &amp; restart</button>
+    </div></div>`);
+
+  const GROUPS = [
+    ["terms", "Search terms", "What you're looking for.", true],
+    ["filters", "Filters", "What to throw away, and where you'll work.", false],
+    ["scoring", "Scoring & tracks", "How jobs are judged and ranked.", false],
+    ["advanced", "Everything else (raw file)", "Direct access to the whole config file.", false],
+  ];
+  const root = $("#setcards");
+  root.innerHTML = `
+    <div class="primer"><h3>How a job gets in front of you</h3>
+      <p><b>1. Relevance</b> — a posting is kept if it hits one <code>core</code> term,
+         or one <code>domain</code> term <i>and</i> one <code>skill</code> term.
+         Keep <code>core</code> narrow; use the paired tiers for adjacent work.</p>
+      <p><b>2. Filters</b> — excludes, your area, and the job-title test drop the rest.</p>
+      <p><b>3. Scoring</b> — survivors are scored against your résumé, then ranked.</p>
+      <p>Saving any card writes <b>profile.toml</b>, keeps a backup, and restarts the
+         server so every part picks the change up.</p>
+    </div>` +
+    GROUPS.map(([id, title, hint, open]) => g[id].length ? `
+      <details class="grp" ${open ? "open" : ""}>
+        <summary>${esc(title)} <span class="hint">${esc(hint)}</span></summary>
+        <div class="grpbody"><div class="settings">${g[id].join("")}</div></div>
+      </details>` : "").join("");
+  wireChipFields(root);
+
+  root.querySelectorAll(".savecard").forEach(b => b.onclick = async () => {
+    const card = b.closest(".setcard");
+    const updates = {};
+    card.querySelectorAll(".chipfield").forEach(cf =>
+      updates[cf.dataset.path] = chipVals[cf.dataset.path]);
+    card.querySelectorAll("input[data-num]").forEach(i => {
+      if (i.value !== "") updates[i.dataset.num] = parseFloat(i.value); });
+    card.querySelectorAll("input[data-chk]").forEach(i =>
+      updates[i.dataset.chk] = i.checked);
+    card.querySelectorAll("input[data-txt]").forEach(i =>
+      updates[i.dataset.txt] = i.value);
+    try {
+      const r = await put("/api/config", { updates });
+      if (r.restarting) showRestart();
+    } catch (e) { toast("save failed: " + e.message); }
+  });
+
+  $("#rawtoml").addEventListener("input", () => { rawDirty = true; });
+  $("#rawvalidate").onclick = async () => {
+    try {
+      const r = await post("/api/config/validate", { toml: $("#rawtoml").value });
+      $("#valerrs").textContent = r.errors.length ? r.errors.join("\n") : "";
+      toast(r.errors.length ? `${r.errors.length} problem(s)` : "valid ✓");
+    } catch (e) { toast("validate failed: " + e.message); }
+  };
+  $("#rawsave").onclick = async () => {
+    try {
+      const r = await put("/api/config/raw", { toml: $("#rawtoml").value });
+      if (r.restarting) { rawDirty = false; showRestart(); }
+    } catch (e) {
+      toast("save refused: " + e.message);
+      try {
+        const v = await post("/api/config/validate", { toml: $("#rawtoml").value });
+        $("#valerrs").textContent = (v.errors || []).join("\n");
+      } catch {}
+    }
+  };
+}
+
+async function loadSettings() {
+  try {
+    const c = await api("/api/config");
+    state.config = c.parsed; state.configRaw = c.raw; state.configSource = c.source;
+    renderSettings();
+  } catch (e) { toast("config load failed: " + e.message); }
+}
+
+window.addEventListener("beforeunload", e => {
+  if (rawDirty) { e.preventDefault(); e.returnValue = ""; }
+});
+
+function showRestart() {
+  rawDirty = false;
+  const prevBoot = state.stats.boot_id;
+  $("#overlaymsg").textContent = "Config saved — restarting…";
+  $("#overlay").classList.add("show");
+  const t0 = Date.now();
+  const iv = setInterval(async () => {
+    if (Date.now() - t0 > 30000) {
+      clearInterval(iv);
+      $("#overlaymsg").textContent =
+        "Restart timed out — start the server manually (python webapp.py), then reload this page.";
+      return;
+    }
+    try {
+      const s = await api("/api/boot");
+      if (s.boot_id && s.boot_id !== prevBoot) { clearInterval(iv); location.reload(); }
+    } catch (e) { /* successor not up yet */ }
+  }, 500);
+}
+
+/* ---------------- data loading ---------------- */
+async function loadJobs() {
+  const closed = $("#f-closed").checked ? "1" : "0";
+  const disp = $("#f-disp").checked ? "1" : "0";
+  state.jobs = await api(withTrack(`/api/jobs?closed=${closed}&dispositioned=${disp}`));
+}
+async function refreshData() {
+  const [stats, , pipeline, companies, conversion, pending] =
+    await Promise.all([api(withTrack("/api/stats")), loadJobs(),
+                       api(withTrack("/api/pipeline")),
+                       api(withTrack("/api/companies")),
+                       api(withTrack("/api/report/conversion")),
+                       api(withTrack("/api/pending"))]);
+  state.stats = stats; state.companies = companies;
+  state.pipeline = pipeline.rows; state.pipelineDue = pipeline.followups_due;
+  state.conversion = conversion;
+  state.pending = pending;
+  renderTiles(); renderJobs(); renderPipeline(); renderCompanies(); renderReview();
+}
+
+/* ---------------- tracks ---------------- */
+function applyTrackDefaults(t) {
+  $("#f-fit").value = t.min_fit_default ?? 0;
+  $("#f-move").checked = !!t.willing_to_move_default;
+}
+function renderTrackPick() {
+  $("#trackpick").innerHTML = state.tracks.map(t =>
+    `<option value="${esc(t.id)}" ${t.id === state.track ? "selected" : ""}>${esc(t.label)}</option>`
+  ).join("");
+  // Export link is a plain <a>: keep its track param current.
+  const exp = document.querySelector('a[href^="/api/export/companies"]');
+  if (exp) exp.href = withTrack("/api/export/companies");
+  renderOps();  // op availability differs per track
+}
+async function loadTracks() {
+  state.tracks = await api("/api/tracks");
+  const saved = localStorage.getItem("track");
+  const t = state.tracks.find(x => x.id === saved)
+         || state.tracks.find(x => x.default) || state.tracks[0];
+  state.track = t ? t.id : null;
+  if (t) applyTrackDefaults(t);
+  renderTrackPick();
+}
+$("#trackpick").addEventListener("change", async e => {
+  state.track = e.target.value;
+  localStorage.setItem("track", state.track);
+  const t = currentTrack();
+  if (t) applyTrackDefaults(t);
+  state.expanded = null;
+  renderTrackPick();
+  await refreshData();
+});
+
+["#f-search", "#f-fit", "#f-geo", "#f-move", "#f-age", "#f-verified", "#f-watched",
+ "#f-band", "#f-repeats"]
+  .forEach(s => $(s).addEventListener("input", renderJobs));
+["#f-closed", "#f-disp"].forEach(s => $(s).addEventListener("change",
+  async () => { await loadJobs(); renderJobs(); }));
+["#c-search", "#c-activeonly"].forEach(s => $(s).addEventListener("input", renderCompanies));
+$("#c-import").addEventListener("change", async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const r = await fetch(withTrack("/api/import/companies"), { method: "POST", body: fd });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.status);
+    toast(`imported/refreshed ${d.imported} companies`);
+    await refreshData();
+  } catch (err) { toast("import failed: " + err.message); }
+  e.target.value = "";
+});
+$("#opstop").onclick = async () => {
+  $("#opstop").disabled = true;
+  try {
+    const d = await post("/api/run/stop", {});
+    toast(d.stopping ? "stopping the running operation" : "nothing is running");
+  } catch (e) { toast("stop failed: " + e.message); }
+  $("#opstop").disabled = false;
+  await pollOps();
+};
+
+(async () => {
+  try { await loadTracks(); }               // sets state.track + op availability
+  catch (e) { toast("tracks failed: " + e.message); renderOps(); }
+  refreshData().catch(e => toast("load failed: " + e.message));
+})();
+setInterval(pollOps, 1500);
+pollOps();

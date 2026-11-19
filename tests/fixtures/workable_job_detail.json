@@ -1,0 +1,36 @@
+{
+ "id": 5794356,
+ "shortcode": "D68529D654",
+ "title": "Field Engineer",
+ "remote": false,
+ "location": {
+  "country": "United States",
+  "countryCode": "US",
+  "city": "Raleigh",
+  "region": "North Carolina"
+ },
+ "locations": [
+  {
+   "country": "United States",
+   "countryCode": "US",
+   "city": "Raleigh",
+   "region": "North Carolina",
+   "hidden": false
+  }
+ ],
+ "state": "published",
+ "isInternal": false,
+ "code": "",
+ "published": "2026-05-06T00:00:00.000Z",
+ "type": "full",
+ "language": "en",
+ "department": [
+  "Customer Support"
+ ],
+ "accountUid": "2d23042b-77d1-40fd-8641-038183f77a83",
+ "approvalStatus": "approved",
+ "workplace": "on_site",
+ "description": "<p>At Eupry, redacted prose.</p><p>We build wireless monitoring &amp; calibration for regulated cold chains.</p>",
+ "requirements": "<p><strong>Physical requirements</strong></p><p><br>Walking, standing, bending, and working with hand tools.</p><ul><li>Redacted prose.</li></ul>",
+ "benefits": "<ul><li>15 paid vacation days + 5 sick days.</li><li>Full health and dental insurance.</li></ul>"
+}

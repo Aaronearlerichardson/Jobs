@@ -1,0 +1,24 @@
+{
+ "jobRequisitions": [
+  {
+   "itemID": "9205234334470_1",
+   "requisitionTitle": "Sr. Director, FP&A",
+   "requisitionDescription": "<div><p style='margin-top:0in;margin-right:0in;margin-bottom:8.0pt;margin-left:0in;line-height:normal;font-size:16px;font-family:\"Aptos\",sans-serif;' data-pasted=\"true\"><strong>Summary</strong></p><p style='margin-top:0in;margin-right:0in;margin-bottom:8.0pt;margin-left:0in;line-height:normal;font-s",
+   "requisitionLocations": [
+    {
+     "aliasNames": [],
+     "address": {
+      "cityName": "",
+      "countrySubdivisionLevel1": {
+       "codeValue": ""
+      },
+      "postalCode": ""
+     },
+     "nameCode": {
+      "shortName": " US"
+     }
+    }
+   ]
+  }
+ ]
+}

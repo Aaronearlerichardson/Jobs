@@ -1,0 +1,142 @@
+{
+ "jobs": [
+  {
+   "data": {
+    "slug": "19975",
+    "language": "en-us",
+    "req_id": "19975",
+    "title": "International Trade Compliance Intern",
+    "description": "<p>Description [redacted for the fixture]</p>",
+    "responsibilities": "<p>Responsibilities [redacted for the fixture]</p>",
+    "qualifications": "<p>Qualifications [redacted for the fixture]</p>",
+    "location_name": "Olathe",
+    "city": "Olathe",
+    "state": "Kansas",
+    "country": "United States",
+    "country_code": "US",
+    "postal_code": "66062",
+    "full_location": "Olathe, Kansas",
+    "short_location": "Olathe, Kansas",
+    "multipleLocations": false,
+    "categories": [
+     {
+      "name": "Operations"
+     }
+    ],
+    "category": [
+     " Operations"
+    ],
+    "hiring_organization": "Garmin International, Inc.",
+    "posted_date": "2026-09-24T19:39:00+0000",
+    "create_date": "2026-09-24T19:39:48+0000",
+    "update_date": "2026-09-25T16:34:03+0000",
+    "apply_url": "https://careers-garmin.icims.com/jobs/19975/login",
+    "ats_code": "icims",
+    "tags1": [
+     "Transportation"
+    ],
+    "meta_data": {
+     "canonical_url": "https://careers.garmin.com/jobs/19975?lang=en-us",
+     "client_code": "garmin"
+    }
+   }
+  },
+  {
+   "data": {
+    "slug": "19488",
+    "language": "en-us",
+    "req_id": "19488",
+    "title": "Senior Software Engineer (Telematics)",
+    "description": "<p>Description [redacted for the fixture]</p>",
+    "responsibilities": "<p>Responsibilities [redacted for the fixture]</p>",
+    "qualifications": "<p>Qualifications [redacted for the fixture]</p>",
+    "location_name": "Cary Regency Creek",
+    "city": "Cary",
+    "state": "North Carolina",
+    "country": "United States",
+    "country_code": "US",
+    "postal_code": "27518",
+    "full_location": "Cary, North Carolina",
+    "short_location": "Cary, North Carolina",
+    "multipleLocations": false,
+    "categories": [
+     {
+      "name": "Engineering"
+     }
+    ],
+    "category": [
+     " Engineering"
+    ],
+    "hiring_organization": "Garmin International, Inc.",
+    "posted_date": "2026-08-04T22:28:00+0000",
+    "create_date": "2026-08-04T22:28:54+0000",
+    "update_date": "2026-09-23T16:30:36+0000",
+    "apply_url": "https://careers-garmin.icims.com/jobs/19488/login",
+    "ats_code": "icims",
+    "tags1": [
+     "Software Engineering"
+    ],
+    "meta_data": {
+     "canonical_url": "https://careers.garmin.com/jobs/19488?lang=en-us",
+     "client_code": "garmin"
+    }
+   }
+  },
+  {
+   "data": {
+    "slug": "18490",
+    "language": "en-us",
+    "req_id": "18490",
+    "title": "Product Manager (Dive Applications)",
+    "description": "<p>Description [redacted for the fixture]</p>",
+    "responsibilities": "<p>Responsibilities [redacted for the fixture]</p>",
+    "qualifications": "<p>Qualifications [redacted for the fixture]</p>",
+    "location_name": "Olathe",
+    "city": "Olathe",
+    "state": "Kansas",
+    "country": "United States",
+    "country_code": "US",
+    "postal_code": "66062",
+    "full_location": "Olathe, Kansas; Cary, North Carolina",
+    "short_location": "Olathe, Kansas",
+    "multipleLocations": true,
+    "additional_locations": [
+     {
+      "location_name": "Cary Regency Creek",
+      "street_address": "12040 Regency Parkway\nSuite 400",
+      "city": "Cary",
+      "state": "North Carolina",
+      "country": "United States",
+      "country_code": "US",
+      "postal_code": "27518",
+      "latitude": 35.7289473,
+      "longitude": -78.80537009999999
+     }
+    ],
+    "categories": [
+     {
+      "name": "Engineering"
+     }
+    ],
+    "category": [
+     " Engineering"
+    ],
+    "hiring_organization": "Garmin International, Inc.",
+    "posted_date": "2026-04-22T17:44:00+0000",
+    "create_date": "2026-04-22T17:44:56+0000",
+    "update_date": "2026-07-24T15:56:17+0000",
+    "apply_url": "https://careers-garmin.icims.com/jobs/18490/login",
+    "ats_code": "icims",
+    "tags1": [
+     "Fitness Product Support"
+    ],
+    "meta_data": {
+     "canonical_url": "https://careers.garmin.com/jobs/18490?lang=en-us",
+     "client_code": "garmin"
+    }
+   }
+  }
+ ],
+ "totalCount": 5,
+ "count": 5
+}

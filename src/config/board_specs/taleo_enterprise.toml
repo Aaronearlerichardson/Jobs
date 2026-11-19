@@ -1,0 +1,4 @@
+[[detect]]
+host = "taleo.net"
+re = ['(?i)([a-z0-9-]+\.taleo\.net)']
+blocklist = ["tbe.taleo.net"]

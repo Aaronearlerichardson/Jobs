@@ -35,7 +35,9 @@ jobs:
       # others, which is the whole point of testing a range.
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13", "3.14"]
+        # 3.14t: the free-threaded build, so a race between to_thread
+        # workers fails here rather than in a harvest.
+        python: ["3.12", "3.13", "3.14", "3.14t"]
     steps:
       - uses: actions/checkout@v4
 
@@ -47,17 +49,30 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r envs/requirements-dev.txt
+
+      - name: The GIL stays off (free-threaded build)
+        # An extension not declared free-threading safe turns it back on at
+        # import, with only a warning, and the race tests then pass vacuously.
+        if: endsWith(matrix.python, 't')
+        run: |
+          python -c "
+          import sys, bareduckdb, pyarrow, lxml.etree, ddgs, playwright.async_api
+          import src.web.server, src.crawl.harvest, src.discovery.board_directory
+          assert not sys._is_gil_enabled(), 'an import turned the GIL back on'
+          print('GIL off after importing the app')
+          "
 
       - name: Confirm the run is profile-example + API-free
-        # profile.toml is gitignored, so a clean checkout has none and
-        # config.py falls back to the example. Assert that rather than
-        # assume it: a stray committed profile would silently change what
-        # the whole suite tests.
+        # profile.toml is gitignored, so a clean checkout has none, the
+        # runner's per-user data dir is empty, and src/config/profile.py
+        # falls back to the example. Assert that rather than assume it: a
+        # stray committed profile would silently change what the whole
+        # suite tests.
         run: |
           test ! -f profile.toml || { echo "profile.toml must not be committed"; exit 1; }
           python -c "
-          import config
+          from src import config
           assert config.PROFILE_SOURCE == 'profile.example.toml', config.PROFILE_SOURCE
           # No USABLE key: the placeholder (or anything blank, which config
           # resolves to the placeholder). Checking for a real key shape too,
@@ -69,15 +84,36 @@ jobs:
           "
 
       - name: Byte-compile everything
-        run: python -m compileall -q core scrapers discovery webapp *.py
+        # The package tree, the maintenance scripts, the suite, and the
+        # root entry points (*.py at the root is exactly those).
+        run: python -m compileall -q src tools tests *.py
 
       - name: Lint (undefined names / unused imports)
-        run: python -m pyflakes core scrapers discovery webapp tests *.py
+        # --select=F is exactly pyflakes' checks. flake8 rather than bare
+        # pyflakes because it honours `# noqa: F401`, which the src/
+        # package re-export facades and the doctest-only imports carry.
+        run: python -m flake8 --select=F src tools tests *.py
+
+      - name: Board specs in their canonical layout, and valid (tombi)
+        # One layout for every spec, so a diff shows only what changed
+        # (fix with `tombi format src/config/board_specs`), and each checked
+        # against board-spec.schema.json, as an editor checks it. Both read
+        # tombi.toml.
+        run: |
+          tombi format --check --offline src/config/board_specs
+          tombi lint --offline --error-on-warnings src/config/board_specs
+
+      - name: Type check (Pyrefly)
+        # Installed from envs/requirements-dev.txt; it reads pyrefly.toml, which
+        # names no interpreter, so Pyrefly queries `python3` on PATH: the
+        # setup-python interpreter that "Install dependencies" filled, whose
+        # site-packages third-party imports resolve against.
+        run: python -m pyrefly check
 
       - name: Validate the example profile
         run: |
           python -c "
-          from core import profile_edit
+          from src.config import profile_edit
           raw, src = profile_edit.read_raw()
           errs = profile_edit.validate(raw)
           print('validating', src)
@@ -85,7 +121,37 @@ jobs:
           "
 
       - name: Test suite (pytest, offline)
+        # testpaths covers tests/ AND the source trees, and addopts carries
+        # --doctest-modules, so this one command runs the fixture suite, the
+        # docstring doctests, and tests/test_invariants.py together.
         run: pytest -q --cov --cov-report=xml --cov-report=term
+
+      - name: Doctests alone (docstring claims are enforced, not asserted)
+        # The step above already ran these. Running them ALONE makes the
+        # collected count visible in the log and turns an empty collection
+        # into a failure: pytest exits 5 on "no tests collected", which
+        # reads as a pass to anyone skimming a green run. See
+        # docs/DOCSTRINGS.md for the rule these enforce.
+        #
+        # Paths are given explicitly (they override testpaths) so tests/ is
+        # excluded and the number printed is doctests only. The root *.py
+        # glob is the entry scripts, the same set pytest.ini lists one by
+        # one; a hand-written copy here went stale when smoke_test.py was
+        # removed.
+        run: |
+          # -o addopts=-q replaces pytest.ini's addopts rather than adding
+          # to it: a second -q would make pytest -qq and swallow the very
+          # "N passed" line this step greps for.
+          pytest -o addopts=-q --doctest-modules src tools *.py > doctest.log 2>&1 || {
+            cat doctest.log; exit 1;
+          }
+          cat doctest.log
+          N=$(grep -Eo "^[0-9]+ passed" doctest.log | head -1)
+          test -n "$N" || {
+            echo "::error::no doctests collected - --doctest-modules is not reaching the source tree"
+            exit 1
+          }
+          echo "### Doctests (Python ${{ matrix.python }}): $N" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Coverage summary
         run: |
@@ -113,7 +179,7 @@ jobs:
           python run_scraper.py --help > /dev/null
           python discover.py --help  > /dev/null
           python capture.py --help   > /dev/null
-          python crawler.py --help   > /dev/null   # deprecation shim
+          python harvest.py --help   > /dev/null
 
       - name: Web app serves on the example profile
         # Boots the real server, exercises the API surface the UI depends
@@ -169,9 +235,16 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        # envs/requirements-dev.txt is where the Nuitka floor is written
+        # down (with zstandard, which --onefile needs to compress the
+        # payload); installing it here rather than `requirements.txt
+        # nuitka` means the build job cannot quietly drift onto an older
+        # Nuitka than the one build_app.py's flags were checked against.
+        # It is the same file the test job installs, so there is one
+        # source of truth for the pin.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt nuitka
+          pip install -r envs/requirements-dev.txt
 
       - name: Cache the Nuitka compiler downloads + ccache
         uses: actions/cache@v4
@@ -180,11 +253,26 @@ jobs:
             ~/.cache/Nuitka
             ~/AppData/Local/Nuitka/Nuitka/Cache
             ~/Library/Caches/Nuitka
-          key: nuitka-${{ matrix.os }}-py312-${{ hashFiles('requirements.txt') }}
+          key: nuitka-${{ matrix.os }}-py312-${{ hashFiles('envs/requirements.txt') }}
           restore-keys: nuitka-${{ matrix.os }}-py312-
 
       - name: Build the standalone app
-        run: python build_app.py
+        # --report writes Nuitka's inclusion report: every module, data
+        # file and DLL that made it into the binary, and the reason each
+        # one was pulled in. Every packaging surprise this project has
+        # hit would have been visible there without a rebuild -- the
+        # missing sqlite3.dll when the conda env was not on PATH
+        # (JobHarvester.exe, 2026-09-10), fake_useragent's
+        # data/browsers.jsonl, and the ddgs engine modules that are only
+        # found by walking the package directory. --report-diffable
+        # leaves out timestamps and absolute paths, so two runs' reports
+        # can be diffed to see what a dependency bump actually changed.
+        # build_app.py passes any --flag it does not recognise straight
+        # through to Nuitka, so these go on the command line.
+        run: python build_app.py --report=jobcrawlerui.report.xml --report-diffable
+
+      - name: No type checker in the UI binary
+        run: python tools/check_no_typechecker.py jobcrawlerui.report.xml
 
       - name: Smoke-launch the built binary
         # A build that compiles but can't boot is not a passing build: run
@@ -205,6 +293,33 @@ jobs:
           curl -sf -m 10 http://127.0.0.1:5601/ | grep -q 'app.js?v=' \
             && echo "OK: built binary serves the cache-busted UI"
 
+      - name: Build the harvester
+        # The second binary ships too, so it has to be built where it is
+        # released from. It is also the cheaper build by far: --target
+        # harvest drops flask, playwright, ddgs, fake_useragent and primp
+        # (HARVEST_SKIP in build_app.py), which is roughly three quarters
+        # of the UI payload.
+        run: python build_app.py --target harvest --report=jobharvester.report.xml --report-diffable
+
+      - name: No type checker in the harvester binary
+        run: python tools/check_no_typechecker.py jobharvester.report.xml
+
+      - name: Smoke-launch the harvester binary
+        # --help is the whole smoke test: harvest.py parks on a timer and
+        # every other mode wants a store, while --help returns 0 without
+        # touching one. It is not a no-op -- harvest.py imports
+        # `src.config` at module level and src/config/profile.py loads a
+        # profile at import, so this proves the compiled entry point
+        # boots AND that the bundled profile.example.toml landed in the
+        # binary and parses. It would have caught the sqlite3.dll build
+        # (2026-09-10), which compiled fine and died on import.
+        shell: bash
+        run: |
+          BIN=JobHarvester.exe
+          [ -f "$BIN" ] || BIN=job-harvester
+          ./"$BIN" --help
+          echo "OK: harvester binary starts"
+
       - name: Upload the build
         uses: actions/upload-artifact@v4
         with:
@@ -212,7 +327,26 @@ jobs:
           path: |
             JobCrawlerUI.exe
             job-crawler-ui
+            JobHarvester.exe
+            job-harvester
           retention-days: 7
+
+      - name: Upload the Nuitka inclusion reports
+        # Kept as their own artifact rather than mixed in with the
+        # binaries: they are the thing you download to answer "why is
+        # this 189 MB" or "did that data file ship", and nobody wants a
+        # 190 MB download to read an XML file. `if: always()` because a
+        # report from a build that FAILED is the most useful one there
+        # is.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuitka-reports-${{ matrix.os }}
+          path: |
+            jobcrawlerui.report.xml
+            jobharvester.report.xml
+          retention-days: 7
+          if-no-files-found: warn
 
   release:
     name: GitHub Release
@@ -227,12 +361,20 @@ jobs:
           path: artifacts
 
       - name: Prepare assets
+        # Both binaries are released together. They share a store and a
+        # profile, so a release that shipped only the UI would leave
+        # anyone running the harvester on whatever build they happened to
+        # have, against a schema the UI had already moved on from.
         run: |
           mkdir release
           mv artifacts/job-crawler-ubuntu-latest/job-crawler-ui release/job-crawler-linux
           mv artifacts/job-crawler-windows-latest/JobCrawlerUI.exe release/JobCrawlerUI.exe
           mv artifacts/job-crawler-macos-latest/job-crawler-ui release/job-crawler-macos
+          mv artifacts/job-crawler-ubuntu-latest/job-harvester release/job-harvester-linux
+          mv artifacts/job-crawler-windows-latest/JobHarvester.exe release/JobHarvester.exe
+          mv artifacts/job-crawler-macos-latest/job-harvester release/job-harvester-macos
           chmod +x release/job-crawler-linux release/job-crawler-macos
+          chmod +x release/job-harvester-linux release/job-harvester-macos
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -241,6 +383,9 @@ jobs:
             release/job-crawler-linux
             release/JobCrawlerUI.exe
             release/job-crawler-macos
+            release/job-harvester-linux
+            release/JobHarvester.exe
+            release/job-harvester-macos
           generate_release_notes: true
           draft: false
           prerelease: false

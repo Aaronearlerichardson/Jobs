@@ -1,0 +1,332 @@
+{
+ "dataViewSet": {
+  "pagingInfo": {
+   "sortOrderName": "JobPosting.ByPostDateBeginSet",
+   "previousDisabled": true,
+   "fk": "JobPosting[ByPostDateBeginSet](9999,20260921,246253,2)",
+   "firstDisabled": true,
+   "hasPrevious": false,
+   "pageSize": 500,
+   "hasNext": false,
+   "isAscending": false,
+   "lk": "JobPosting[ByPostDateBeginSet](9999,20260824,241936,1)"
+  },
+  "rangeViewKey": "JobPosting[JobPostingSet](9999,_niu_,_niu_)",
+  "data": [
+   {
+    "resourceId": "JobPosting[JobPostingSet](9999,246253,2)",
+    "busClassName": "JobPosting",
+    "name": "JobPosting",
+    "id": 1,
+    "posToViewKey": {
+     "pk": "JobPosting[ByPostDateBeginSet](9999,20260921,246253,2)"
+    },
+    "fields": {
+     "Description": {
+      "size": 100,
+      "mutable": true,
+      "value": "RN Clinical Nurse II Per Diem- 7BT Short Stay",
+      "required": true
+     },
+     "Category": {
+      "size": 20,
+      "mutable": true,
+      "stateValues": [
+       {
+        "label": "Nursing",
+        "value": "NURSING"
+       }
+      ],
+      "value": "NURSING"
+     },
+     "LocationOfJobDescriptionForSort": {
+      "size": 103,
+      "mutable": true,
+      "value": "US:NC:Holly Springs"
+     },
+     "LocationOfJob_prd_Location_ohb_3_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": "Holly Springs"
+     },
+     "IsHotJob": {
+      "disableFieldHistory": true,
+      "size": -1,
+      "mutable": false,
+      "value": false
+     },
+     "JobRequisition": {
+      "size": 9,
+      "mutable": false,
+      "value": 246253,
+      "required": true
+     },
+     "_op_Category_prd_Description_spc_translation_cp_": {
+      "disableFieldHistory": true,
+      "size": 60,
+      "mutable": false,
+      "value": "Nursing"
+     },
+     "JobId": {
+      "size": 9,
+      "mutable": true,
+      "value": 246253
+     },
+     "JobPosting": {
+      "symbolicKey": true,
+      "size": 4,
+      "mutable": false,
+      "value": 2
+     },
+     "LocationOfJob_prd_Location_ohb_1_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": "US"
+     },
+     "LocationOfJob": {
+      "disableFieldHistory": true,
+      "size": 1,
+      "delimiter": ":",
+      "members": [
+       "LocationOfJob_prd_Location_ohb_1_chb_",
+       "LocationOfJob_prd_Location_ohb_2_chb_",
+       "LocationOfJob_prd_Location_ohb_3_chb_",
+       "LocationOfJob_prd_Location_ohb_4_chb_"
+      ],
+      "mutable": true,
+      "type": "array",
+      "value": "US:NC:Holly Springs"
+     },
+     "LocationOfJob_prd_Location_ohb_2_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": "NC"
+     },
+     "PostingDateRange_prd_Begin": {
+      "size": 8,
+      "mutable": true,
+      "value": "20260921"
+     },
+     "_op_Description_spc_translation_cp_": {
+      "disableFieldHistory": true,
+      "size": 100,
+      "mutable": true,
+      "value": "RN Clinical Nurse II Per Diem- 7BT Short Stay"
+     }
+    }
+   },
+   {
+    "resourceId": "JobPosting[JobPostingSet](9999,207651,1)",
+    "busClassName": "JobPosting",
+    "name": "JobPosting",
+    "id": 258,
+    "posToViewKey": {
+     "pk": "JobPosting[ByPostDateBeginSet](9999,20260324,207651,1)"
+    },
+    "fields": {
+     "Description": {
+      "size": 100,
+      "mutable": true,
+      "value": "Statistician/Data Scientist - ISD Analytics",
+      "required": true
+     },
+     "Category": {
+      "size": 20,
+      "mutable": true,
+      "stateValues": [
+       {
+        "label": "Professional - Non-Clinical",
+        "value": "PROF - NON-CLINICAL"
+       }
+      ],
+      "value": "PROF - NON-CLINICAL"
+     },
+     "LocationOfJobDescriptionForSort": {
+      "size": 103,
+      "mutable": true,
+      "value": "US:NC:Morrisville"
+     },
+     "LocationOfJob_prd_Location_ohb_3_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": "Morrisville"
+     },
+     "IsHotJob": {
+      "disableFieldHistory": true,
+      "size": -1,
+      "mutable": false,
+      "value": false
+     },
+     "JobRequisition": {
+      "size": 9,
+      "mutable": false,
+      "value": 207651,
+      "required": true
+     },
+     "_op_Category_prd_Description_spc_translation_cp_": {
+      "disableFieldHistory": true,
+      "size": 60,
+      "mutable": false,
+      "value": "Professional - Non-Clinical"
+     },
+     "JobId": {
+      "size": 9,
+      "mutable": true,
+      "value": 207651
+     },
+     "JobPosting": {
+      "symbolicKey": true,
+      "size": 4,
+      "mutable": false,
+      "value": 1
+     },
+     "LocationOfJob_prd_Location_ohb_1_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": "US"
+     },
+     "LocationOfJob": {
+      "disableFieldHistory": true,
+      "size": 1,
+      "delimiter": ":",
+      "members": [
+       "LocationOfJob_prd_Location_ohb_1_chb_",
+       "LocationOfJob_prd_Location_ohb_2_chb_",
+       "LocationOfJob_prd_Location_ohb_3_chb_",
+       "LocationOfJob_prd_Location_ohb_4_chb_"
+      ],
+      "mutable": true,
+      "type": "array",
+      "value": "US:NC:Morrisville"
+     },
+     "LocationOfJob_prd_Location_ohb_2_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": "NC"
+     },
+     "PostingDateRange_prd_Begin": {
+      "size": 8,
+      "mutable": true,
+      "value": "20260324"
+     },
+     "_op_Description_spc_translation_cp_": {
+      "disableFieldHistory": true,
+      "size": 100,
+      "mutable": true,
+      "value": "Statistician/Data Scientist - ISD Analytics"
+     }
+    }
+   },
+   {
+    "resourceId": "JobPosting[JobPostingSet](9999,210745,1)",
+    "busClassName": "JobPosting",
+    "name": "JobPosting",
+    "id": 280,
+    "posToViewKey": {
+     "pk": "JobPosting[ByPostDateBeginSet](9999,20260312,210745,1)"
+    },
+    "fields": {
+     "Description": {
+      "size": 100,
+      "mutable": true,
+      "value": "Manager Communications - Academic and Clinical Research Capability",
+      "required": true
+     },
+     "Category": {
+      "size": 20,
+      "mutable": true,
+      "stateValues": [
+       {
+        "label": "Management  - Non-Clinical",
+        "value": "MGMT NON CLINICAL"
+       }
+      ],
+      "value": "MGMT NON CLINICAL"
+     },
+     "LocationOfJobDescriptionForSort": {
+      "size": 103,
+      "mutable": true,
+      "value": "Chapel Hill:NC"
+     },
+     "LocationOfJob_prd_Location_ohb_3_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": ""
+     },
+     "IsHotJob": {
+      "disableFieldHistory": true,
+      "size": -1,
+      "mutable": false,
+      "value": false
+     },
+     "JobRequisition": {
+      "size": 9,
+      "mutable": false,
+      "value": 210745,
+      "required": true
+     },
+     "_op_Category_prd_Description_spc_translation_cp_": {
+      "disableFieldHistory": true,
+      "size": 60,
+      "mutable": false,
+      "value": "Management  - Non-Clinical"
+     },
+     "JobId": {
+      "size": 9,
+      "mutable": true,
+      "value": 210745
+     },
+     "JobPosting": {
+      "symbolicKey": true,
+      "size": 4,
+      "mutable": false,
+      "value": 1
+     },
+     "LocationOfJob_prd_Location_ohb_1_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": "Chapel Hill"
+     },
+     "LocationOfJob": {
+      "disableFieldHistory": true,
+      "size": 1,
+      "delimiter": ":",
+      "members": [
+       "LocationOfJob_prd_Location_ohb_1_chb_",
+       "LocationOfJob_prd_Location_ohb_2_chb_",
+       "LocationOfJob_prd_Location_ohb_3_chb_",
+       "LocationOfJob_prd_Location_ohb_4_chb_"
+      ],
+      "mutable": true,
+      "type": "array",
+      "value": "Chapel Hill:NC"
+     },
+     "LocationOfJob_prd_Location_ohb_2_chb_": {
+      "size": 25,
+      "mutable": true,
+      "value": "NC"
+     },
+     "PostingDateRange_prd_Begin": {
+      "size": 8,
+      "mutable": true,
+      "value": "20260312"
+     },
+     "_op_Description_spc_translation_cp_": {
+      "disableFieldHistory": true,
+      "size": 100,
+      "mutable": true,
+      "value": "Manager Communications - Academic and Clinical Research Capability"
+     }
+    }
+   }
+  ],
+  "listUrl": "https://css-unchealthunc-prd.inforcloudsuite.com/hcm/Jobs/list/JobPosting.SearchForJobsResults?pagepanel=JobsHomePage.Jobs.Jobs&csk.JobBoard=EXTERNAL&csk.HROrganization=9999&pagesize=500",
+  "pagingUrls": {
+   "lastPageUrl": "https://css-unchealthunc-prd.inforcloudsuite.com/hcm/Jobs/list/JobPosting.SearchForJobsResults?pagepanel=JobsHomePage.Jobs.Jobs&sortOrderName=JobPosting.ByPostDateBeginSet&previousDisabled=true&fk=JobPosting%5BByPostDateBeginSet%5D%289999%2C20260921%2C246253%2C2%29&pageop=last&pagesize=500&hasPrevious=false&hasNext=true&isAscending=false&lk=JobPosting%5BByPostDateBeginSet%5D%289999%2C20260824%2C241936%2C1%29&csk.JobBoard=EXTERNAL&csk.HROrganization=9999",
+   "firstPageUrl": "https://css-unchealthunc-prd.inforcloudsuite.com/hcm/Jobs/list/JobPosting.SearchForJobsResults?pagepanel=JobsHomePage.Jobs.Jobs&sortOrderName=JobPosting.ByPostDateBeginSet&previousDisabled=true&fk=JobPosting%5BByPostDateBeginSet%5D%289999%2C20260921%2C246253%2C2%29&pageop=first&pagesize=500&hasPrevious=false&hasNext=true&isAscending=false&lk=JobPosting%5BByPostDateBeginSet%5D%289999%2C20260824%2C241936%2C1%29&csk.JobBoard=EXTERNAL&csk.HROrganization=9999",
+   "nextPageUrl": "https://css-unchealthunc-prd.inforcloudsuite.com/hcm/Jobs/list/JobPosting.SearchForJobsResults?pagepanel=JobsHomePage.Jobs.Jobs&sortOrderName=JobPosting.ByPostDateBeginSet&previousDisabled=true&fk=JobPosting%5BByPostDateBeginSet%5D%289999%2C20260921%2C246253%2C2%29&pageop=next&pagesize=500&hasPrevious=false&hasNext=true&isAscending=false&lk=JobPosting%5BByPostDateBeginSet%5D%289999%2C20260824%2C241936%2C1%29&csk.JobBoard=EXTERNAL&csk.HROrganization=9999",
+   "reloadPageUrl": "https://css-unchealthunc-prd.inforcloudsuite.com/hcm/Jobs/list/JobPosting.SearchForJobsResults?pagepanel=JobsHomePage.Jobs.Jobs&sortOrderName=JobPosting.ByPostDateBeginSet&previousDisabled=true&fk=JobPosting%5BByPostDateBeginSet%5D%289999%2C20260921%2C246253%2C2%29&pageop=load&pagesize=500&hasPrevious=false&rk=JobPosting%5BJobPostingSet%5D%289999%2C_niu_%2C_niu_%29&hasNext=true&isAscending=false&lk=JobPosting%5BByPostDateBeginSet%5D%289999%2C20260824%2C241936%2C1%29&csk.JobBoard=EXTERNAL&csk.HROrganization=9999"
+  }
+ },
+ "status": "COMPLETED"
+}

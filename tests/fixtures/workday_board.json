@@ -1,0 +1,58 @@
+{
+ "total": 3,
+ "jobPostings": [
+  {
+   "title": "Director, Pre-Clinical Manufacturing",
+   "externalPath": "/job/Durham-NC/Director--Pre-Clinical-Manufacturing_R26-129-1",
+   "locationsText": "Durham, NC",
+   "bulletFields": [
+    "R26-129"
+   ]
+  },
+  {
+   "title": "Manager, Data Management",
+   "externalPath": "/job/Durham-NC/Manager--Data-Management_R26-122-1",
+   "locationsText": "2 Locations",
+   "bulletFields": [
+    "R26-122"
+   ]
+  },
+  {
+   "title": "Associate Scientist, AS&T",
+   "externalPath": "/job/Durham-NC/Associate-Scientist--AS-T_R26-105-1",
+   "locationsText": "Durham, NC",
+   "bulletFields": [
+    "R26-105"
+   ]
+  }
+ ],
+ "facets": [
+  {
+   "facetParameter": "locationMainGroup",
+   "values": [
+    {
+     "facetParameter": "locations",
+     "descriptor": "Locations",
+     "values": [
+      {
+       "descriptor": "Durham, NC",
+       "id": "dbb04e2ba3870101ba26cc6d33eb0000",
+       "count": 10
+      },
+      {
+       "descriptor": "Philadelphia, PA",
+       "id": "dbb04e2ba3870101ba26ed0e6bdf0000",
+       "count": 2
+      },
+      {
+       "descriptor": "Remote US",
+       "id": "1c55b093cf6d100157d8223801b60000",
+       "count": 4
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "userAuthenticated": false
+}

@@ -1,0 +1,51 @@
+# One employer's own site; the handle is the location the search is
+# narrowed to, as the site spells it ("North Carolina, USA").
+#
+# Notes:
+#     The results page embeds its jobs as positional arrays
+#     (AF_initDataCallback ds:1: the jobs, then the total and the page
+#     size). robots.txt disallows the results' paging (?page=), so a pull
+#     reads the first page, newest first, and a longer board is a capped
+#     snapshot: an unlisted posting closes only when its own page says so.
+#     Added 2026-10-13.
+
+[[detect]]
+host = "google.com"
+re = [
+    '''(?i)google\.com/about/careers/applications/jobs/results/?\?[^\s"'<>#]*?\blocation=([^&\s"'<>#]+)'''
+]
+transform = ["unquote"]
+
+[canary]
+name = "Google"
+handle = "North Carolina, USA"
+min_jobs = 10
+
+[job_ref]
+re = '(?i)^https?://(?:www\.)?google\.com/about/careers/applications/jobs/results/(\d+)'
+parts = ["jid"]
+
+[listing]
+url = "https://www.google.com/about/careers/applications/jobs/results"
+params = { location = "{slug}", sort_by = "date" }
+pager = { kind = "page", size = 20, pages = 1, total = "[2]" }
+
+[listing.decoder]
+kind = "json_in_html"
+regex = "AF_initDataCallback\\(\\{key: 'ds:1', hash: '\\d+', data:"
+entries = "[0]"
+
+# A row is [id, title, apply url, [_, responsibilities], [_, qualifications],
+# ..., [locations], [_, about], ..., [posted s, ns], ...]. A stored URL's
+# job_ref part stands in for the row when an id is rebuilt from it.
+[listing.fields]
+id = { of = { first = ["jid", "[0]"] }, transform = "prefix:google_" }
+title = "[1]"
+url = { format = "https://www.google.com/about/careers/applications/jobs/results/{[0]}" }
+location = { join = ["[9].[].[0]"], sep = "; " }
+posted_at = "[12].[0]"
+description = { join = ["[10].[1]", "[3].[1]", "[4].[1]"], sep = "\n", transform = "html_text" }
+
+# A removed posting's URL serves the search page in its place.
+[closure]
+page_closed = '<title>Jobs search\b'

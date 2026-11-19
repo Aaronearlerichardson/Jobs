@@ -1,0 +1,744 @@
+"""Roster repair: deactivate dead boards, retry the rows that never
+resolved, rename boards still named after their own slug."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections import Counter
+from contextlib import AsyncExitStack
+from collections.abc import Collection, Iterable
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, cast
+
+from src import config
+from src import store
+from src.ats import coords
+from src.ats.board import BOARDS, board_for
+from src.ats.board.engine import Board
+from src.claude import api as claude_api
+from src.config import RuntimeTrack
+from src.discovery.write import (board_already_tracked, mission_context,
+                                 report_dup_board)
+from src.digest.render import score_text
+from src.discovery.resolve import board as resolve_board
+from src.discovery.resolve.probes import JsScanProbePool
+from src.match.names import junk_name_reason, name_key
+from src.net.parallel import RESOLVE_STALL_S, fan_out
+from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
+from src.rows import BoardHit, CompanyIn, CompanyRow, is_watched
+from src.store.companies import CAPTURE_ATS
+
+if TYPE_CHECKING:
+    from sqlite3 import Connection
+
+
+async def prune_dead_boards(db: store.Writer | Connection, max_workers: int = 12,
+                            deactivate_offmission: bool = False) -> tuple[int, int]:
+    """Deactivate active companies whose JSON-API ATS board no longer resolves
+    (a hard 404/error, the source of the crawl's `HTTP 404` spam), and
+    optionally off-mission `other`-tier companies (excluding multi-division).
+    Only ATSes whose board endpoint cleanly distinguishes "exists" (200)
+    from "dead" (404) are probed, and the writes go to `db` (a store.Writer,
+    or a connection: track_writer). Returns (n_dead, n_offmission).
+
+    Prints how many boards it probes, then one line per company it
+    deactivates (name, ATS, reason), so a clean run still leaves a trace.
+
+    Notes:
+        Lived in src.store until 2026-09-10; it probes the network and
+        applies roster policy, so it is an operation, and the store keeps
+        only the write (store.deactivate_company).
+    """
+    # Board.alive, not the slug probe: an empty board is alive; dead means
+    # the board REQUEST fails.
+    PROBE = {b.name: b.alive for b in BOARDS.values() if b.spec.prunable}
+
+    async with track_writer(db=db) as db:
+        rows = [c for c in await db.run(store.get_companies, active_only=True)
+                if c.get("ats") in PROBE and c.get("slug")]
+        print(f"  probing {len(rows)} board(s) for a dead ATS endpoint...")
+
+        async def _check(c: CompanyRow) -> tuple[CompanyRow, bool]:
+            ok, _ = await PROBE[c["ats"] or ""](c["slug"] or "")
+            return c, ok
+
+        # A probe that raises is now reported and skipped rather than killing
+        # the whole prune -- this was the one pool here with no try at all, so
+        # a single unreachable host aborted the pass over every other board.
+        dead = [c async for c, ok in fan_out(rows, _check, "board probe", max_workers)
+                if not ok]
+        return len(dead), await db.batch(_deactivate, dead, deactivate_offmission)
+
+
+def _deactivate(conn: sqlite3.Connection, dead: list[CompanyRow], offmission: bool) -> int:
+    """prune_dead_boards' writes, in its one batch: the `dead` boards, then
+    with `offmission` the off-mission companies; returns how many of those."""
+    for c in dead:
+        store.deactivate_company(
+            conn, c["id"],
+            note=f"deactivated: dead {c['ats']} board '{c['slug']}'")
+        print(f"    [dead]  {c['name'][:30]:30} {c['ats'] or '':10} "
+              f"board '{c['slug']}' no longer resolves")
+    if not offmission:
+        return 0
+    # Watched companies are exempt: watching is the user deliberately
+    # keeping an off-mission employer crawled.
+    off = [c for c in store.get_companies(conn, active_only=True)
+           if c.get("mission_tier") == "other"
+           and not config.is_multi_division(c.get("name"))
+           and not is_watched(c)]
+    for c in off:
+        store.deactivate_company(conn, c["id"])
+        print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
+              f"off-mission (score={c.get('mission_score')})")
+    return len(off)
+
+
+# --------------------------------------------------------------------------- #
+#  Re-resolution of rows that died at resolution                               #
+# --------------------------------------------------------------------------- #
+#
+# A name that never resolved to a board is kept as an inactive row carrying a
+# miss_reason (src.store.record_miss), and the two families below are the
+# ones worth another attempt: nothing was found at all ("no-board-found"), or
+# coordinates were found and the live fetch came back empty ("board-dead").
+# Neither is a permanent verdict — a resolver improves, a company migrates
+# ATS, a careers page comes back — and that bucket is where the roster's
+# best-known local employers sit. The other families are not retried by
+# default: "no-local-jobs" already IS a live board, and "ats-unsupported" and
+# "fetch-error" are opt-in (OPT_IN_FAMILIES).
+RERESOLVE_FAMILIES = ("no-board-found", _DEAD_BOARD_FAMILY)
+
+# A board that is not a resolution failure at all -- ats/slug are set, the
+# harvester keeps fetching it without error -- but that has LISTED nothing
+# in a week or more. total_job_count=0 forever most often means the slug
+# resolves to nothing real (a 200 OK with an empty body, not a 404: Lever
+# and some others answer this way for a retired or mistyped tenant), which
+# a live re-sniff can catch the same way it catches a dead board. Not one
+# of RERESOLVE_FAMILIES because it carries no miss_reason of its own -- see
+# _silent_board_candidates -- so a pass opts into it through
+# reresolve_misses's `families` rather than getting it by default.
+SILENT_FAMILY = "silent-board"
+
+# Boards read as a self-hosted careers page (config.CAREERS_PAGE_ATS), and
+# rows holding only a careers URL, whose rendered page names a fetchable
+# platform: Siemens' page is an Avature board, GitHub's a Jibe one
+# (2026-10-09). The careers-page reader accepts any job-shaped links, so
+# the static resolver keeps answering with it; only a headless scan
+# (resolve_board.js_board_hit) reaches the platform. A page that still
+# names none keeps its row as it is.
+CAREERS_PAGE_FAMILY = "careers-page"
+
+# Every family a pass may be asked to retry: the defaults, plus the ones a
+# caller opts into. "fetch-error" rows died on a transient the harvest pass
+# does not clear; "ats-unsupported" rows wait on a fetcher that may exist now.
+OPT_IN_FAMILIES = (SILENT_FAMILY, CAREERS_PAGE_FAMILY, "fetch-error", "ats-unsupported")
+
+
+def bury_404_board(conn: sqlite3.Connection, company: CompanyRow,
+                   error: str | None) -> str | None:
+    """Mark `company` 'board-dead:<ats>' and deactivate it when `error`
+    proves its board gone (`Board.gone`). Returns the reason written, else None.
+
+    Deactivated exactly as mark_harvested's promotion is, which is what
+    lets reresolve_misses re-check it."""
+    ats = company.get("ats")
+    board = board_for(ats)
+    if not (board and board.gone(error)):
+        return None
+    reason = f"board-dead:{ats}"
+    store.deactivate_company(conn, company["id"])
+    store.record_miss(conn, company["name"], reason)
+    print(f"    [!] {company['name']} ({ats}): listing endpoint gone (404/410) - "
+          f"board-dead, deactivated (reresolve re-checks it)")
+    return reason
+
+
+def _silent_board_candidates(conn: sqlite3.Connection,
+                             now: datetime | None = None) -> list[CompanyRow]:
+    """Harvested boards that have listed nothing in >= SILENT_DAYS days --
+    a resolution that stopped being true, not a resolution failure (those
+    are RERESOLVE_FAMILIES's job). Carries no miss_reason of its own, so
+    this is a separate query rather than another WHERE clause on one: a
+    miss-family row and a silent-board row have almost nothing in common
+    to select on.
+
+    A row qualifies only when ALL of:
+      * it has a real, fetchable board (an `ats`, not the capture-only one)
+      * `miss_reason` is NULL -- one already on a miss-remediation path
+        (including a promoted 'board-dead:<ats>', mark_harvested's own
+        cycle) is that path's to retry, not this one's to re-select;
+      * `total_job_count` is 0;
+      * `last_harvested_at` is within SILENT_HARVESTED_WITHIN_DAYS days --
+        still being actively harvested, not simply a board the run has
+        stopped visiting;
+      * `last_nonempty_at` is NULL or >= SILENT_DAYS days old;
+      * `created_at` is also >= SILENT_DAYS days old, or NULL (the row
+        predates the column) -- so a board harvested for the first time
+        this morning (last_nonempty_at NULL, same as a chronically silent
+        one) is not selected before it has actually had a week.
+
+    Oldest evidence first (last_nonempty_at, falling back to created_at for
+    a board that never had one):
+
+    >>> from src.store import connect, upsert_company
+    >>> from datetime import datetime, timedelta
+    >>> conn = connect(":memory:")
+    >>> old = (datetime.now() - timedelta(days=30)).isoformat()
+    >>> recent = datetime.now().isoformat()
+
+    (last_harvested_at/last_nonempty_at are harvest-scheduling columns
+    upsert_company does not accept -- like mark_harvested, this sets them
+    with a raw UPDATE.)
+
+    >>> cid = upsert_company(conn, {"name": "Stale", "ats": "lever",
+    ...                             "slug": "stale", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET created_at=?, "
+    ...                  "last_harvested_at=? WHERE id=?", (old, recent, cid))
+    >>> [c["name"] for c in _silent_board_candidates(conn)]
+    ['Stale']
+
+    A board harvested for the first time this week is not silent yet --
+    even though it too has never had a nonempty pass:
+
+    >>> cid_new = upsert_company(conn, {"name": "New", "ats": "lever",
+    ...                                 "slug": "n", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET last_harvested_at=? "
+    ...                  "WHERE id=?", (recent, cid_new))
+    >>> [c["name"] for c in _silent_board_candidates(conn)]
+    ['Stale']
+
+    Neither is one that DID list something recently, one no longer being
+    harvested at all, or one already on a miss-remediation path of its
+    own:
+
+    >>> cid2 = upsert_company(conn, {"name": "Fine", "ats": "lever",
+    ...                              "slug": "f", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET created_at=?, "
+    ...                  "last_harvested_at=?, last_nonempty_at=? "
+    ...                  "WHERE id=?", (old, recent, recent, cid2))
+    >>> cid3 = upsert_company(conn, {"name": "Abandoned", "ats": "lever",
+    ...                              "slug": "ab", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET created_at=? WHERE id=?",
+    ...                  (old, cid3))
+    >>> cid4 = upsert_company(conn, {"name": "Erroring", "ats": "lever",
+    ...                              "slug": "e", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET created_at=?, "
+    ...                  "last_harvested_at=?, "
+    ...                  "miss_reason='fetch-error:harvest' WHERE id=?",
+    ...                  (old, recent, cid4))
+    >>> [c["name"] for c in _silent_board_candidates(conn)]
+    ['Stale']
+    """
+    # How long a board must have listed nothing before it counts as silent
+    # (last_nonempty_at, or created_at when it never had one, at least this
+    # old), and how recently it must still have been harvested to count as
+    # "still being tracked" rather than abandoned.
+    silent_days = 7
+    silent_harvested_within_days = 3
+    now = now or datetime.now()
+    silent_cut = (now - timedelta(days=silent_days)).isoformat()
+    harvested_cut = (now - timedelta(days=silent_harvested_within_days)
+                    ).isoformat()
+    return [store.as_company(r) for r in conn.execute(
+        f"SELECT * FROM companies_effective WHERE ats IS NOT NULL AND ats != ? "
+        f"AND {store.NOT_FEED} AND miss_reason IS NULL "
+        "AND COALESCE(total_job_count, 0) = 0 "
+        "AND last_harvested_at IS NOT NULL AND last_harvested_at >= ? "
+        "AND COALESCE(created_at, '') <= ? "
+        "AND (last_nonempty_at IS NULL OR last_nonempty_at <= ?) "
+        "ORDER BY COALESCE(last_nonempty_at, created_at) ASC, name ASC",
+        (CAPTURE_ATS, harvested_cut, silent_cut, silent_cut)).fetchall()]
+
+
+def _reads_careers_page(r: CompanyRow) -> bool:
+    """Whether `r` is a CAREERS_PAGE_FAMILY row: a careers URL, read by the
+    careers-page reader or by nothing, and no miss of its own."""
+    return bool(r.get("careers_url")) and (
+        r.get("ats") == config.CAREERS_PAGE_ATS
+        or not (r.get("ats") or r.get("miss_reason")))
+
+
+def _careers_page_candidates(conn: sqlite3.Connection) -> list[CompanyRow]:
+    """The CAREERS_PAGE_FAMILY rows, active or not, by name.
+
+    >>> from src.store import connect, upsert_company
+    >>> conn = connect(":memory:")
+    >>> for row in [{"name": "Page", "ats": "custom", "careers_url": "https://p.test/jobs"},
+    ...             {"name": "Bare", "careers_url": "https://b.test/careers"},
+    ...             {"name": "Lev", "ats": "lever", "slug": "lev"}]:
+    ...     _ = upsert_company(conn, row)
+    >>> [c["name"] for c in _careers_page_candidates(conn)]
+    ['Bare', 'Page']
+    """
+    rows = conn.execute(
+        "SELECT * FROM companies_effective WHERE COALESCE(careers_url, '') != '' "
+        "AND COALESCE(ats, ?) = ? ORDER BY name",
+        (config.CAREERS_PAGE_ATS, config.CAREERS_PAGE_ATS)).fetchall()
+    return [r for r in map(store.as_company, rows) if _reads_careers_page(r)]
+
+
+def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
+                          names: Iterable[str] | None = None, limit: int | None = 50,
+                          families: Collection[str] = RERESOLVE_FAMILIES) -> list[CompanyRow]:
+    """The rows a re-resolution pass should retry, oldest evidence first.
+
+    Only the requested miss families are selected among rows the crawl is
+    not already using (`active = 0`, same as every miss — see
+    src.store.record_miss):
+
+    >>> from src.store import connect, record_miss, upsert_company
+    >>> conn = connect(":memory:")
+    >>> for n, r in [("Emmes", "no-board-found:wrong-domain"),
+    ...              ("Advarra", "board-dead:icims"),
+    ...              ("Chiesi", "no-local-jobs"),
+    ...              ("Locus", "ats-unsupported:ukg")]:
+    ...     _ = record_miss(conn, n, r)
+    >>> _ = upsert_company(conn, {"name": "Guardant", "ats": "lever",
+    ...                           "active": 1})
+    >>> _ = conn.execute("UPDATE companies SET miss_at='2026-01-01' "
+    ...                  "WHERE name='Advarra'")
+    >>> [c["name"] for c in _reresolve_candidates(conn)]
+    ['Advarra', 'Emmes']
+
+    `limit` bounds the pass, and the oldest miss goes first — a hit clears
+    the row's miss and a repeated miss re-stamps `miss_at`, so successive
+    bounded runs work through the backlog instead of re-probing the same
+    head of it:
+
+    >>> [c["name"] for c in _reresolve_candidates(conn, limit=1)]
+    ['Advarra']
+
+    A feed's roster row that went board-dead is not retried (the next
+    store.sync_feed_companies revives it):
+
+    >>> store.sync_feed_companies(conn)
+    >>> _ = conn.execute("UPDATE companies SET active=0, miss_reason='board-dead:remoteok' "
+    ...                  "WHERE ats='remoteok'")
+    >>> [c["name"] for c in _reresolve_candidates(conn)]
+    ['Advarra', 'Emmes']
+    >>> store.sync_feed_companies(conn)
+    >>> conn.execute("SELECT miss_reason FROM companies WHERE ats='remoteok'").fetchone()[0] is None
+    True
+
+    `days` keeps only rows whose miss is at least that old, so a nightly
+    run does not re-probe what this morning already failed:
+
+    >>> [c["name"] for c in _reresolve_candidates(conn, days=30)]
+    ['Advarra']
+
+    `names` restricts the pass to specific companies, matched
+    case-insensitively; it narrows the same selection rather than widening
+    it, so a name that is not a retryable miss is still not selected:
+
+    >>> [c["name"] for c in _reresolve_candidates(conn, names=["emmes"])]
+    ['Emmes']
+    >>> _reresolve_candidates(conn, names=["Chiesi", "Guardant"])
+    []
+
+    Passing SILENT_FAMILY alongside the miss families ALSO selects
+    harvested boards that have listed nothing in SILENT_DAYS+ days (see
+    _silent_board_candidates) -- these carry no miss_reason of their own,
+    so they are appended after the miss-backlog rows (a bounded run works
+    the classic miss backlog first) rather than interleaved by `miss_at`:
+
+    >>> cid = upsert_company(conn, {"name": "Quiet", "ats": "lever",
+    ...                             "slug": "quiet", "total_job_count": 0})
+    >>> old = (datetime.now() - timedelta(days=30)).isoformat()
+    >>> _ = conn.execute("UPDATE companies SET created_at=?, "
+    ...                  "last_harvested_at=? WHERE name='Quiet'",
+    ...                  (old, datetime.now().isoformat()))
+    >>> [c["name"] for c in _reresolve_candidates(
+    ...     conn, families=RERESOLVE_FAMILIES + (SILENT_FAMILY,))]
+    ['Advarra', 'Emmes', 'Quiet']
+    >>> [c["name"] for c in _reresolve_candidates(conn)]
+    ['Advarra', 'Emmes']
+
+    "fetch-error" and "ats-unsupported" rows are selected only when named:
+
+    >>> _ = record_miss(conn, "Delsys", "fetch-error:stalled")
+    >>> sorted(c["name"] for c in _reresolve_candidates(
+    ...     conn, families=("fetch-error", "ats-unsupported")))
+    ['Delsys', 'Locus']
+    """
+    wanted = {n.strip().lower() for n in (names or []) if n.strip()}
+    cutoff = ((datetime.now() - timedelta(days=days)).isoformat()
+              if days else None)
+    # A NULL miss_at predates the column: unknown age, so old enough.
+    conds = ["COALESCE(active, 0) = 0", "miss_reason IS NOT NULL",
+             store.miss_family_in(), store.NOT_FEED]
+    args: list[str | int] = [json.dumps(sorted(families))]
+    if wanted:
+        conds.append("lower(name) IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(sorted(wanted)))
+    if cutoff:
+        conds.append("COALESCE(miss_at, '') <= ?")
+        args.append(cutoff)
+    if limit:
+        args.append(limit)
+    out = [store.as_company(r) for r in conn.execute(
+        f"SELECT * FROM companies_effective WHERE {' AND '.join(conds)} "
+        "ORDER BY COALESCE(miss_at, '') ASC, name ASC"
+        + (" LIMIT ?" if limit else ""), args).fetchall()]
+    if SILENT_FAMILY in families and not (limit and len(out) >= limit):
+        out += [r for r in _silent_board_candidates(conn)
+                if (not wanted or (r["name"] or "").strip().lower() in wanted)
+                and not (cutoff and (r.get("last_nonempty_at") or r.get("created_at")
+                                     or "") > cutoff)]
+    if CAREERS_PAGE_FAMILY in families and not (limit and len(out) >= limit):
+        held = {r["id"] for r in out}
+        out += [r for r in _careers_page_candidates(conn) if r["id"] not in held
+                and (not wanted or (r["name"] or "").strip().lower() in wanted)]
+    return out[:limit] if limit else out
+
+
+async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
+                           max_workers: int = 6, days: int | None = None,
+                           names: Iterable[str] | None = None, t: RuntimeTrack | None = None,
+                           families: Iterable[str] | None = RERESOLVE_FAMILIES,
+                           commit: bool = True) -> list[CompanyIn]:
+    """Retry the roster rows that died at resolution; queue every hit for
+    human review. Returns the rows written.
+
+    A hit is written onto the EXISTING row (same name): its board
+    coordinates, its mission score, `active=0` and `review` pending, with
+    the scope tags it already carried kept. Writing
+    the board clears the row's miss (src.store.upsert_company). A repeated
+    miss just re-stamps miss_reason/miss_at, which moves the row to the back
+    of the queue `_reresolve_candidates` orders by.
+
+    `families` picks what is retried (default RERESOLVE_FAMILIES; an empty
+    value means the default). SILENT_FAMILY adds harvested boards that
+    have listed nothing in SILENT_DAYS+ days (no miss_reason of their own
+    -- see _silent_board_candidates); they are tried after every
+    miss-family row, so `families=(SILENT_FAMILY,)` is how a bounded pass
+    reaches them. A hit on one is written exactly like any other family's.
+    resolve_or_miss only calls a board a hit when a live fetch lists jobs,
+    so the silent coordinates themselves never come back as one; a miss on
+    an inactive row is recorded as usual (record_miss declines on an
+    active row, which then stays a candidate).
+
+    CAREERS_PAGE_FAMILY adds the careers-page rows, each given one headless
+    scan of its careers page first; one whose page names no fetchable
+    platform is kept as it is ("kept"), unless its own miss family was
+    asked for too, which then resolves it as usual.
+
+    `commit=False` previews the pass: every sniff runs and every line is
+    printed, but nothing is written and no mission score is requested;
+    the would-be retargets are returned.
+
+    Notes:
+        Deliberately writes nothing else on the row — the roster review
+        queue reads exactly `active=0` plus that tag, and confirming a row
+        there is what makes it crawlable. Rows are never activated here: a
+        re-resolved board is a claim about a company nobody has looked at
+        in months, and the resolver's own collision guards are not a
+        substitute for that look.
+
+        Resolution runs under the same stall watchdog every other bulk
+        resolution path uses (src.net.parallel.fan_out's `stall_s`):
+        one wedged careers-page fetch must not hold the web UI's
+        one-op-at-a-time slot.
+    """
+    families = tuple(families or RERESOLVE_FAMILIES)
+    unknown = set(families) - {*RERESOLVE_FAMILIES, *OPT_IN_FAMILIES}
+    if unknown:
+        raise ValueError(f"unknown reresolve families: {sorted(unknown)}")
+    t = _t(t)
+    async with track_writer(t, db) as db:
+
+        async def miss(name: str, reason: str) -> None:
+            if commit:
+                await db.run(store.record_miss, name, reason)
+
+        rows = await db.run(_reresolve_candidates, days=days, names=names,
+                            limit=limit, families=families)
+        # Misses recorded before the paste screen existed include section
+        # headings and category nouns ("Required Qualifications",
+        # "Proficiency in SQL.", "Oncology"). Re-stamp them into the
+        # 'junk-name' family, which no pass retries, instead of paying a
+        # sniff, two web searches and a stall slot for each again.
+        junk = [(r, junk_name_reason(r["name"])) for r in rows]
+        for r, why in junk:
+            if why:
+                await miss(r["name"], f"junk-name:{why}")
+                print(f"    {'[junk]':9} {r['name'][:30]:30} {why} - "
+                      f"{'retired' if commit else 'would be retired'} "
+                      f"from the retry queue")
+        rows = [r for r, why in junk if not why]
+        if not rows:
+            print("  no re-resolvable misses "
+                  f"(families: {', '.join(families)}).")
+            return []
+        print(f"  re-resolving {len(rows)} miss(es) "
+              f"(careers-page sniff -> slug-probe -> web search; every board "
+              f"validated by a live fetch)...")
+        # Silent-board and careers-page candidates carry no miss_reason of
+        # their own (that is the point of those families), so `was` falls
+        # back to naming the family for the print lines below.
+        pages = CAREERS_PAGE_FAMILY in families
+        was = {r["name"]: (r["miss_reason"] or (
+            CAREERS_PAGE_FAMILY if pages and _reads_careers_page(r) else SILENT_FAMILY))
+            for r in rows}
+        written: list[CompanyIn] = []
+        still: list[tuple[str, str]] = []
+        stalled: list[CompanyRow] = []
+
+        async def settle(name: str, hit: BoardHit | None, reason: str | None) -> tuple[str, str]:
+            """Write one name's outcome; returns its tag and the line's detail
+            ("" when another function already printed it)."""
+            if not hit and reason is None:
+                return "kept", ""
+            if not hit:
+                await miss(name, cast(str, reason))
+                still.append((name, cast(str, reason)))
+                return "miss", f"{was[name]} -> {reason}"
+            board = coords.from_hit(hit, name=name)
+            dup = await db.run(board_already_tracked, board)
+            if dup:
+                # Someone else already holds this board: the name is that
+                # employer's alias (store.record_alias), which no pass
+                # retries. Until 2026-10-08 it was re-stamped as the miss it
+                # was and re-resolved, to the same board, every night.
+                report_dup_board(name, dup)
+                if commit:
+                    await db.run(store.record_alias, name, dup)
+                return "dup", ""
+            counts = f"nc={hit['nc']:<3} tot={hit['count']:<4}"
+            if not commit:
+                written.append(board)
+                return "preview", (f"{hit['ats']:12} "
+                                   f"{coords.board_slug(board) or board.get('careers_url') or ''} "
+                                   f"{counts} (was {was[name]})")
+            tier, score, why = await claude_api.score_company_mission(
+                name, await mission_context(hit))
+            await db.run(_retarget, name, store.mark_pending({
+                **board,
+                "local_job_count": hit["nc"], "total_job_count": hit["count"],
+                "mission_tier": tier, "mission_score": score,
+                "mission_reason": why,
+                "last_probed": datetime.now().isoformat(),
+            }))
+            written.append(board)
+            return "pending", (f"{hit['ats']:12} {counts} {str(tier):18} "
+                               f"{score_text(score)}  (was {was[name]})")
+
+        async def resolve(r: CompanyRow, js: JsScanProbePool | None
+                          ) -> tuple[BoardHit | None, str | None]:
+            name, url = r["name"], r.get("careers_url") or ""
+            if js is not None and _reads_careers_page(r):
+                if hit := await resolve_board.js_board_hit(name, url, js):
+                    return hit, None if hit["nc"] else "no-local-jobs"
+                if (r.get("miss_reason") or "").partition(":")[0] not in families:
+                    return None, None
+            return await resolve_board.resolve_or_miss(name, url)
+
+        tags: Counter[str] = Counter()
+        async with AsyncExitStack() as stack:
+            js = (await stack.enter_async_context(JsScanProbePool(max_workers))
+                  if pages else None)
+            async for r, (hit, reason) in fan_out(
+                    rows, lambda r: resolve(r, js), lambda r: r["name"], max_workers,
+                    with_item=True, stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
+                tag, detail = await settle(r["name"], hit, reason)
+                tags[tag] += 1
+                if detail:
+                    print(f"    {f'[{tag}]':9} {r['name'][:30]:30} {detail}")
+        for r in stalled:
+            await miss(r["name"], "fetch-error:stalled")
+            still.append((r["name"], "fetch-error:stalled"))
+        print(f"\n  {len(written)} board(s) "
+              + ("re-resolved and queued for review "
+                 "(active=0, review pending)" if commit
+                 else "would be re-resolved (preview: nothing written)")
+              + (f", {tags['dup']} already tracked under another name" if tags["dup"] else "")
+              + (f", {tags['kept']} careers page(s) naming no platform kept"
+                 if tags["kept"] else "")
+              + f", {len(still)} still missing, of {len(rows)} tried.")
+        if written and commit:
+            print("  confirm or reject them in the roster review queue.")
+        blocked = [n for n, why in still if why.endswith(":site-blocked")]
+        if blocked:
+            print(f"  {len(blocked)} site(s) refuse the crawler (403/429): "
+                  + ", ".join(blocked[:5]) + (", ..." if len(blocked) > 5 else ""))
+            print('  register one\'s board as capture-only: '
+                  'discover.py --add-board "NAME" URL --capture')
+        return written
+
+
+def _retarget(conn: sqlite3.Connection, name: str, row: CompanyIn) -> None:
+    """Point the company `name` at the board `row` names. upsert_company
+    drops None values so it can never erase a stored one -- which would
+    leave the dead board's slug beside a new Workday triple -- so the
+    coordinate columns are cleared first."""
+    conn.execute("UPDATE companies SET slug=NULL, handle=NULL WHERE name=?", (name,))
+    store.upsert_company(conn, row)
+
+
+# --------------------------------------------------------------------------- #
+#  Employer-name repair: a board still named after its own slug/tenant        #
+# --------------------------------------------------------------------------- #
+#
+# 51 boards read the digest and the logs under their bare slug/tenant
+# ("Lifestance", "Centriaautism", "Abbvie", "Akumincorp", ...) rather than
+# the employer's real name (2026-09-18 audit). Two ATSes carry that real
+# name in the SAME listing call every ordinary board pull already makes,
+# with no per-posting detail fetch and no per-row drift:
+#
+#   * Greenhouse -- every job object in the boards-api listing carries
+#     `company_name` (confirmed live, 2026-09-18: tenant "centriaautism"
+#     answers "Centria Autism", "medelitellc" answers "MedElite Group,
+#     LLC.").
+#   * SmartRecruiters -- every posting carries `company.name` (confirmed
+#     live: "AbbVie", "Eurofins").
+#
+# config.BOARDS names that field as each spec's `employer`; the engine
+# reads it off one listing request (`Board.employer_name`).
+#
+# Workday, Lever and Ashby were checked the same way and do NOT qualify:
+#   * Workday's CXS job-DETAIL JSON (not the listing) carries a top-level
+#     `hiringOrganization.name` -- but live-checked against the "aah"
+#     tenant (Advocate Aurora Health) it answered "136 Aurora Medical
+#     Center Grafton LLC" for one req: the POSTING's legal entity, not the
+#     board's brand, and it varies row to row. Using it would rename the
+#     board WRONG, not just fail to rename it -- and reading it needs a
+#     per-posting detail GET the other two do not, since a board-native
+#     name has to be the same on every row to be worth writing once.
+#   * Lever's and Ashby's public postings APIs carry no employer field at
+#     all, structured or otherwise (confirmed live against "kitware" and
+#     "brainco"/"alpacahealth" -- the name appears only inside description
+#     HTML). There is no existing parsing of it to reuse, so it is not
+#     read at all rather than screen-scraped freshly for this one op.
+
+
+def _slug_named_boards(conn: sqlite3.Connection) -> list[CompanyRow]:
+    """The active companies on a supported ATS (a spec naming its `employer`)
+    that src.ats.coords.slug_named calls slug-named -- the same rule, and
+    the same one definition of it, the HARVEST SUMMARY's own tally
+    applies. Biggest board first -- the boards a wrong name embarrasses
+    most in the digest and the logs.
+
+    Notes:
+        slug_named's SLUG_NAME_SOURCE half is what keeps this op off rows
+        a human (or local_sourcing) named for real, and it live-caught a
+        THIRD failure mode past both of its screens: company id 70, stored
+        as "NeU" (source "discovery:bciwiki:companies", a real neurotech
+        employer, not slug-derived) with slug "neu" -- but the "neu"
+        Greenhouse tenant today answers a totally unrelated company's
+        postings ("Fora"), i.e. the stored slug no longer names NeU's own
+        board at all. A source-restricted candidate list never reaches
+        that row; that stale coordinate is a separate, pre-existing roster
+        problem (a dead/reassigned Greenhouse tenant) for reresolve_misses
+        or a human to catch, not this op to paper over by renaming NeU to
+        Fora.
+    """
+    atses = sorted(b.name for b in BOARDS.values() if b.spec.employer)
+    ph = ",".join("?" for _ in atses)
+    rows = [store.as_company(r) for r in conn.execute(
+        f"SELECT * FROM companies_effective "
+        f"WHERE COALESCE(active,0)=1 AND ats IN ({ph})",
+        tuple(atses)).fetchall()]
+    rows = [r for r in rows if coords.slug_named(r)]
+    rows.sort(key=lambda r: -(r.get("total_job_count") or 0))
+    return rows
+
+
+async def rename_slug_boards(db: store.Writer | None = None, t: RuntimeTrack | None = None,
+                             commit: bool = False, limit: int | None = None
+                             ) -> list[tuple[int, str, str]]:
+    """PREVIEW (default) or APPLY a rename of every active, dork-sourced
+    Greenhouse/SmartRecruiters board whose stored name is nothing but its
+    own board slug (_slug_named_boards) to the employer name the board's
+    OWN listing payload carries (`Board.employer_name`). One GET per
+    candidate board, no detail fetch, no whole-board pull.
+
+    Same preview/apply shape as reresolve_misses: `commit=False` (the
+    default -- this NEVER renames silently) fetches every candidate's real
+    name and prints one line each; nothing is written. `commit=True` is
+    the only thing that writes, one line per rename actually made.
+
+    A fetched name is rejected -- reported, never written, in EITHER mode
+    -- when:
+      * the board answered empty or errored (`Board.employer_name` -> "");
+      * src.match.names.junk_name_reason flags it -- the SAME screen a
+        pasted or re-resolved name is run through, so a malformed payload
+        naming a section heading rather than an employer can never
+        overwrite a roster row;
+      * it is BYTE-IDENTICAL to what is already stored -- nothing to fix.
+        This is deliberately NOT a name_key comparison: name_key strips
+        spaces, so it cannot tell "Centria Autism" (what the payload
+        carries) from "Centriaautism" (the slug-derived name stored) --
+        the exact improvement this op exists to make;
+      * it collides (src.match.names.name_key) with a DIFFERENT company
+        already on the roster -- `companies.name` is UNIQUE, and this op
+        renames one row, it does not merge two.
+
+    `limit` caps how many candidates this ONE pass checks (biggest board
+    first -- see _slug_named_boards).
+
+    Returns [(company_id, old_name, new_name)]: renamed rows (commit=True)
+    or the rows that WOULD be renamed (commit=False).
+
+    Notes:
+        Workday, Lever and Ashby boards named after their own slug are not
+        covered and still need a human rename -- see the module comment
+        above (Workday's own per-posting hiringOrganization field is the
+        wrong grain and was confirmed live to produce a WRONG name, not
+        merely a missing one; Lever and Ashby carry no employer field in
+        their public postings API at all).
+
+        An earlier version compared with name_is_own_slug(new_name, slug)
+        and, live-checked against the 22 real candidates on 2026-09-18,
+        wrongly skipped 8 of 14 genuine renames (Axsome Therapeutics,
+        Garner Health, Beam Therapeutics, ...) because each one's name_key
+        equals its own slug's.
+    """
+    t = _t(t)
+    async with track_writer(t, db) as db:
+        rows = await db.run(_slug_named_boards)
+        if limit:
+            rows = rows[:limit]
+        if not rows:
+            print("  no active Greenhouse/SmartRecruiters board is still "
+                  "named after its own slug.")
+            return []
+        print(f"  checking {len(rows)} slug-named board's own payload for "
+              f"its employer name...")
+        existing = {name_key(r["name"]): r["name"] for r in await db.run(
+            lambda conn: conn.execute("SELECT name FROM companies").fetchall())}
+        out: list[tuple[int, str, str]] = []
+        for c in rows:
+            new_name = await cast(Board, board_for(c["ats"])).employer_name(c["slug"] or "")
+            label = f"{c['name'][:30]:30} {c['ats'] or '':15}"
+            if not new_name:
+                print(f"    [skip]      {label} board answered no employer name")
+                continue
+            why = junk_name_reason(new_name)
+            if why:
+                print(f"    [skip]      {label} payload name {new_name!r} "
+                      f"rejected ({why})")
+                continue
+            if new_name == c["name"]:
+                print(f"    [skip]      {label} payload's name matches what "
+                      f"is already stored -- nothing to fix")
+                continue
+            key = name_key(new_name)
+            if key in existing and existing[key] != c["name"]:
+                print(f"    [skip]      {label} {new_name!r} collides with "
+                      f"existing company {existing[key]!r}")
+                continue
+            print(f"    [{'renamed' if commit else 'preview'}]    {label} "
+                  f"-> {new_name!r}")
+            out.append((c["id"], c["name"], new_name))
+            if commit:
+                existing[key] = new_name
+        if commit and out:
+            await db.batch(lambda conn: conn.executemany(
+                "UPDATE companies SET name=? WHERE id=?",
+                [(new, cid) for cid, _, new in out]))
+        print(f"\n  {len(out)} board(s) "
+              + ("renamed" if commit
+                 else "would be renamed (preview: nothing written)")
+              + f" of {len(rows)} checked.")
+        return out

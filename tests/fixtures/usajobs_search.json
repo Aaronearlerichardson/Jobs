@@ -1,0 +1,129 @@
+{
+  "LanguageCode": "EN",
+  "SearchParameters": {},
+  "SearchResult": {
+    "SearchResultCount": 2,
+    "SearchResultCountAll": 3,
+    "SearchResultItems": [
+      {
+        "MatchedObjectId": "830216800",
+        "MatchedObjectDescriptor": {
+          "PositionID": "EPA-RTP-2026-0001",
+          "PositionTitle": "IT Specialist (Data Management)",
+          "PositionURI": "https://www.usajobs.gov/job/830216800",
+          "ApplyURI": ["https://www.usajobs.gov/job/830216800/print"],
+          "PositionLocationDisplay": "Research Triangle Park, North Carolina",
+          "PositionLocation": [
+            {
+              "LocationName": "Research Triangle Park, North Carolina",
+              "CountryCode": "United States",
+              "CountrySubDivisionCode": "North Carolina",
+              "CityName": "Research Triangle Park, North Carolina",
+              "Longitude": -78.86,
+              "Latitude": 35.89
+            }
+          ],
+          "OrganizationName": "Environmental Protection Agency",
+          "DepartmentName": "Environmental Protection Agency",
+          "JobCategory": [
+            {"Name": "Information Technology Management", "Code": "2210"}
+          ],
+          "JobGrade": [{"Code": "GS"}],
+          "PositionSchedule": [{"Name": "Full-time", "Code": "1"}],
+          "PositionOfferingType": [{"Name": "Permanent", "Code": "15317"}],
+          "QualificationSummary": "Qualification summary redacted for testing.",
+          "PositionRemuneration": [
+            {
+              "MinimumRange": "99908",
+              "MaximumRange": "129878",
+              "RateIntervalCode": "PA",
+              "Description": "Per Year"
+            }
+          ],
+          "PositionStartDate": "2026-08-03",
+          "PositionEndDate": "2026-08-24",
+          "PublicationStartDate": "2026-08-03",
+          "ApplicationCloseDate": "2026-08-24",
+          "UserArea": {
+            "Details": {
+              "JobSummary": "Job summary redacted for testing.",
+              "MajorDuties": [
+                "First major duty redacted for testing.",
+                "Second major duty redacted for testing."
+              ],
+              "WhoMayApply": {"Name": "", "Code": ""},
+              "LowGrade": "13",
+              "HighGrade": "13",
+              "TeleworkEligible": true,
+              "RemoteIndicator": false
+            },
+            "IsRadialSearch": true
+          }
+        },
+        "RelevanceRank": 0
+      },
+      {
+        "MatchedObjectId": "830216801",
+        "MatchedObjectDescriptor": {
+          "PositionID": "NIH-NIEHS-2026-0002",
+          "PositionTitle": "Health Scientist (Data Science)",
+          "ApplyURI": ["https://www.usajobs.gov/job/830216801/apply"],
+          "PositionLocationDisplay": "Multiple Locations",
+          "PositionLocation": [
+            {
+              "LocationName": "Research Triangle Park, North Carolina",
+              "CountryCode": "United States",
+              "CountrySubDivisionCode": "North Carolina",
+              "CityName": "Research Triangle Park, North Carolina",
+              "Longitude": -78.86,
+              "Latitude": 35.89
+            },
+            {
+              "LocationName": "Bethesda, Maryland",
+              "CountryCode": "United States",
+              "CountrySubDivisionCode": "Maryland",
+              "CityName": "Bethesda, Maryland",
+              "Longitude": -77.1,
+              "Latitude": 38.98
+            }
+          ],
+          "OrganizationName": "National Institute of Environmental Health Sciences",
+          "DepartmentName": "Department of Health and Human Services",
+          "JobCategory": [
+            {"Name": "General Health Science", "Code": "0601"}
+          ],
+          "JobGrade": [{"Code": "GS"}],
+          "PositionSchedule": [{"Name": "Full-time", "Code": "1"}],
+          "PositionOfferingType": [{"Name": "Permanent", "Code": "15317"}],
+          "QualificationSummary": "Qualification summary redacted for testing.",
+          "PositionRemuneration": [
+            {
+              "MinimumRange": "117962",
+              "MaximumRange": "153354",
+              "RateIntervalCode": "PA",
+              "Description": "Per Year"
+            }
+          ],
+          "PositionStartDate": "2026-08-10",
+          "PositionEndDate": "2026-08-31",
+          "PublicationStartDate": "2026-08-10T00:00:00.0000",
+          "ApplicationCloseDate": "2026-08-31",
+          "UserArea": {
+            "Details": {
+              "JobSummary": "Job summary redacted for testing.",
+              "MajorDuties": ["Major duty redacted for testing."],
+              "WhoMayApply": {"Name": "", "Code": ""},
+              "LowGrade": "13",
+              "HighGrade": "14",
+              "TeleworkEligible": true,
+              "RemoteIndicator": true
+            },
+            "IsRadialSearch": true
+          }
+        },
+        "RelevanceRank": 1
+      }
+    ],
+    "UserArea": {"NumberOfPages": "2"}
+  }
+}

@@ -1,0 +1,66 @@
+# Word lists match.names.junk_name_reason screens a would-be employer name with.
+# The shapes the words are checked in (all of a name, its first two words,
+# its one word) live in src/match/names.py, not in this data.
+
+# Words that, alone, name a job-posting section rather than an employer.
+section = [
+    "qualifications", "qualification", "requirements", "requirement",
+    "responsibilities", "responsibility", "proficiency", "proficient",
+    "experience", "skills", "skill", "benefits", "salary", "compensation",
+    "preferred", "required", "results", "result", "title", "summary",
+    "description", "overview", "about", "apply", "applicants", "duties",
+    "education", "degree", "years", "location", "remote", "hybrid",
+    "onsite", "on-site", "position", "positions", "role", "roles", "job",
+    "jobs", "career", "careers", "posted", "ago", "full-time", "part-time",
+]
+
+# Joiners a section heading may carry ("Experience with Python and R").
+connectives = ["in", "with", "and", "or", "of", "the", "a", "to"]
+
+# A trailing period after one of these is a legal form ("Cala Health,
+# Inc."), not the end of a sentence.
+legal_abbreviations = ["inc", "co", "corp", "ltd", "llc", "plc", "sa", "ag",
+                       "gmbh", "bv", "nv", "jr", "sr"]
+
+# Category nouns a name may consist of ENTIRELY without naming anyone:
+# "Oncology", "Medical Devices", "Health Care Services".
+category = [
+    "oncology", "medical", "devices", "device", "health", "healthcare",
+    "care", "services", "service", "biotech", "biotechnology", "pharma",
+    "pharmaceutical", "pharmaceuticals", "software", "engineering",
+    "research", "clinical", "data", "analytics", "technology",
+    "technologies", "university", "hospital", "laboratory", "laboratories",
+    "science", "sciences", "life", "solutions", "consulting", "staffing",
+    "recruiting", "diagnostics", "therapeutics", "and", "of", "the",
+    "group", "team", "company", "companies", "industry", "industries",
+]
+
+# One common word alone: "New" resolved to an unrelated Greenhouse board
+# "new" in both 2026-10-08 discover-local passes.
+common = ["new", "next", "first", "best", "top", "great", "general", "global",
+          "national", "international", "american", "inc", "llc", "corp", "ltd"]
+
+# A listing's own disposition ("Retired" from a stale roster scrape).
+status = ["retired", "archived", "inactive", "expired", "discontinued",
+          "disabled", "deprecated", "closed"]
+
+# A trailing number after one of these is part of the name ("Studio 54").
+numbered_names = ["studio", "area", "channel", "route", "no", "number"]
+
+# A name made only of these is a pronoun heading ("Who We Are").
+function = ["who", "we", "you", "are", "what", "our", "your", "i", "am", "is",
+            "this", "that", "they", "it", "us", "how", "why", "when", "where",
+            "to", "be"]
+
+# Modifier + noun, the whole name, is a heading ("Minimum Requirements").
+heading_modifiers = [
+    "minimum", "basic", "additional", "desired", "key", "core", "general",
+    "nice", "plus", "bonus", "ideal", "essential", "other", "physical",
+    "working", "work", "environment", "conditions", "equal", "opportunity",
+]
+
+heading_nouns = [
+    "requirements", "requirement", "qualifications", "qualification",
+    "responsibilities", "skills", "duties", "benefits", "perks", "conditions",
+    "environment", "employer", "opportunity",
+]

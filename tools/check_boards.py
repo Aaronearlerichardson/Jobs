@@ -4,98 +4,93 @@ the way our fetcher expects?
 
     python tools/check_boards.py                 # human-readable table
     python tools/check_boards.py --json out.json --markdown BOARDS.md
+    python tools/check_boards.py --resolved workday   # one spec, resolved
+    python tools/check_boards.py --promote            # default candidates
+    python tools/check_boards.py --spec NAME --handle H  # dry-run a whole board
 
 Coverage percentage cannot answer this question. The fetchers swallow HTTP
 errors and return [] by design (one dead board must not abort a crawl), so a
 platform that changes its JSON shape fails SILENTLY: job counts just quietly
-drop. This runs the real fetcher against a known-good public board per ATS
-and reports what actually came back.
+drop. This probes a known-good public board per ATS (the `canary` a
+fetchable `config.BOARDS` spec names) with the engine's own cheap read
+(`Board.alive`: one page, the listing's total where it reports one) and
+reports what actually came back.
 
 Two things make the result trustworthy:
 
-  * The keyword filter is widened to match everything. Fetchers apply
-    `is_relevant()` internally, so "0 jobs" would otherwise conflate "board
-    is broken" with "nothing matched your search terms". Here it measures
+  * The probe is the board's own count, no keyword filter: it measures
     the BOARD, not the profile.
   * Failures are classified rather than lumped together. A GitHub runner
     getting a 403 from an anti-bot service is not the same event as your
     parser breaking, and a canary that cries wolf gets ignored.
 
-Statuses: ok | degraded (reachable, fewer postings than the floor) |
+A canary's `min_jobs` is the floor below which its board reads degraded:
+set well under the board's normal size, so ordinary hiring slowdowns do
+not cry wolf. A small employer that legitimately empties out is replaced
+in its spec rather than given a floor of 0.
+
+Statuses: ok | degraded (reachable, fewer postings than the floor or a field
+filled under its floor, `pager.FILL_FLOORS`) |
 blocked (rate-limited/challenged — not our bug) | broken (4xx/5xx/exception)
 """
+from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import io
 import json
 import re
 import sys
 import time
-import tomllib
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-try:  # Windows consoles default to cp1252; the status glyphs are not in it.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+from tools._harness import blame, console_utf8              # noqa: E402
 
-import config                                     # noqa: E402
-from scrapers.sources import ATS_REGISTRY         # noqa: E402
+console_utf8()
 
-SAMPLES = Path(__file__).parent / "board_samples.toml"
+from pydantic import BaseModel                       # noqa: E402
 
-# An anti-bot wall or a rate limit says nothing about our parser.
-_BLOCKED_RE = re.compile(
-    r"\b(401|403|429|451)\b|captcha|cloudflare|forbidden|rate.?limit|"
-    r"too many requests|access denied", re.I)
-_BROKEN_RE = re.compile(r"\b(404|4\d\d|5\d\d)\b|timeout|timed out|"
-                        r"connection|ssl|json|decode", re.I)
+from src import runstate                            # noqa: E402
+from src.ats.board import BOARDS, spec              # noqa: E402
+from src.ats.board.engine import Board               # noqa: E402
+from src.ats.board.pager import FILL_FLOORS, fill_misses, fill_rates  # noqa: E402
 
 STATUS_EMOJI = {"ok": "✅", "degraded": "⚠️", "blocked": "🚧", "broken": "❌"}
 
 
-def widen_keyword_filter():
-    """Make `is_relevant()` accept everything, in place.
-
-    filters.py bound these list objects at import time, so they must be
-    mutated rather than rebound (see runner.apply_keyword_focus)."""
-    config.CORE_KEYWORDS[:] = [""]      # "" is a substring of any text
-    config.DOMAIN_KEYWORDS[:] = []
-    config.SKILL_KEYWORDS[:] = []
-    config.INCLUDE_KEYWORDS[:] = [""]
-    config.EXCLUDE_PHRASES[:] = []
-    config.EXCLUDE_TITLE_PHRASES[:] = []
-    config.ACCEPT_REMOTE = True
-
-
-def check_board(entry):
-    """Fetch one board and classify the outcome."""
-    ats, name, slug = entry["ats"], entry["name"], entry["slug"]
-    floor = int(entry.get("min_jobs", 1))
-    reg = ATS_REGISTRY.get(ats)
-    if not reg:
-        return {"ats": ats, "name": name, "status": "broken", "jobs": 0,
-                "detail": f"no fetcher registered for {ats!r}", "seconds": 0.0}
-
+async def check_board(board: Board) -> dict[str, Any]:
+    """Probe one platform's canary board and classify the outcome."""
+    canary = board.spec.canary
+    assert canary is not None, board.name
+    ats, name, floor = board.name, canary.name, canary.min_jobs
     buf, started = io.StringIO(), time.monotonic()
     try:
-        # Fetchers print their diagnostics; capture them to classify.
+        # The engine prints its diagnostics; capture them to classify.
         with contextlib.redirect_stdout(buf):
-            jobs = reg[0](name, slug)()
+            rows, total = await board.sample(canary.handle)
+        ok = rows is not None
+        n = total if total is not None else sum(r["id"] is not None for r in rows or [])
         note = " ".join(buf.getvalue().split())
-        n = len(jobs)
-        if n >= floor:
+        if not ok and not note:
+            note = "the board request failed"
+        # Id-less rows are the shell's own links, not postings: no fill to judge.
+        posts = [r for r in rows or [] if r["id"] is not None]
+        misses: list[str] = (fill_misses(posts, {k: v for k, v in canary.min_fill.items()})
+                             if ok else [])
+        if ok and n >= floor and not misses:
             status, detail = "ok", ""
-        elif _BLOCKED_RE.search(note):
-            status, detail = "blocked", note[:160]
+        elif ok and n >= floor:
+            status, detail = "degraded", "fill: " + ", ".join(misses)
         elif note:
-            status, detail = "broken", note[:160]
+            status, detail = blame(note), note[:160]
         else:
             # 200 + parsed + zero postings: either a genuinely empty board or
             # a silent shape change. Worth a look, not an alarm.
@@ -103,14 +98,44 @@ def check_board(entry):
             detail = f"reachable but returned {n} (floor {floor})"
     except Exception as e:
         note = f"{type(e).__name__}: {e}"
-        status = "blocked" if _BLOCKED_RE.search(note) else "broken"
+        status = blame(note)
         detail, n = note[:160], 0
 
     return {"ats": ats, "name": name, "status": status, "jobs": n,
             "detail": detail, "seconds": round(time.monotonic() - started, 1)}
 
 
-def render_markdown(results, checked_at):
+def _leaves(board: Board) -> Iterator[tuple[str, Any, bool]]:
+    """(path, value, set) for every key of a board's spec that is not
+    itself a model or a list of them (their own keys follow)."""
+    for path, value, given, _default in spec.walk(board.spec):
+        models = value if isinstance(value, tuple) and value else (value,)
+        if not all(isinstance(v, BaseModel) for v in models):
+            yield path, value, given
+
+
+def print_resolved(name: str) -> None:
+    """Every key of `name`'s spec with its value, marked set (the spec
+    gives it) or default."""
+    for path, value, given in _leaves(BOARDS[name]):
+        print(f"  {'set    ' if given else 'default'}  {path} = {json.dumps(value)}")
+
+
+def promotion_candidates(least: int = 3) -> list[tuple[str, Any, list[str]]]:
+    """(path, value, platforms) for each key `least` or more specs set to
+    one value other than its default: a default worth promoting. A union's
+    `kind` picks a model, so it is left out."""
+    seen: dict[tuple[str, str], set[str]] = {}
+    for board in BOARDS.values():
+        for path, value, given in _leaves(board):
+            if given and not path.endswith(".kind"):
+                key = (re.sub(r"\[\d+\]", "[]", path), json.dumps(value))
+                seen.setdefault(key, set()).add(board.name)
+    return sorted(((p, v, sorted(names)) for (p, v), names in seen.items()
+                   if len(names) >= least), key=lambda c: (-len(c[2]), c[0]))
+
+
+def render_markdown(results: list[dict[str, Any]], checked_at: str) -> str:
     ok = sum(r["status"] == "ok" for r in results)
     lines = [
         "# Board health",
@@ -119,16 +144,15 @@ def render_markdown(results, checked_at):
         f"{checked_at} · [how this works]"
         "(tools/check_boards.py)_",
         "",
-        "One request per platform against a public sample board, with the "
-        "keyword filter widened so the number reflects the BOARD rather than "
-        "any particular search profile.",
+        "One cheap read per platform against a public sample board: the "
+        "board's own posting count, whatever any search profile wants.",
         "",
         "| | Platform | Sample board | Postings | Detail |",
         "|---|---|---|---:|---|",
     ]
-    for r in sorted(results, key=lambda r: (r["status"] != "ok", r["ats"])):
-        lines.append(f"| {STATUS_EMOJI.get(r['status'], '?')} | `{r['ats']}` "
-                     f"| {r['name']} | {r['jobs']} | {r['detail'] or r['status']} |")
+    lines += [f"| {STATUS_EMOJI.get(r['status'], '?')} | `{r['ats']}` "
+              f"| {r['name']} | {r['jobs']} | {r['detail'] or r['status']} |"
+              for r in sorted(results, key=lambda r: (r["status"] != "ok", r["ats"]))]
     lines += [
         "",
         "**✅ ok** — endpoint alive, response parsed, postings returned.  ",
@@ -142,7 +166,27 @@ def render_markdown(results, checked_at):
     return "\n".join(lines)
 
 
-def main():
+async def dry_run(board: Board, handle: str, show: int, floors: dict[str, float]) -> int:
+    """Fetch `handle`'s whole listing through the engine (nothing stored),
+    print the count, each field's fill rate and the first `show` rows;
+    1 when the board is unreadable or a field falls under its floor."""
+    rows = await board.listing(handle, f"{board.name} {handle}")
+    posts = [r for r in rows if r["id"] is not None]     # id-less rows are shell links
+    print(f"  {board.name} {handle}: {len(posts)} jobs"
+          + (f" ({len(rows) - len(posts)} id-less rows)" if len(rows) > len(posts) else ""))
+    if not posts:
+        return 1
+    floor = FILL_FLOORS | floors
+    rates = fill_rates(posts)
+    for k, v in rates.items():
+        print(f"  {k:12} {v:6.1%}  (floor {floor[k]:.0%}){'  FAIL' if v < floor[k] else ''}")
+    for r in posts[:show]:
+        print(" ", json.dumps({k: v for k, v in r.items() if v and not k.startswith("_")},
+                              ensure_ascii=False)[:400])
+    return 1 if fill_misses(posts, floors) else 0
+
+
+def main() -> int:
     ap = argparse.ArgumentParser(description="ATS board health canary")
     ap.add_argument("--json", type=Path, help="write machine-readable results")
     ap.add_argument("--markdown", type=Path, help="write a status table")
@@ -150,19 +194,42 @@ def main():
                     help="write a shields.io endpoint JSON")
     ap.add_argument("--fail-on-broken", action="store_true",
                     help="exit 1 if any board is broken (blocked never fails)")
+    ap.add_argument("--resolved", metavar="PLATFORM", choices=sorted(BOARDS),
+                    help="print the platform's spec resolved, each value set or default")
+    ap.add_argument("--promote", action="store_true",
+                    help="list keys 3+ specs set to one non-default value")
+    ap.add_argument("--spec", metavar="PLATFORM", choices=sorted(BOARDS),
+                    help="dry-run this platform's whole listing for --handle (no store writes)")
+    ap.add_argument("--handle", help="the board to dry-run (default: the spec's canary)")
+    ap.add_argument("--rows", type=int, default=5, help="rows the dry run prints")
     args = ap.parse_args()
+    if args.spec:
+        board = BOARDS[args.spec]
+        canary = board.spec.canary
+        handle = args.handle or (canary.handle if canary else None)
+        if not handle:
+            ap.error("--handle is required: the spec names no canary")
+        floors: dict[str, float] = {k: v for k, v in canary.min_fill.items()} if canary else {}
+        return runstate.run(dry_run(board, handle, args.rows, floors))
+    if args.resolved:
+        print_resolved(args.resolved)
+        return 0
+    if args.promote:
+        for path, value, names in promotion_candidates():
+            print(f"  {len(names):2}  {path} = {value}  ({', '.join(names)})")
+        return 0
 
-    entries = tomllib.loads(SAMPLES.read_text(encoding="utf-8"))["board"]
-    widen_keyword_filter()
-
-    results = []
-    for entry in entries:
-        r = check_board(entry)
-        results.append(r)
-        print(f"  {STATUS_EMOJI.get(r['status'], '?')} {r['ats']:12} "
-              f"{r['name'][:24]:24} {r['jobs']:5} postings  {r['seconds']:5.1f}s"
-              f"  {r['detail']}")
-        time.sleep(1.0)                            # politeness between hosts
+    async def every_board() -> list[dict[str, Any]]:
+        results = []
+        for board in (b for b in BOARDS.values() if b.fetchable and b.spec.canary):
+            r = await check_board(board)
+            results.append(r)
+            print(f"  {STATUS_EMOJI.get(r['status'], '?')} {r['ats']:12} "
+                  f"{r['name'][:24]:24} {r['jobs']:5} postings  {r['seconds']:5.1f}s"
+                  f"  {r['detail']}")
+            await asyncio.sleep(1.0)               # politeness between hosts
+        return results
+    results = runstate.run(every_board())
 
     checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     ok = sum(r["status"] == "ok" for r in results)

@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""Source health probe — what can this crawler actually reach today?
+
+    python tools/check_sources.py                  # everything below
+    python tools/check_sources.py --only robots    # one section
+    python tools/check_sources.py --roster         # + probe YOUR stored boards
+    python tools/check_sources.py --json out.json
+
+`tools/check_boards.py` answers one question well: is each ATS platform's
+API still shaped the way its parser expects? It deliberately checks one
+sample board per platform and nothing else. This covers the rest of what a
+crawl touches, and classifies WHY something is unreachable — the distinction
+that decides what you do about it:
+
+  robots     the host's robots.txt asks us not to fetch that path. Not an
+             error, not fixable, and not something to route around: the
+             crawler honors it (config.RESPECT_ROBOTS), so those postings
+             are simply out of scope for automated fetching.
+  blocked    reachable but refusing US — 401/403/429/451, a CAPTCHA, an
+             anti-bot wall. Often IP- or rate-based, so it may pass on a
+             retry or from another network. Says nothing about the parser.
+  broken     404/410/5xx/timeout/parse error. A real failure: a dead
+             endpoint, a moved API, or a shape change.
+  ok         alive, allowed, and returning what we expect.
+
+Sections: robots (policy per host), feeds (aggregators), search (web
+search), forums (Discourse), api (keyed government feeds), gated (the hosts
+this tool refuses to fetch by design), and --roster (every active board in
+your own store — the practical "which of my saved boards died" pass).
+
+Read-only: every probe is a GET or a documented public API call, one per
+host, paced. Nothing is written to the store.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import functools
+import io
+import json
+import re
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, TextIO, cast
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools._harness import BLOCKED_RE, blame, console_utf8   # noqa: E402
+
+console_utf8()
+
+from src import config, runstate                             # noqa: E402
+from src.net import http                                     # noqa: E402
+from src.net.http import HEADERS                             # noqa: E402
+from src.net.http import ROBOTS                    # noqa: E402
+from src.net.util import origin_of                # noqa: E402
+from src.rows import BoardCoords, FetchedJob      # noqa: E402
+
+OK, BLOCKED, BROKEN, ROBOTS_OFF, SKIPPED = (
+    "ok", "blocked", "broken", "robots", "skipped")
+
+EMOJI = {OK: "✅", BLOCKED: "🚧", BROKEN: "❌", ROBOTS_OFF: "🤖", SKIPPED: "⏭️"}
+
+# A fetcher that declined on POLICY, not on failure. RobotsDisallowed is
+# raised (and printed) by the session before any request goes out.
+_ROBOTS_RE = re.compile(r"robots\.txt disallows|RobotsDisallowed", re.I)
+
+
+def verdict(blob: str | None, has_rows: bool) -> str:
+    """Classify a fetcher outcome from its diagnostics. Policy beats
+    failure: a robots refusal is not a broken endpoint, and reporting it as
+    one sends you off debugging a parser that is working fine."""
+    if has_rows:
+        return OK
+    if _ROBOTS_RE.search(blob or ""):
+        return ROBOTS_OFF
+    return blame(blob)
+
+
+def classify(status_code: int | None = None, note: str = "") -> str:
+    """HTTP status + any diagnostic text -> one of our four verdicts."""
+    if BLOCKED_RE.search(note or ""):
+        return BLOCKED
+    if status_code is None:
+        return BROKEN
+    if status_code in (401, 403, 429, 451):
+        return BLOCKED
+    if status_code >= 400:
+        return BROKEN
+    return OK
+
+
+# --------------------------------------------------------------------------- #
+#  1. robots.txt policy                                                        #
+# --------------------------------------------------------------------------- #
+#
+# (label, a URL we would REALLY fetch). The path matters: robots.txt rules
+# are per-path, so asking "is the host allowed?" is the wrong question —
+# greenhouse may allow its API and disallow its HTML board, and only the
+# path we actually use tells us whether a crawl is affected.
+ROBOTS_TARGETS = [
+    # --- ATS APIs the fetchers call -------------------------------------
+    ("greenhouse api",   "https://boards-api.greenhouse.io/v1/boards/databricks/jobs"),
+    ("greenhouse board", "https://boards.greenhouse.io/databricks"),
+    ("lever api",        "https://api.lever.co/v0/postings/veeva"),
+    ("lever board",      "https://jobs.lever.co/veeva"),
+    ("ashby api",        "https://api.ashbyhq.com/posting-api/job-board/vanta"),
+    ("ashby board",      "https://jobs.ashbyhq.com/vanta"),
+    ("bamboohr api",     "https://ems.bamboohr.com/careers/list"),
+    ("workday cxs",      "https://nvidia.wd5.myworkdayjobs.com/wday/cxs/nvidia/NVIDIAExternalCareerSite/jobs"),
+    ("smartrecruiters",  "https://api.smartrecruiters.com/v1/companies/example/postings"),
+    ("jazzhr",           "https://example.applytojob.com/apply"),
+    ("jobvite",          "https://jobs.jobvite.com/example/search"),
+    ("kula",             "https://careers.kula.ai/precision-neuroscience"),
+    ("rippling",         "https://ats.rippling.com/blackrockneurotech/jobs"),
+    ("paylocity",        "https://recruiting.paylocity.com/recruiting/jobs/All"),
+    ("ultipro",          "https://recruiting.ultipro.com/"),
+    ("successfactors",   "https://careers.duke.edu/search/"),
+    ("peopleadmin",      "https://unc.peopleadmin.com/postings/search.atom"),
+    ("icims",            "https://careers-example.icims.com/jobs/search"),
+    # --- aggregator feeds ------------------------------------------------
+    ("remoteok",         "https://remoteok.com/api"),
+    ("remotive",         "https://remotive.com/api/remote-jobs"),
+    ("hn firebase",      "https://hacker-news.firebaseio.com/v0/user/whoishiring.json"),
+    ("weworkremotely",   "https://weworkremotely.com/categories/remote-programming-jobs.rss"),
+    ("jobicy",           "https://jobicy.com/?feed=job_feed"),
+    # --- web search ------------------------------------------------------
+    ("duckduckgo html",  "https://html.duckduckgo.com/html/?q=test"),
+    ("duckduckgo lite",  "https://lite.duckduckgo.com/lite/?q=test"),
+    # --- government / directories ---------------------------------------
+    ("careeronestop",    "https://api.careeronestop.org/v1/jobsearch/"),
+    ("bciwiki",          "https://bciwiki.org/index.php/Category:Companies"),
+    ("builtin",          "https://builtin.com/companies"),
+    # --- hosts we refuse to fetch anyway (see GATED) ---------------------
+    ("linkedin",         "https://www.linkedin.com/jobs/search/"),
+    ("indeed",           "https://www.indeed.com/jobs?q=engineer"),
+    ("glassdoor",        "https://www.glassdoor.com/Job/index.htm"),
+    ("ziprecruiter",     "https://www.ziprecruiter.com/jobs-search"),
+    ("monster",          "https://www.monster.com/jobs/search"),
+    ("metacareers",      "https://www.metacareers.com/jobs"),
+]
+
+
+async def probe_robots(label: str, url: str) -> dict[str, Any]:
+    """What does this host's robots.txt say about the path we'd fetch?"""
+    origin = origin_of(url)
+    started = time.monotonic()
+    code, note = None, ""
+    try:
+        # A plain request, NOT the crawler's polite one: that is
+        # robots-aware, so on a host with `Disallow: /` it refuses to fetch
+        # the very robots.txt we are trying to read, and the probe reports a
+        # transport failure for what is actually a policy decision.
+        r = await http.send("GET", f"{origin}/robots.txt", polite=False, timeout=12,
+                            headers=HEADERS, allow_redirects=True)
+        code = r.status_code
+        body = r.text if r.status_code < 400 else ""
+    except Exception as e:
+        note, body = f"{type(e).__name__}: {e}", ""
+
+    # The crawler's own decision, through the same cache the crawl uses.
+    try:
+        allowed = await ROBOTS().allowed(url)
+        delay = await ROBOTS().crawl_delay(url)
+    except Exception as e:
+        allowed, delay, note = True, None, note or f"{type(e).__name__}: {e}"
+
+    if note and code is None:
+        status, detail = BROKEN, f"robots.txt unreachable: {note[:70]}"
+    elif not allowed:
+        status = ROBOTS_OFF
+        detail = "DISALLOWED for this path"
+    else:
+        status = OK
+        if code is None or code >= 400:
+            # RFC 9309: 4xx means no restrictions. Worth saying, not warning.
+            detail = f"no robots.txt (HTTP {code}) — unrestricted"
+        else:
+            detail = "allowed"
+        if delay:
+            detail += f", crawl-delay {delay:g}s"
+    n_rules = sum(1 for ln in (body or "").splitlines()
+                  if ln.strip().lower().startswith("disallow:"))
+    return {"section": "robots", "name": label, "status": status,
+            "detail": detail, "http": code, "rules": n_rules,
+            "seconds": round(time.monotonic() - started, 1)}
+
+
+# --------------------------------------------------------------------------- #
+#  2. aggregator feeds                                                         #
+# --------------------------------------------------------------------------- #
+
+class _TaskCapture:
+    """A stdout stand-in that routes each task's writes to its own buffer.
+
+    `contextlib.redirect_stdout` swaps the GLOBAL `sys.stdout` and restores it
+    on exit, which is fine sequentially and silently destructive across
+    concurrent tasks: one restores the real stdout while another still holds
+    the redirect, and every later print lands in a StringIO nobody reads —
+    the roster probe ran to completion and printed nothing at all. Installed
+    once for a whole concurrent section instead, with per-task buffers.
+    """
+
+    def __init__(self, passthrough: TextIO) -> None:
+        self._buffers: dict[Any, io.StringIO] = {}
+        self._passthrough = passthrough
+
+    def start(self) -> None:
+        self._buffers[asyncio.current_task()] = io.StringIO()
+
+    def take(self) -> str:
+        buf = self._buffers.pop(asyncio.current_task(), None)
+        return " ".join(buf.getvalue().split()) if buf else ""
+
+    def write(self, s: str) -> int:
+        try:
+            buf = self._buffers.get(asyncio.current_task())
+        except RuntimeError:                # a thread's print: no task
+            buf = None
+        (buf or self._passthrough).write(s)
+        return len(s)
+
+    def flush(self) -> None:
+        self._passthrough.flush()
+
+
+async def _run_fetcher[T](fn: Callable[..., Awaitable[list[T] | None]],
+                          *a: Any, **kw: Any) -> tuple[list[T], str, str]:
+    """Await a fetcher, capturing the diagnostics it prints. Returns
+    (rows, note, exception_text).
+
+    Safe across tasks when `sys.stdout` is a _TaskCapture (the roster
+    path); falls back to a plain redirect for the sequential sections."""
+    cap = sys.stdout if isinstance(sys.stdout, _TaskCapture) else None
+    if cap is not None:
+        cap.start()
+        try:
+            rows = await fn(*a, **kw)
+            return rows or [], cap.take(), ""
+        except Exception as e:
+            return [], cap.take(), f"{type(e).__name__}: {e}"
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rows = await fn(*a, **kw)
+        return rows or [], " ".join(buf.getvalue().split()), ""
+    except Exception as e:
+        return [], " ".join(buf.getvalue().split()), f"{type(e).__name__}: {e}"
+
+
+async def probe_feeds() -> list[dict[str, Any]]:
+    from src.ats.feeds import (fetch_hnhiring, fetch_remoteok,
+                               fetch_remotive, fetch_rss)
+
+    out = []
+    checks: list[tuple[str, Callable[[], Awaitable[list[FetchedJob]]]]] = [
+              ("remoteok", lambda: fetch_remoteok(max_jobs=50)),
+              ("remotive", lambda: fetch_remotive(max_jobs=50)),
+              ("hn who-is-hiring", lambda: fetch_hnhiring(max_threads=1))]
+    checks += [(f"rss: {label}", functools.partial(fetch_rss, "probe", url, loc, max_items=50))
+               for label, url, loc in config.RSS_FEEDS]
+
+    for label, call in checks:
+        started = time.monotonic()
+        rows, note, exc = await _run_fetcher(call)
+        status = verdict(f"{note} {exc}", bool(rows))
+        detail = (f"{len(rows)} postings" if rows
+                  else (exc or note or "0 postings, no diagnostic")[:110])
+        out.append({"section": "feeds", "name": label, "status": status,
+                    "detail": detail, "rows": len(rows),
+                    "seconds": round(time.monotonic() - started, 1)})
+        await asyncio.sleep(config.PROBE_PAUSE_S)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  3. web search                                                               #
+# --------------------------------------------------------------------------- #
+#
+# The flakiest source by a wide margin (discovery's name resolver searches
+# with it). Two layers can each fail independently, so probe each:
+#   the DDG endpoints directly | the bounded/cached src.net.ddg.search()
+
+SEARCH_QUERIES = [
+    ("plain terms",     'machine learning engineer jobs'),
+    ("site: operator",  '"engineer" site:jobs.lever.co'),
+    ("quoted boolean",  '("neural" OR "EEG") ("engineer" OR "scientist") site:weworkremotely.com'),
+]
+
+
+async def probe_search() -> list[dict[str, Any]]:
+    from src.net.ddg import search as ddg_text
+
+    out = []
+
+    # -- layer 1: the raw endpoints ---------------------------------------
+    for label, url in (("ddg html endpoint", "https://html.duckduckgo.com/html/?q=test"),
+                       ("ddg lite endpoint", "https://lite.duckduckgo.com/lite/?q=test")):
+        started = time.monotonic()
+        try:
+            r = await http.send("GET", url, timeout=20, headers=HEADERS)
+            body = r.text[:4000].lower()
+            challenged = any(s in body for s in
+                             ("captcha", "unusual traffic", "are you a robot",
+                              "challenge-platform"))
+            status = (BLOCKED if challenged else classify(r.status_code))
+            detail = (f"HTTP {r.status_code}"
+                      + (", anti-bot challenge in body" if challenged else "")
+                      + f", {len(r.content)} bytes")
+        except Exception as e:
+            status, detail = classify(None, str(e)), f"{type(e).__name__}: {e}"[:110]
+        out.append({"section": "search", "name": label, "status": status,
+                    "detail": detail,
+                    "seconds": round(time.monotonic() - started, 1)})
+        await asyncio.sleep(config.SEARCH_PROBE_PAUSE_S)
+
+    # -- layer 2: the wrapper the crawl actually calls ---------------------
+    # NB: ddg_text caches hits for 7 days, so a pass here can mean "served
+    # from cache". Reported so the result isn't over-read.
+    for label, q in SEARCH_QUERIES:
+        started = time.monotonic()
+        rows, note, exc = await _run_fetcher(ddg_text, q, max_results=8)
+        elapsed = round(time.monotonic() - started, 1)
+        cached = elapsed < 0.5 and rows
+        if rows:
+            status = OK
+            detail = f"{len(rows)} results" + (" (from disk cache)" if cached else "")
+        elif exc:
+            status, detail = BROKEN, exc[:110]
+        else:
+            # ddg_text swallows everything and returns [] — by design, but it
+            # means "throttled" and "no matches" look identical from here.
+            status = BLOCKED
+            detail = (f"0 results after {elapsed}s — throttled or "
+                      f"wall-budget timeout (ddg_text returns [] either way)")
+        out.append({"section": "search", "name": f"ddg_text: {label}",
+                    "status": status, "detail": detail, "rows": len(rows),
+                    "seconds": elapsed})
+        await asyncio.sleep(config.SEARCH_PROBE_PAUSE_S)
+
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  4. forums                                                                   #
+# --------------------------------------------------------------------------- #
+
+async def probe_forums() -> list[dict[str, Any]]:
+    from src.ats.feeds.discourse import fetch_discourse
+    out = []
+    if not config.DISCOURSE_BOARDS:
+        return [{"section": "forums", "name": "(none configured)",
+                 "status": SKIPPED, "detail": "no [sources].discourse entries",
+                 "seconds": 0.0}]
+    for label, url, cat in config.DISCOURSE_BOARDS:
+        started = time.monotonic()
+        rows, note, exc = await _run_fetcher(fetch_discourse, label, url, cat)
+        status = verdict(f"{note} {exc}", bool(rows))
+        detail = (f"{len(rows)} postings" if rows
+                  else (exc or note or "0 topics in that category")[:110])
+        out.append({"section": "forums", "name": f"{label} (cat {cat})",
+                    "status": status, "detail": detail, "rows": len(rows),
+                    "seconds": round(time.monotonic() - started, 1)})
+        await asyncio.sleep(config.PROBE_PAUSE_S)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  5. keyed APIs                                                               #
+# --------------------------------------------------------------------------- #
+
+async def probe_api() -> list[dict[str, Any]]:
+    out = []
+    has_key = bool(config.CAREERONESTOP_USER_ID and config.CAREERONESTOP_TOKEN)
+    started = time.monotonic()
+    if not has_key:
+        out.append({"section": "api", "name": "CareerOneStop / NLx",
+                    "status": SKIPPED,
+                    "detail": "no CAREERONESTOP_USER_ID / _TOKEN set — "
+                              "register free at careeronestop.org/Developers",
+                    "seconds": 0.0})
+        return out
+    from src.ats.feeds.careeronestop import fetch_nlx_company
+    rows, note, exc = await _run_fetcher(fetch_nlx_company, "Google", max_pages=1)
+    status = verdict(f"{note} {exc}", bool(rows))
+    detail = (f"{len(rows)} postings" if rows
+              else (exc or note or "0 postings returned")[:110])
+    out.append({"section": "api", "name": "CareerOneStop / NLx",
+                "status": status, "detail": detail, "rows": len(rows),
+                "seconds": round(time.monotonic() - started, 1)})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  6. deliberately gated hosts                                                 #
+# --------------------------------------------------------------------------- #
+
+async def probe_gated() -> list[dict[str, Any]]:
+    """Hosts the crawler refuses to fetch by policy, not by capability.
+
+    Nothing is requested here — that is the point. This section exists so the
+    report is honest about coverage: these sites carry postings we never see
+    automatically, and capture.py is the intended route (you browse them
+    yourself, signed in as you, and the parser reads the page your browser
+    already loaded)."""
+    from src import config
+    hosts = config.AGGREGATOR_HOSTS
+    return [{"section": "gated", "name": h.strip(), "status": SKIPPED,
+             "detail": "never fetched by policy — use capture.py",
+             "seconds": 0.0}
+            for h in hosts if h.strip()]
+
+
+# --------------------------------------------------------------------------- #
+#  7. your own roster                                                          #
+# --------------------------------------------------------------------------- #
+
+async def probe_roster(limit: int | None = None, workers: int = 8) -> list[dict[str, Any]]:
+    """Probe every ACTIVE board in the store. This is the practical 404 pass:
+    discovery imports leave stale slugs behind, companies get acquired, and
+    boards move — all of which show up here as broken."""
+    from src import store
+    from src.ats.board import BOARDS, board_for
+    from src.ats.registry import sweep
+    from src.net.parallel import fan_out
+
+    with contextlib.closing(store.connect()) as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT name, ats, slug, careers_url, handle "
+            "FROM companies_effective WHERE active=1 AND ats IS NOT NULL ORDER BY name")]
+
+    # Probed in bulk: the platforms whose spec sets `sweep`, cheap boards
+    # the lightweight sweep pulls whole anyway. The rest would page through
+    # thousands of postings to prove one endpoint is alive; they are covered
+    # by check_boards.py's per-platform canary.
+    cheap = {b.name for b in BOARDS.values() if b.spec.sweep}
+    todo = [r for r in rows if r["ats"] in cheap][:limit]
+    skipped = len(rows) - len(todo)
+    paged = "/".join(sorted({r["ats"] for r in rows} - cheap))
+
+    async def one(row: dict[str, Any]) -> dict[str, Any]:
+        board = board_for(row["ats"])
+        if not board:
+            return {"section": "roster", "name": row["name"], "ats": row["ats"],
+                    "status": SKIPPED, "detail": "no fetcher", "seconds": 0.0}
+        started = time.monotonic()
+        fetcher = sweep(board.name, row["name"], board.handle(cast(BoardCoords, row)) or "")
+        if fetcher is None:
+            return {"section": "roster", "name": row["name"], "ats": row["ats"],
+                    "status": SKIPPED, "detail": "no fetcher", "seconds": 0.0}
+        jobs, note, exc = await _run_fetcher(fetcher)
+        if jobs:
+            status, detail = OK, f"{len(jobs)} postings"
+        elif exc or note:
+            status = verdict(f"{note} {exc}", False)
+            detail = (exc or note)[:110]
+        else:
+            status, detail = OK, "0 postings (board alive, empty)"
+        return {"section": "roster", "name": row["name"], "ats": row["ats"],
+                "status": status, "detail": detail,
+                "seconds": round(time.monotonic() - started, 1)}
+
+    out = []
+    real_stdout = sys.stdout
+    sys.stdout = _TaskCapture(real_stdout)
+    try:
+        async for res in fan_out(todo, one, "roster probe", workers):
+            out.append(res)
+            if len(out) % 25 == 0:
+                # This task has no buffer, so it passes through.
+                print(f"    ...{len(out)}/{len(todo)} boards probed")
+    finally:
+        sys.stdout = real_stdout
+    if skipped:
+        out.append({"section": "roster", "name": f"({skipped} paginating boards)",
+                    "ats": paged, "status": SKIPPED,
+                    "detail": "not bulk-probed; see tools/check_boards.py",
+                    "seconds": 0.0})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  Reporting                                                                   #
+# --------------------------------------------------------------------------- #
+
+async def _probe_robots_all() -> list[dict[str, Any]]:
+    return [await probe_robots(label, url) for label, url in ROBOTS_TARGETS]
+
+
+#: key -> (title, the section's coroutine function, given the parsed args).
+SECTIONS: dict[str, tuple[str, Callable[[argparse.Namespace], Awaitable[list[dict[str, Any]]]]]] = {
+    "robots": ("robots.txt policy", lambda a: _probe_robots_all()),
+    "feeds":  ("Aggregator feeds", lambda a: probe_feeds()),
+    "search": ("Web search", lambda a: probe_search()),
+    "forums": ("Forums", lambda a: probe_forums()),
+    "api":    ("Keyed APIs", lambda a: probe_api()),
+    "gated":  ("Gated by policy", lambda a: probe_gated()),
+}
+
+
+def print_section(title: str, results: list[dict[str, Any]]) -> None:
+    print(f"\n  {title}")
+    print(f"  {'-' * (len(title))}")
+    for r in results:
+        name = r["name"][:26]
+        print(f"    {EMOJI.get(r['status'], '?')} {name:26} "
+              f"{r['status']:8} {r.get('seconds', 0):5.1f}s  {r['detail'][:76]}")
+
+
+def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return counts
+
+
+async def _probe_all(wanted: list[str], args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Every wanted section's results, each printed as it lands, then the
+    roster's when asked for."""
+    all_results: list[dict[str, Any]] = []
+    for key in wanted:
+        title, fn = SECTIONS[key]
+        try:
+            res = await fn(args)
+        except Exception as e:
+            res = [{"section": key, "name": "(section failed)", "status": BROKEN,
+                    "detail": f"{type(e).__name__}: {e}"[:110], "seconds": 0.0}]
+        print_section(title, res)
+        all_results += res
+
+    if args.roster:
+        print("\n  Your roster (active boards)")
+        print("  " + "-" * 27)
+        res = await probe_roster(limit=args.limit)
+        bad = [r for r in res if r["status"] in (BROKEN, BLOCKED)]
+        for r in sorted(bad, key=lambda r: (r["status"], r["name"])):
+            print(f"    {EMOJI.get(r['status'], '?')} {r['name'][:26]:26} "
+                  f"{r.get('ats', ''):14} {r['detail'][:64]}")
+        alive = sum(r["status"] == OK for r in res)
+        print(f"    {alive} alive, {len(bad)} failing "
+              f"({sum(r['status'] == SKIPPED for r in res)} skipped)")
+        all_results += res
+    return all_results
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Comprehensive source health probe")
+    ap.add_argument("--only", action="append", choices=sorted(SECTIONS),
+                    help="run only these sections (repeatable)")
+    ap.add_argument("--roster", action="store_true",
+                    help="also probe every active board in YOUR store")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="with --roster: cap the boards probed")
+    ap.add_argument("--json", type=Path, help="write machine-readable results")
+    args = ap.parse_args()
+
+    wanted = args.only or list(SECTIONS)
+    # Fetchers filter internally; widen so a zero means "the source gave us
+    # nothing", never "nothing matched your keywords".
+    config.widen_keywords()
+    started = time.monotonic()
+    all_results = runstate.run(_probe_all(wanted, args))
+
+    counts = summarize(all_results)
+    print(f"\n  {'=' * 72}")
+    print("  " + "   ".join(f"{EMOJI.get(k, '?')} {k}: {v}"
+                            for k, v in sorted(counts.items())))
+    print(f"  {len(all_results)} probes in {time.monotonic() - started:.0f}s")
+
+    if args.json:
+        args.json.write_text(json.dumps(
+            {"checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+             "counts": counts, "probes": all_results}, indent=1), encoding="utf-8")
+        print(f"  wrote {args.json}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,361 @@
+"""Per-session log files: timestamped, levelled records of everything a run
+prints — plus DEBUG detail that is logged but never printed.
+
+Every record in the file carries a timestamp, a level and a source name::
+
+    2026-08-28 15:41:22 INFO     console | probing 171 candidate compan(ies)...
+    2026-08-28 15:41:24 DEBUG    http    | GET https://boards-api.greenhouse.io/... -> 200 in 0.31s
+    2026-08-28 15:41:29 WARNING  console | [!] greenhouse arine: HTTP 404
+
+Two kinds of record end up here:
+
+* **Console mirror** — sys.stdout/sys.stderr are tee'd, so everything the
+  crawler prints reaches the console unchanged AND lands in the file as a
+  levelled record (logger ``console``; ``[!]`` lines as WARNING, stderr as
+  ERROR, everything else INFO).
+* **File-only detail** — anything sent through the stdlib ``logging`` module
+  (``logging.getLogger(__name__).debug(...)``) is written to the session
+  file by the handler installed here, and NEVER printed: no console handler
+  exists. This is the channel for per-request HTTP traces, cache hits, and
+  other diagnostics too chatty for the terminal.
+
+Notes:
+    run_scraper.main() calls start() right after argument parsing;
+    src/dispatch/background.py opens one SessionLog per UI operation and streams its
+    browser tee into it. The offline test suite never calls start()
+    (tests/conftest.py points _log_dir at a tmp directory, autouse);
+    tests/test_session_log.py enforces the record format, the level
+    routing, and the logged-but-not-printed contract. Noisy third-party
+    loggers (urllib3 et al.) are capped at WARNING so a DEBUG root level
+    doesn't flood the file with connection chatter.
+"""
+
+from __future__ import annotations
+
+import atexit
+import contextvars
+import logging
+import os
+import sys
+import time
+from collections.abc import Callable, Hashable
+from datetime import datetime
+from pathlib import Path
+from typing import TextIO, override
+
+from src import config
+
+# How many session logs to keep: a couple of months of harvest passes (two
+# a day), crawls and web-UI ops. 60 was barely a week by 2026-09-16.
+KEEP = 200
+
+
+class _AppDebugOnly(logging.Filter):
+    """Pass every record at INFO+; pass DEBUG only from this app's loggers."""
+
+    @override
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Logger namespaces whose DEBUG records belong in the file: this
+        # application's own. Every other DEBUG source is some dependency's
+        # internals, which SessionLog's noisy-logger cap can't enumerate
+        # (ddgs' Rust HTTP bridge alone emits hyper_util connection-pool and
+        # h2 frame traces, which flooded the 2026-08-28 discover-local log),
+        # so DEBUG is allowlisted by first name component while INFO+
+        # passes from anyone.
+        return (record.levelno > logging.DEBUG
+                or record.name.split(".", 1)[0] in {"console", "http", "claude", "discovery",
+                                                    "src", "capture", "tools"})
+
+# Finishers for session logs opened by start(); finish() drains it. Not
+# run state (src/runstate.py): what they undo, the swap of sys.stdout and
+# sys.stderr, is the process's, and the atexit finish() must find them.
+_active: list[Callable[[], None]] = []
+
+#: The line this writer has begun and not ended, per sink: {sink: text}.
+#: A ContextVar, so each task, and each thread, assembles its own lines.
+_PARTIAL: contextvars.ContextVar[dict[Hashable, str]] = contextvars.ContextVar(
+    "partial_lines", default={})
+
+
+def whole_lines(sink: Hashable, text: str) -> list[str]:
+    """The lines this task or thread completes by writing `text` to `sink`;
+    the rest waits for its next write there.
+
+    print() writes a line's text and its newline separately, so lines
+    assembled across writers fuse: a worker's line spliced into a
+    progress line (the 2026-08-28 session logs).
+
+    >>> whole_lines("out", "a\\nb"), whole_lines("out", "c\\n")
+    (['a'], ['bc'])
+    """
+    partial = _PARTIAL.get()
+    *lines, rest = (partial.get(sink, "") + text).split("\n")
+    if rest or sink in partial:
+        _PARTIAL.set({**partial, sink: rest} if rest else
+                     {k: v for k, v in partial.items() if k != sink})
+    return lines
+
+
+def _log_dir() -> Path:
+    """Where session logs live.
+
+    Notes:
+        A function rather than a constant so the offline test suite can
+        point it at a tmp directory (tests/conftest.py does, autouse) —
+        DATA_DIR itself is resolved once at config import.
+    """
+    return config.DATA_DIR / "logs"
+
+
+
+def _mode(argv: list[str]) -> str:
+    """The first flag that isn't a scope/tuning modifier, else 'crawl'.
+
+    >>> _mode(["--rescore", "--limit", "20"])
+    'rescore'
+    >>> _mode(["--track", "remote"])
+    'crawl'
+    """
+    # Flags that tune or scope a run rather than naming what kind of run it
+    # is. A session whose only flags are these is the daily crawl.
+    for tok in argv:
+        if tok.startswith("--") and tok[2:] not in {
+                "track", "preview", "no-fit", "send", "refresh",
+                "top", "workers", "no-verify", "stale-days", "limit",
+                "described-only", "why", "db"}:
+            return tok[2:]
+    return "crawl"
+
+
+def _level_for(line: str, err: bool) -> int:
+    """The record level for one mirrored console line.
+
+    >>> _level_for("  [!] greenhouse arine: HTTP 404", err=False) == logging.WARNING
+    True
+    >>> _level_for("  42 new job(s)", err=False) == logging.INFO
+    True
+    >>> _level_for("Traceback (most recent call last):", err=True) == logging.ERROR
+    True
+    """
+    if err:
+        return logging.ERROR
+    if line.lstrip().startswith(("[!]", "[?]")):
+        return logging.WARNING
+    return logging.INFO
+
+
+class SessionLog:
+    """One session's log file: a logging handler feeding it, plus the
+    line-buffered console mirror that both tees (_Tee below, and
+    src/dispatch/background.py's browser tee) stream into through feed().
+
+    Notes:
+        The handler is attached to the ROOT logger, so any module's
+        ``logging.getLogger(__name__)`` records land in the file with no
+        wiring — and nowhere else, because no console handler exists.
+        close() detaches the handler, restores the root level and stamps
+        the footer; it is safe to call more than once (and runs atexit for
+        CLI sessions, so a crash still gets a footer after Python prints
+        the traceback to the tee'd stderr).
+    """
+
+    def __init__(self, mode: str, invocation: str, now: datetime | None = None) -> None:
+        log_dir = _log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _prune(log_dir)
+
+        now = now or datetime.now()
+        # One file per RUN, not per second. The name is only second-precise,
+        # and the web UI's run queue hands the runner slot straight to the
+        # next operation, so two runs routinely start inside the same second
+        # (an empty-store sync takes ~50ms) -- opening "w" let the second one
+        # truncate the first one's finished log away. "x" turns the collision
+        # into an error, answered with a -2, -3 ... suffix instead of a lost
+        # log. Suffixed names still match _prune's session-*.log glob.
+        safe = "".join(c for c in mode if c.isalnum() or c == "-") or "crawl"
+        stem = f"session-{now:%Y%m%d-%H%M%S}-{safe}"
+        n = 1
+        while True:
+            self.path = log_dir / (f"{stem}.log" if n == 1
+                                   else f"{stem}-{n}.log")
+            try:
+                self._fh = open(self.path, "x", encoding="utf-8",
+                                errors="replace", buffering=1)
+                break
+            except FileExistsError:
+                n += 1
+        self._fh.write(f"# job crawler session\n"
+                       f"# started : {now:%Y-%m-%d %H:%M:%S}\n"
+                       f"# run     : {invocation}\n\n")
+        self._t0 = time.monotonic()
+        self._closed = False
+
+        self._handler = logging.StreamHandler(self._fh)
+        # One record per line: timestamp, level, source logger, message.
+        self._handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        self._handler.addFilter(_AppDebugOnly())
+        root = logging.getLogger()
+        self._prev_root_level = root.level
+        root.addHandler(self._handler)
+        root.setLevel(logging.DEBUG)
+        # Third-party loggers capped at WARNING so the file stays about THIS
+        # application's decisions: urllib3/requests/playwright emit
+        # per-connection DEBUG chatter, werkzeug logs an INFO access line for
+        # EVERY request — the browser polls /api/run/status every ~1.5s,
+        # which buried a web-UI op's real records under hundreds of poll
+        # lines (2026-08-28 discover-term log) — and asyncio announces its
+        # event-loop policy at DEBUG. Their WARNING+ records (retries,
+        # request failures) still land.
+        for name in ("urllib3", "requests", "charset_normalizer", "playwright",
+                     "werkzeug", "asyncio", "primp", "ddgs"):
+            noisy = logging.getLogger(name)
+            if noisy.level == logging.NOTSET or noisy.level < logging.WARNING:
+                noisy.setLevel(logging.WARNING)
+
+    # ── console mirror ──────────────────────────────────────────────────
+    def feed(self, text: str, err: bool = False) -> None:
+        """One record per line tee'd console output completes, lines
+        assembled per writer (`whole_lines`)."""
+        if self._closed:
+            return
+        for line in whole_lines((self, err), text):
+            self._route(line, err)
+
+    def _route(self, line: str, err: bool) -> None:
+        if not line.strip():
+            return                            # layout blanks aren't records
+        logging.getLogger("console").log(_level_for(line, err), "%s", line)
+
+    # ── teardown ────────────────────────────────────────────────────────
+    def close(self) -> None:
+        if self._closed:
+            return
+        for err in (False, True):
+            rest = _PARTIAL.get().get((self, err), "")
+            if rest.strip():
+                self._route(rest, err)
+        self._closed = True
+        root = logging.getLogger()
+        root.removeHandler(self._handler)
+        root.setLevel(self._prev_root_level)
+        # GIL state at the end: an extension not declared free-threading safe
+        # (lxml before 7.0) switches it back on when imported, mid-run.
+        gil = "on" if getattr(sys, "_is_gil_enabled", lambda: True)() else "off"
+        try:
+            self._fh.write(f"\n# ended   : {datetime.now():%Y-%m-%d %H:%M:%S}"
+                           f"  ({time.monotonic() - self._t0:.0f}s, GIL {gil})\n")
+            self._fh.close()
+        except ValueError:
+            pass
+
+
+def _null_stream() -> TextIO:
+    """A real file object that swallows everything, so the tee can treat it
+    exactly like a console stream (write/flush/encoding/isatty all work)."""
+    return open(os.devnull, "w", encoding="utf-8")
+
+
+class _Tee:
+    """Writes to the original stream and mirrors into the SessionLog; reads
+    everything else (isatty, encoding, ...) from the original stream.
+
+    Notes:
+        The mirror side is wrapped so a closed session log (interpreter
+        teardown, double finish) can never break console output.
+    """
+
+    def __init__(self, stream: TextIO, session: SessionLog, err: bool = False) -> None:
+        self._stream = stream
+        self._session = session
+        self._err = err
+
+    def write(self, text: str) -> int:
+        n = self._stream.write(text)
+        try:
+            self._session.feed(text, err=self._err)
+        except ValueError:
+            pass
+        return n
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+
+def _prune(log_dir: Path, keep: int = KEEP) -> None:
+    """Delete the oldest session logs so that after the new file is
+    created at most `keep` remain.
+
+    Notes:
+        Timestamped names sort chronologically, so lexicographic order is
+        age order.
+    """
+    logs = sorted(log_dir.glob("session-*.log"))
+    for old in logs[:-(keep - 1)] if len(logs) >= keep else []:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def open_log(mode: str, invocation: str, now: datetime | None = None) -> SessionLog:
+    """Create a fresh SessionLog (file + attached logging handler). The
+    caller owns close() — start() below wires it up for CLI runs,
+    src/dispatch/background.py streams its browser-tee'd output into one per UI
+    operation.
+
+    Notes:
+        Also prunes the log directory down to KEEP files, so every entry
+        point that opens a log enforces retention. `now` exists for tests.
+    """
+    return SessionLog(mode, invocation, now=now)
+
+
+def start(argv: list[str], now: datetime | None = None,
+          prog: str = "run_scraper.py") -> Path:
+    """Begin mirroring stdout/stderr into a new session log; returns its
+    path. finish() (registered atexit) restores the streams, detaches the
+    logging handler and stamps a footer with the elapsed time.
+
+    Notes:
+        argv is the CLI argument list *without* the program name, exactly
+        what run_scraper.main() received; `prog` names the script, and any
+        other than run_scraper.py prefixes the log's mode with its stem
+        (session-...-discover-local.log). `now` exists for tests.
+    """
+    stem = prog.removesuffix(".py")
+    mode = _mode(argv) if stem == "run_scraper" else f"{stem}-{_mode(argv)}"
+    session = open_log(mode, f"{prog} " + " ".join(argv), now)
+
+    # A Windows binary running with no console starts with sys.stdout and
+    # sys.stderr both None. The tee still needs a stream behind it -- the
+    # first print() would otherwise die on None.write, and the traceback
+    # would have nowhere to go either (JobHarvester.exe exited in 0s with
+    # an empty log, 2026-09-10, when it was built
+    # --windows-console-mode=attach). Both binaries are plain console apps
+    # now, so this is no longer a path either of them takes; it stays
+    # because pythonw, a service wrapper, or a rebuild with that flag
+    # would all land here, and the failure it prevents is silent.
+    out = sys.stdout if sys.stdout is not None else _null_stream()
+    err = sys.stderr if sys.stderr is not None else _null_stream()
+    sys.stdout = _Tee(out, session)
+    sys.stderr = _Tee(err, session, err=True)
+
+    def _finish() -> None:
+        sys.stdout, sys.stderr = out, err
+        session.close()
+
+    _active.append(_finish)
+    atexit.register(finish)
+    return session.path
+
+
+def finish() -> None:
+    """Close every session log opened by start(), restoring the original
+    streams. Safe to call more than once.
+    """
+    while _active:
+        _active.pop()()

@@ -3,10 +3,25 @@ socket, no API key. Covers the geo bucket the Jobs tab filters on, the API
 surface the SPA depends on, and the asset cache-busting that a stale
 browser copy once defeated."""
 
+import asyncio
 import json
 import re
+import threading
+import time
 
-import webapp
+import pytest
+
+from conftest import answer, run_web_op
+from src import web
+from src.web.server import call
+from src import config
+from src import store
+from src.claude import api
+from src.dispatch import background as ops
+from src.dispatch import registry
+from src.dispatch.registry import OpParams
+from src.web import routes
+import src.discovery.paste_ingest as ls
 
 
 class TestGeoBucket:
@@ -14,33 +29,44 @@ class TestGeoBucket:
     secondary hint because it's stale-by-construction."""
 
     def test_local(self, local_addr):
-        assert webapp._geo_tag({"location": local_addr}) == "local"
+        assert web._geo_tag({"location": local_addr}) == "local"
 
     def test_remote(self):
-        assert webapp._geo_tag({"location": "Remote - US"}) == "remote"
+        assert web._geo_tag({"location": "Remote - US"}) == "remote"
 
     def test_relocation(self, elsewhere):
-        assert webapp._geo_tag({"location": elsewhere}) == "relocation"
+        assert web._geo_tag({"location": elsewhere}) == "relocation"
 
     def test_stored_remote_eligible_wins_on_empty_location(self):
-        assert webapp._geo_tag({"location": "", "remote_eligible": 1}) == "remote"
+        assert web._geo_tag({"location": "", "remote_eligible": 1}) == "remote"
 
     def test_stored_geo_mode_remote_wins(self):
-        assert webapp._geo_tag({"location": "Austin, TX",
+        assert web._geo_tag({"location": "Austin, TX",
                                 "geo_mode": "remote"}) == "remote"
 
 
 class TestOps:
     def test_ops_are_keyed_by_engine_not_track_id(self):
         # A user-chosen track id must never appear in code.
-        assert all("tracks" not in o for o in webapp.OPS.values())
+        assert all("tracks" not in o for o in web.OPS.values())
 
     def test_every_op_names_a_real_engine_or_is_agnostic(self):
-        assert all(o.get("engine") in (None, "local", "neural")
-                   for o in webapp.OPS.values())
+        assert all(o.get("engine") in (None, "local", "sweep")
+                   for o in web.OPS.values())
 
     def test_every_op_has_a_callable(self):
-        assert all(callable(o["fn"]) for o in webapp.OPS.values())
+        assert all(callable(o["fn"]) for o in web.OPS.values())
+
+    def test_the_bulk_discovery_ops_are_available_in_the_ui(self):
+        """Slow and low-yield, but the person running the crawler decides
+        when that trade is worth it: the sweeps are buttons as well as
+        discover.py flags. All of them feed the Review queue."""
+        assert {"discover-local", "dork", "discover-term", "reresolve"} <= set(web.OPS)
+        assert all(web.OPS[n]["engine"] == "local"
+                   for n in ("discover-local", "dork", "discover-term"))
+
+    def test_the_targeted_add_paths_stay(self):
+        assert {"add-names", "add-board", "add-job"} <= set(web.OPS)
 
 
 class TestApi:
@@ -53,12 +79,27 @@ class TestApi:
             assert resp.status_code == 200, (path, resp.status_code)
             json.loads(resp.data)
 
+    def test_stats_api_key_reflects_have_api_key(self, client, monkeypatch):
+        """The stats card's "api_key" flag now reads
+        src.claude.api.have_api_key() -- one of three call sites that used
+        to spell out `config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE"`
+        by hand -- so it must move exactly the way have_api_key does."""
+        monkeypatch.setattr(routes, "have_api_key", lambda: True)
+        assert json.loads(client.get("/api/stats").data)["api_key"] is True
+        monkeypatch.setattr(routes, "have_api_key", lambda: False)
+        assert json.loads(client.get("/api/stats").data)["api_key"] is False
+
     def test_tracks_expose_ui_defaults(self, client):
         tracks = json.loads(client.get("/api/tracks").data)
         assert tracks
         for t in tracks:
             assert {"id", "label", "engine", "min_fit_default",
-                    "willing_to_move_default", "ops"} <= set(t)
+                    "willing_to_move_default", "verify_floor", "ops"} <= set(t)
+
+    def test_tracks_expose_the_remote_mission_floor(self, client):
+        # The SPA's remote rule needs the same number the server ranks with.
+        tracks = json.loads(client.get("/api/tracks").data)
+        assert all("remote_mission_floor" in t for t in tracks)
 
     def test_unknown_track_falls_back_rather_than_500(self, client):
         # A stale localStorage value must not brick the UI.
@@ -77,6 +118,415 @@ class TestApi:
     def test_unknown_operation_404s(self, client):
         assert client.post("/api/run/no_such_op").status_code == 404
 
+    def test_bad_op_params_400_by_key_and_nothing_runs(self, client,
+                                                       patch_op):
+        ran = []
+        patch_op("check-closed", lambda **kw: ran.append(kw))
+        resp = client.post("/api/run/check-closed",
+                           json={"limit": "many", "stale": 3})
+        assert resp.status_code == 400
+        body = json.loads(resp.data)
+        assert sorted(ln.split(":")[0] for ln in body["errors"]) == [
+            "limit", "stale"]
+        assert "limit" in body["error"]          # what the UI's toast shows
+        status = json.loads(client.get("/api/run/status").data)
+        assert ran == [] and not status["running"] and status["queue"] == []
+
+    def test_a_body_key_the_route_does_not_read_400s(self, client,
+                                                     wired_db_path):
+        resp = client.post("/api/job/p1/disposition",
+                           json={"disposition": 5, "why": "typo"})
+        assert resp.status_code == 400
+        assert sorted(json.loads(resp.data)["errors"]) == [
+            "disposition: Input should be a valid string", "why: unknown key"]
+
+    def test_import_takes_an_export_back_but_not_unknown_columns(
+            self, client, wired_db_path):
+        """An export carries columns an import never writes (id, the crawl
+        schedule), and they are accepted. A column the companies table does
+        not have is a 400 naming it, and nothing is written."""
+        import io
+        conn = store.connect(wired_db_path)
+        store.upsert_company(conn, {"name": "Acme", "ats": "lever",
+                                    "slug": "acme"})
+        conn.close()
+
+        def post(rows):
+            return client.post("/api/import/companies", data={"file": (
+                io.BytesIO(json.dumps(rows).encode()), "roster.json")})
+
+        rows = json.loads(client.get("/api/export/companies").data)
+        assert post(rows).status_code == 200
+        rows[0]["hq"] = "x"
+        resp = post(rows + [{"name": "Beta", "size": 3}])
+        assert resp.status_code == 400
+        assert json.loads(resp.data)["errors"] == [
+            "[0].hq: unknown key", "[1].size: unknown key"]
+        conn = store.connect(wired_db_path)
+        try:
+            assert [c["name"] for c in store.get_companies(
+                conn, active_only=False)] == ["Acme"]
+        finally:
+            conn.close()
+
+
+class TestCompanyHarvestState:
+    """The roster tab has to show WHY a company stopped producing rows:
+    when its board was last harvested and the dead-board cycle's miss."""
+
+    def _failing_store(self, db_path):
+        """One failing board in conftest's `wired_db_path` throwaway store:
+        these tests write, and the suite may never touch the real one."""
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, {"name": "Sleepy", "ats": "greenhouse",
+                                          "slug": "sleepy"})
+        store.mark_harvested(conn, cid, 0, soft_fail=True)
+        conn.close()
+        return cid
+
+    def test_companies_expose_harvest_state(self, client, wired_db_path):
+        cid = self._failing_store(wired_db_path)
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["miss_reason"] == "fetch-error:harvest"
+        assert row["last_harvested_at"]
+
+    def test_capture_only_rows_show_the_marker(self, client, wired_db_path):
+        # The roster shows WHY a company is never fetched: its ats reads
+        # "capture", and it stays an active row.
+        self._failing_store(wired_db_path)
+        conn = store.connect(wired_db_path)
+        cid = store.upsert_company(conn, {"name": "Saved", "ats": store.CAPTURE_ATS,
+                                          "careers_url": "https://jobs.saved.org/"})
+        conn.close()
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["ats"] == "capture" and row["active"]
+        assert row["miss_reason"] is None and row["last_harvested_at"] is None
+
+class TestPipelineApi:
+    """The Pipeline tab past 'applied': the tracking fields it edits, the
+    follow-up list it groups by, and the conversion table it renders."""
+
+    def _pipeline_store(self, db_path):
+        """One live application in conftest's `wired_db_path` throwaway
+        store: these tests write, and the suite may never touch the real
+        one."""
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
+                                          "slug": "acme"})
+        store.upsert_job(conn, {
+            "job_id": "p1", "company_id": cid, "company_name": "Acme",
+            "title": "Imaging Scientist", "url": "https://acme.io/p1",
+            "location": "Anywhere", "geo_mode": "onsite",
+            "resume_fit_score": 0.54})
+        store.set_disposition(conn, "p1", "applied")
+        conn.close()
+
+    def _row(self, client):
+        return json.loads(client.get("/api/pipeline").data)["rows"][0]
+
+    def test_pipeline_exposes_the_tracking_columns(self, client,
+                                                   wired_db_path):
+        self._pipeline_store(wired_db_path)
+        assert {"applied_at", "followup_at", "contact", "referral",
+                "outcome_reason"} <= set(self._row(client))
+
+    def test_tracking_fields_round_trip(self, client, wired_db_path):
+        self._pipeline_store(wired_db_path)
+        resp = client.post("/api/job/p1/pipeline",
+                           json={"followup_at": "2026-09-08",
+                                 "contact": "Dana R", "referral": 1,
+                                 "outcome_reason": "rejected-interview"})
+        assert resp.status_code == 200
+        row = self._row(client)
+        assert row["followup_at"] == "2026-09-08"
+        assert row["contact"] == "Dana R"
+        assert row["referral"] == 1
+        assert row["outcome_reason"] == "rejected-interview"
+
+    def test_one_field_at_a_time_leaves_the_others_alone(self, client,
+                                                         wired_db_path):
+        # The SPA's editor saves on each control's own `change`.
+        self._pipeline_store(wired_db_path)
+        client.post("/api/job/p1/pipeline", json={"contact": "Dana R"})
+        client.post("/api/job/p1/pipeline", json={"referral": 1})
+        row = self._row(client)
+        assert row["contact"] == "Dana R" and row["referral"] == 1
+
+    def test_stats_count_applications_sent_this_week(self, client,
+                                                     wired_db_path):
+        """The 'applied this week' tile: an application from a month ago is
+        not this week's volume, and one since moved on to interviewing
+        still counts for the week it went out in."""
+        from conftest import iso_days_ago
+        self._pipeline_store(wired_db_path)
+        conn = store.connect(wired_db_path)
+        store.upsert_job(conn, {
+            "job_id": "p2", "company_name": "Acme", "title": "Old One",
+            "url": "https://acme.io/p2", "location": "Anywhere",
+            "resume_fit_score": 0.5})
+        store.set_disposition(conn, "p2", "applied")
+        conn.execute("UPDATE jobs SET applied_at=? WHERE job_id='p2'",
+                     (iso_days_ago(30),))
+        conn.commit()
+        store.set_disposition(conn, "p1", "interviewing")
+        conn.close()
+        stats = json.loads(client.get("/api/stats").data)
+        assert stats["applied_7d"] == 1
+
+    def test_a_field_outside_the_whitelist_is_refused(self, client,
+                                                      wired_db_path):
+        self._pipeline_store(wired_db_path)
+        assert client.post("/api/job/p1/pipeline",
+                           json={"resume_fit_score": 0}).status_code == 400
+        assert self._row(client)["resume_fit_score"] == 0.54
+
+    def test_an_outcome_outside_the_vocabulary_400s(self, client,
+                                                    wired_db_path):
+        self._pipeline_store(wired_db_path)
+        assert client.post("/api/job/p1/pipeline",
+                           json={"outcome_reason": "ghosted"}).status_code == 400
+
+    def test_unknown_job_400s(self, client, wired_db_path):
+        self._pipeline_store(wired_db_path)
+        assert client.post("/api/job/nope/pipeline",
+                           json={"contact": "X"}).status_code == 400
+
+    def test_followups_due_appears_once_the_date_has_arrived(self, client,
+                                                             wired_db_path):
+        self._pipeline_store(wired_db_path)
+        assert json.loads(client.get("/api/pipeline").data)["followups_due"] == []
+        client.post("/api/job/p1/pipeline", json={"followup_at": "2000-01-01"})
+        assert json.loads(
+            client.get("/api/pipeline").data)["followups_due"] == ["p1"]
+
+    def test_a_future_followup_is_not_due(self, client, wired_db_path):
+        self._pipeline_store(wired_db_path)
+        client.post("/api/job/p1/pipeline", json={"followup_at": "2099-01-01"})
+        assert json.loads(client.get("/api/pipeline").data)["followups_due"] == []
+
+    def test_conversion_report_bands_the_application(self, client,
+                                                     wired_db_path):
+        self._pipeline_store(wired_db_path)
+        rep = json.loads(client.get("/api/report/conversion").data)
+        assert len(rep) == 1
+        assert rep[0]["band"] == "mid" and rep[0]["geo_mode"] == "onsite"
+        assert rep[0]["applications"] == 1
+        assert rep[0]["interview_rate"] == 0.0
+
+
+class TestApplyBandFields:
+    """The Jobs tab's 'apply band' quick filter is client-side; the contract
+    it depends on is that every /api/jobs row carries the four fields it
+    reads, with the geo bucket derived live from the location."""
+
+    def test_jobs_expose_what_the_band_filter_reads(self, client,
+                                                    wired_db_path, local_addr):
+        t = config.UI_TRACKS[config.DEFAULT_TRACK]
+        conn = store.connect(wired_db_path)
+        cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
+                                          "slug": "acme"})
+        store.upsert_job(conn, {
+            "job_id": "b1", "company_id": cid, "company_name": "Acme",
+            "title": "Imaging Scientist", "url": "https://acme.io/b1",
+            "location": local_addr, "track": t.track,
+            "resume_fit_score": 0.54})
+        conn.close()
+        rows = json.loads(client.get("/api/jobs").data)
+        row = next(r for r in rows if r["job_id"] == "b1")
+        assert row["resume_fit_score"] == 0.54
+        assert row["geo_bucket"] == "local"
+        assert row["status"] in (None, "open")
+        assert row["disposition"] is None
+
+
+class TestCollapsedJobFields:
+    """/api/jobs runs through store.ranked_jobs' default collapse=True, same
+    as the digest, so the Jobs tab can show "(N similar postings)" too --
+    the survivor's dup_count/dup_job_ids/dup_urls must reach the JSON."""
+
+    def test_a_duplicate_pair_collapses_with_dup_fields_exposed(
+            self, client, wired_db_path, local_addr):
+        t = config.UI_TRACKS[config.DEFAULT_TRACK]
+        conn = store.connect(wired_db_path)
+        cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
+                                          "slug": "acme"})
+        for jid, fit in (("c1", 0.9), ("c2", 0.4)):
+            store.upsert_job(conn, {
+                "job_id": jid, "company_id": cid, "company_name": "Acme",
+                "title": "Data Engineer", "url": f"https://acme.io/{jid}",
+                "location": local_addr, "track": t.track,
+                "resume_fit_score": fit})
+        conn.close()
+        rows = json.loads(client.get("/api/jobs").data)
+        ids = {r["job_id"] for r in rows}
+        assert ids == {"c1"}                        # c2 folded into c1
+        row = next(r for r in rows if r["job_id"] == "c1")
+        assert row["dup_count"] == 2
+        assert row["dup_job_ids"] == ["c2"]
+        assert row["dup_urls"] == ["https://acme.io/c2"]
+
+
+class TestRemoteAdmissionFields:
+    """/api/jobs ships every row and lets the client gate them, so the
+    client needs the server's verdict on each: `remote_ok` says a remote row
+    is worth showing (watched, or core-mission at the track's
+    remote_mission_floor). `best_fit` on the roster is what turns an
+    unwatched company that has already produced a good-fit job into a
+    one-click watch suggestion."""
+
+    FIT = 0.94
+
+    def _store(self, db_path, monkeypatch, mission, floor=0.85):
+        t = config.UI_TRACKS[config.DEFAULT_TRACK]
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
+                                          "slug": "acme",
+                                          "mission_score": mission})
+        store.upsert_job(conn, {"job_id": "gh_acme_1", "company_id": cid,
+                                "company_name": "Acme",
+                                "title": "Research Engineer",
+                                "url": "https://acme.io/1",
+                                "location": "Remote - US", "geo_mode": "remote",
+                                "track": t.track,
+                                "resume_fit_score": self.FIT})
+        conn.commit()
+        conn.close()
+        monkeypatch.setitem(config.UI_TRACKS, t.id,
+                            t.model_copy(update={"remote_mission_floor": floor}))
+        return cid
+
+    def _job(self, client):
+        return json.loads(client.get("/api/jobs").data)[0]
+
+    def test_core_mission_remote_is_admitted_unwatched(self, client,
+                                                       wired_db_path,
+                                                       monkeypatch):
+        self._store(wired_db_path, monkeypatch, mission=0.9)
+        job = self._job(client)
+        assert job["watched"] is False and job["remote_ok"] is True
+
+    def test_below_the_floor_is_not(self, client, wired_db_path, monkeypatch):
+        self._store(wired_db_path, monkeypatch, mission=0.5)
+        assert self._job(client)["remote_ok"] is False
+
+    def test_no_floor_disables_it(self, client, wired_db_path, monkeypatch):
+        self._store(wired_db_path, monkeypatch, mission=0.9, floor=None)
+        assert self._job(client)["remote_ok"] is False
+
+    def test_watch_admits_a_company_far_below_the_floor(self, client,
+                                                        wired_db_path,
+                                                        monkeypatch):
+        # Above the track's min_mission (or the row leaves the ranking for an
+        # unrelated reason), nowhere near the remote floor.
+        cid = self._store(wired_db_path, monkeypatch, mission=0.3)
+        assert client.post(f"/api/company/{cid}/watch",
+                           json={"on": True}).status_code == 200
+        assert self._job(client)["remote_ok"] is True
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["watched"] is True and "watch" not in row["tags"]
+
+    def test_roster_carries_the_best_fit_so_far(self, client, wired_db_path,
+                                                monkeypatch):
+        cid = self._store(wired_db_path, monkeypatch, mission=0.9)
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["best_fit"] == self.FIT and row["open_jobs"] == 1
+
+    def test_best_fit_is_none_without_jobs(self, client, wired_db_path,
+                                           monkeypatch):
+        self._store(wired_db_path, monkeypatch, mission=0.9)
+        conn = store.connect(wired_db_path)
+        cid = store.upsert_company(conn, {"name": "Quiet", "ats": "lever",
+                                          "slug": "quiet"})
+        conn.close()
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["best_fit"] is None and row["open_jobs"] == 0
+
+
+class TestReviewQueue:
+    """Every automated roster write waits for a person now, and the queue is
+    the API surface that person works through."""
+
+    def _queued_store(self, db_path, name="Guess"):
+        """One review candidate in conftest's `wired_db_path` throwaway
+        store -- which the routes and discovery's own store.connect() both
+        read, so the suite never touches the real one."""
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, store.mark_pending(
+            {"name": name, "ats": "greenhouse", "slug": "guess",
+             "source": "paste", "local_job_count": 2, "total_job_count": 9}))
+        conn.close()
+        return cid
+
+    def test_pending_lists_the_queue(self, client, wired_db_path):
+        cid = self._queued_store(wired_db_path)
+        rows = json.loads(client.get("/api/pending").data)
+        assert [r["id"] for r in rows] == [cid]
+        assert rows[0]["source"] == "paste"
+        assert rows[0]["local_job_count"] == 2
+
+    def test_a_candidate_is_counted_and_its_board_is_harvested(self, client,
+                                                               wired_db_path):
+        self._queued_store(wired_db_path)
+        stats = json.loads(client.get("/api/stats").data)
+        assert stats["companies_active"] == 1
+        assert stats["pending_review"] == 1
+
+    def test_confirm_puts_it_on_the_roster(self, client, wired_db_path):
+        cid = self._queued_store(wired_db_path)
+        assert client.post(f"/api/company/{cid}/confirm").status_code == 200
+        assert json.loads(client.get("/api/pending").data) == []
+        assert json.loads(client.get("/api/stats").data)["companies_active"] == 1
+
+    def test_reject_removes_it_and_blocks_the_name(self, client,
+                                                   wired_db_path):
+        cid = self._queued_store(wired_db_path)
+        resp = client.post(f"/api/company/{cid}/reject",
+                           json={"reason": "not a company"})
+        assert resp.status_code == 200
+        conn = store.connect(wired_db_path)
+        try:
+            assert store.get_companies(conn, active_only=False) == []
+            assert store.blocked_name_keys(conn) == {"guess"}
+        finally:
+            conn.close()
+
+    def test_unknown_company_404s(self, client, wired_db_path):
+        self._queued_store(wired_db_path)
+        assert client.post("/api/company/9999/confirm").status_code == 404
+        assert client.post("/api/company/9999/reject").status_code == 404
+
+    def test_block_records_the_names_the_reviewer_rejected(
+            self, client, wired_db_path):
+        self._queued_store(wired_db_path)
+        resp = client.post("/api/names/block",
+                           json={"names": ["Who You Are", "Job Location"]})
+        assert json.loads(resp.data)["blocked"] == 2
+        conn = store.connect(wired_db_path)
+        try:
+            assert store.blocked_name_keys(conn) == {"whoyouare", "joblocation"}
+        finally:
+            conn.close()
+
+    def test_preview_parses_without_resolving_anything(self, client,
+                                                       wired_db_path,
+                                                       monkeypatch):
+        self._queued_store(wired_db_path)
+        monkeypatch.setattr(ls, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health"])
+        tried = []
+        monkeypatch.setattr("src.discovery.resolve.board.resolve_or_miss",
+                            answer(lambda *a, **k: tried.append(a) or (None, "x")))
+        rows = json.loads(client.post(
+            "/api/names/preview", json={"text": "x", "use_llm": False}).data)
+        assert rows == [{"name": "Alpaca Health", "key": "alpacahealth",
+                         "state": "new"}]
+        assert tried == []
+
 
 class TestAssets:
     def test_index_cache_busts_its_assets(self, client):
@@ -93,7 +543,539 @@ class TestAssets:
         assert resp.headers.get("Cache-Control") == "no-store"
 
     def test_asset_version_tracks_content(self, monkeypatch):
-        from webapp import routes
         v1 = routes._asset_version()
         assert v1 == routes._asset_version()        # stable
         assert len(v1) == 10
+
+
+class TestOpConcurrency:
+    """One operation at a time, enforced where it can actually be enforced.
+
+    The route checked `_running()` and then called `_run_op()` as two steps.
+    Two /api/run requests landing together both passed the check and both
+    started, so the crawl ran twice — and because each op swaps sys.stdout for
+    a tee that appends to TASK["log"], the second tee wrapped the first and
+    every printed line was recorded once per layer. The duplicate output in
+    the run log was the visible half; the duplicated work was the expensive
+    half. The slot is claimed on the web UI's loop now, one request at a
+    time, so the race cannot exist.
+    """
+
+    @staticmethod
+    def _noisy(label, lines=3, pause=0.05):
+        async def fn():
+            for i in range(lines):
+                print(f"{label}-{i}")
+                await asyncio.sleep(pause)
+        return fn
+
+    def test_simultaneous_claims_start_exactly_one(self):
+        """Twelve request threads submit through the web UI's loop at (as
+        near as the OS allows) the same instant, behind a Barrier: one
+        starts, the rest queue as the one waiting entry they all name."""
+        results, lock = [], threading.Lock()
+        barrier, done = threading.Barrier(12), threading.Event()
+
+        async def held():
+            while not done.is_set():
+                await asyncio.sleep(0.01)
+
+        def claim():
+            barrier.wait()
+            r = call(ops.submit("x", OpParams(), held))
+            with lock:
+                results.append(r)
+
+        threads = [threading.Thread(target=claim) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        call(ops.queue_clear())
+        done.set()
+        assert results.count(None) == 1, "more than one op claimed the slot"
+        assert sorted(r["duplicate"] for r in results if r) == [False] + [True] * 10
+        while call(ops.status())["running"]:
+            time.sleep(0.02)
+
+    def test_log_records_each_line_once(self):
+        lines = run_web_op("solo", self._noisy("line"))["lines"]
+        assert [l for l in lines if l.startswith("line-")] == [
+            "line-0", "line-1", "line-2"]
+
+    def test_stdout_is_restored_when_the_op_ends(self):
+        import sys
+        before = sys.stdout
+        run_web_op("solo", self._noisy("z", lines=1))
+        assert sys.stdout is before, "the tee outlived its operation"
+        assert ops.TASK["task"] is None, "the ended op's task is still held"
+
+    def test_a_failing_op_still_restores_stdout_and_frees_the_slot(self):
+        import sys
+
+        async def boom():
+            raise RuntimeError("op exploded")
+
+        before = sys.stdout
+        s = run_web_op("boom", boom)
+        assert sys.stdout is before
+        assert "RuntimeError" in (s["error"] or "")
+        run_web_op("after", self._noisy("ok", lines=1))
+
+    def test_prints_outside_an_operation_do_not_reach_the_log(self):
+        n = len(run_web_op("solo", self._noisy("q", lines=1))["lines"])
+        print("this line belongs to no operation")
+        assert len(call(ops.status())["lines"]) == n
+
+
+class TestOpRearmsTheClaudeBreaker:
+    """src.claude's breaker is per run, and the server process outlives
+    many operations, each a run of its own. 2026-09-09: a crawl tripped it
+    at 18:22, and the verify runs at 18:29 and 19:24 skipped every Claude
+    call without saying why."""
+
+    def test_the_next_op_has_an_armed_breaker(self):
+        seen = []
+
+        async def trip():
+            api._trip_fatal("HTTP 400: 'credit balance'")
+            seen.append(api.api_disabled())
+
+        async def probe():
+            seen.append(api.api_disabled())
+
+        run_web_op("trip", trip)
+        run_web_op("probe", probe)
+        assert seen == ["HTTP 400: 'credit balance'", None]
+
+
+class TestRunQueue:
+    """A second button press while an operation runs is kept, not lost.
+
+    /api/run/<name> used to answer 409 "already running" and the request was
+    gone: the person had to watch the log and press again the moment it went
+    idle. The single runner slot stays -- two operations writing the same
+    SQLite store is exactly what it exists to prevent -- but everything else
+    waits in a FIFO run queue, and the finishing worker hands the slot to the
+    next entry itself.
+    """
+
+    @staticmethod
+    def _status(client):
+        return json.loads(client.get("/api/run/status").data)
+
+    @classmethod
+    def _wait_for(cls, client, pred, what, timeout=10):
+        """Poll /api/run/status until `pred` holds.
+
+        Polling beats a fixed sleep: the handover happens on the finishing
+        worker's thread, and a sleep long enough to be reliable under
+        full-suite load is long enough to be felt on every run.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s = cls._status(client)
+            if pred(s):
+                return s
+            time.sleep(0.02)
+        raise AssertionError(f"timed out waiting for {what}: "
+                             f"{cls._status(client)}")
+
+    @pytest.fixture
+    def stub_ops(self, monkeypatch, client):
+        """Controllable stand-in operations, registered in the shared OPS
+        table the routes read.
+
+        Each one blocks until the test releases it, so the queue can be
+        inspected while an operation is genuinely running. They touch no
+        store, no network and no Claude call -- the point under test is the
+        runner, not the work.
+        """
+        from types import SimpleNamespace
+
+
+        gates, ran = {}, []
+
+        def add(name, boom=False, work=None):
+            gate = threading.Event()
+            gates[name] = gate
+
+            async def fn(params):
+                ran.append(name)
+                if work is not None:
+                    await work()
+                deadline = time.monotonic() + 10
+                while not gate.is_set():
+                    assert time.monotonic() < deadline, f"{name!r} was never released"
+                    await asyncio.sleep(0.01)
+                if boom:
+                    raise RuntimeError("op exploded")
+
+            monkeypatch.setitem(ops.OPS, name,
+                                {"label": name, "engine": None,
+                                 "params": registry.Rows, "fn": fn})
+
+        yield SimpleNamespace(add=add, ran=ran,
+                              release=lambda n: gates[n].set())
+        # Leave the runner idle for the next test even when this one failed
+        # half way through a queue: drop what is waiting FIRST, so releasing
+        # the gates cannot chain another op into life, then let whatever is
+        # running finish.
+        call(ops.queue_clear())
+        for gate in gates.values():
+            gate.set()
+        self._wait_for(client, lambda s: not s["running"],
+                       "the runner to go idle")
+        call(ops.queue_clear())
+
+    def test_a_second_run_is_queued_rather_than_refused(self, client,
+                                                        stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        started = client.post("/api/run/q-first")
+        assert started.status_code == 200
+        assert json.loads(started.data)["ok"] is True
+        resp = client.post("/api/run/q-second")
+        assert resp.status_code == 202
+        body = json.loads(resp.data)
+        assert body["queued"] is True
+        assert body["duplicate"] is False
+        assert body["name"] == "q-second"
+        assert body["position"] == 1
+        assert body["id"]
+
+    def test_an_identical_request_does_not_queue_twice(self, client,
+                                                       stub_ops):
+        """A double click is one request. Same op, params that validate to
+        the same values ("5" and 5, a blank field and its default) -- the
+        existing entry comes back instead of a second copy of the same run."""
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        first = json.loads(client.post("/api/run/q-second",
+                                       json={"limit": "5"}).data)
+        again = client.post("/api/run/q-second",
+                            json={"limit": 5, "workers": ""})
+        assert again.status_code == 202
+        body = json.loads(again.data)
+        assert body["duplicate"] is True
+        assert body["id"] == first["id"]
+        assert body["position"] == first["position"] == 1
+        assert len(self._status(client)["queue"]) == 1
+
+    def test_the_same_op_with_other_params_takes_its_own_place(self, client,
+                                                               stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        one = json.loads(client.post("/api/run/q-second", json={}).data)
+        two = json.loads(client.post("/api/run/q-second",
+                                     json={"limit": 2}).data)
+        assert two["duplicate"] is False
+        assert two["id"] != one["id"]
+        assert two["position"] == 2
+
+    def test_queueing_the_op_that_is_already_running_is_allowed(self, client,
+                                                                stub_ops):
+        """Deliberate: a crawl asked for again after a config change is a
+        real second request, not a duplicate of the one in flight."""
+        stub_ops.add("q-first")
+        client.post("/api/run/q-first")
+        resp = client.post("/api/run/q-first")
+        assert resp.status_code == 202
+        assert json.loads(resp.data)["name"] == "q-first"
+        assert [e["name"] for e in self._status(client)["queue"]] == ["q-first"]
+
+    def test_status_lists_the_queue_oldest_first(self, client, stub_ops):
+        from datetime import datetime
+
+        for name in ("q-first", "q-second", "q-third"):
+            stub_ops.add(name)
+        for name in ("q-first", "q-second", "q-third"):
+            client.post(f"/api/run/{name}")
+        s = self._status(client)
+        assert s["running"] is True
+        assert s["name"] == "q-first"
+        assert s["queued"] == 2
+        assert [e["name"] for e in s["queue"]] == ["q-second", "q-third"]
+        assert [e["position"] for e in s["queue"]] == [1, 2]
+        for e in s["queue"]:
+            assert set(e) == {"id", "name", "position", "enqueued_at",
+                              "params"}
+            assert e["params"]["track"]          # the route injects it
+            datetime.fromisoformat(e["enqueued_at"])
+
+    def test_the_queue_is_an_empty_list_when_nothing_waits(self, client):
+        """Always present, so the front end never has to guess."""
+        s = self._status(client)
+        assert s["queue"] == []
+        assert s["queued"] == 0
+
+    def test_one_waiting_entry_can_be_dropped(self, client, stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        entry = json.loads(client.post("/api/run/q-second").data)
+        resp = client.delete(f"/api/run/queue/{entry['id']}")
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["removed"] is True
+        assert self._status(client)["queue"] == []
+        # Gone is gone: the same id cannot be removed twice, and neither can
+        # an entry that has already been handed the runner slot.
+        assert client.delete(f"/api/run/queue/{entry['id']}").status_code == 404
+
+    def test_the_whole_queue_can_be_cleared(self, client, stub_ops):
+        for name in ("q-first", "q-second", "q-third"):
+            stub_ops.add(name)
+        for name in ("q-first", "q-second", "q-third"):
+            client.post(f"/api/run/{name}")
+        resp = client.delete("/api/run/queue")
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["removed"] == 2
+        s = self._status(client)
+        assert s["queued"] == 0
+        assert s["running"] is True, "clearing the queue must not stop the run"
+
+    def test_the_queued_op_runs_when_the_first_one_finishes(self, client,
+                                                            stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        client.post("/api/run/q-second")
+        stub_ops.release("q-first")
+        s = self._wait_for(client, lambda s: s["name"] == "q-second",
+                           "the queued op to be handed the slot")
+        assert s["running"] is True
+        assert s["queue"] == []
+        stub_ops.release("q-second")
+        self._wait_for(client, lambda s: not s["running"],
+                       "the runner to go idle")
+        assert stub_ops.ran == ["q-first", "q-second"]
+        assert self._status(client)["queue"] == []
+
+    def test_status_polls_hand_over_only_new_lines(self, client, stub_ops):
+        """app.js polls /api/run/status?since=<total> every 1.5 s: each poll
+        carries the lines past the cursor, and none twice."""
+        async def speak():
+            print("first line")
+        stub_ops.add("q-first", work=speak)
+        client.post("/api/run/q-first")
+        s = self._wait_for(client, lambda s: "first line" in s["lines"],
+                           "the op's line to reach the log")
+        again = json.loads(client.get(f"/api/run/status?since={s['total']}").data)
+        assert (again["lines"], again["total"]) == ([], s["total"])
+
+    def test_stop_cancels_the_op_rolls_its_batch_back_and_the_queue_runs_on(
+            self, client, stub_ops, tmp_path):
+        """A stopped op's open store batch rolls back, and the op queued
+        behind it still gets the slot."""
+        db = tmp_path / "s.db"
+        store.connect(db).close()
+        writing, release = threading.Event(), threading.Event()
+
+        def write(conn):
+            store.upsert_job(conn, {"job_id": "half", "title": "T"})
+            writing.set()
+            assert release.wait(10)
+
+        async def batch():
+            async with store.Writer(db) as w:
+                await w.batch(write)
+        stub_ops.add("q-writer", work=batch)
+        stub_ops.add("q-second")
+        client.post("/api/run/q-writer")
+        client.post("/api/run/q-second")
+        assert writing.wait(10)
+        assert json.loads(client.post("/api/run/stop").data) == {"stopping": True}
+        release.set()
+        s = self._wait_for(client, lambda s: s["name"] == "q-second",
+                           "the queued op to start after the stopped one")
+        assert s["running"] is True
+        conn = store.connect(db)
+        try:
+            assert not store.job_exists(conn, "half")
+        finally:
+            conn.close()
+        stub_ops.release("q-second")
+        s = self._wait_for(client, lambda s: not s["running"], "the runner to go idle")
+        assert stub_ops.ran == ["q-writer", "q-second"]
+
+    def test_stop_marks_the_op_stopped_within_a_second(self, client, stub_ops):
+        stub_ops.add("q-first")
+        client.post("/api/run/q-first")
+        t0 = time.monotonic()
+        assert json.loads(client.post("/api/run/stop").data) == {"stopping": True}
+        s = self._wait_for(client, lambda s: not s["running"], "the op to stop")
+        assert time.monotonic() - t0 < 1
+        assert (s["name"], s["stopped"], s["error"]) == ("q-first", True, None)
+        assert "  [!] operation stopped" in s["lines"]
+        assert json.loads(client.post("/api/run/stop").data) == {"stopping": False}
+
+    def test_a_stop_before_an_op_first_runs_still_hands_the_slot_on(self, client):
+        """A stop can land between an op's start and its first step (racing
+        the hand-off from the op before it): the op's body never runs, and
+        the slot is handed on all the same."""
+        ran = []
+
+        async def body():
+            ran.append("body")
+
+        async def race():
+            assert await ops.submit("q-first", OpParams(), body) is None
+            return await ops.stop()
+        assert call(race()) is True
+        s = self._wait_for(client, lambda s: not s["running"], "the slot to be freed")
+        assert (s["name"], s["stopped"], ran) == ("q-first", True, [])
+        assert run_web_op("q-after", body)["stopped"] is False
+        assert ran == ["body"]
+
+    @staticmethod
+    def _gated_dedup(monkeypatch, boom=False):
+        """Point the `dedup` op at a sync target that blocks until released;
+        returns (started, release, ended) events."""
+        started, release, ended = (threading.Event() for _ in range(3))
+
+        def target(**kw):
+            started.set()
+            assert release.wait(10)
+            ended.set()
+            if boom:
+                raise RuntimeError("store op exploded")
+        monkeypatch.setitem(registry.REGISTRY, "dedup",
+                            {**registry.REGISTRY["dedup"], "target": target})
+        return started, release, ended
+
+    def test_two_stops_never_let_the_next_op_overlap_a_sync_one(
+            self, client, stub_ops, monkeypatch):
+        started, release, ended = self._gated_dedup(monkeypatch)
+        stub_ops.add("q-second")
+        try:
+            client.post("/api/run/dedup")
+            client.post("/api/run/q-second")
+            assert started.wait(10)
+            for _ in range(2):
+                assert json.loads(client.post("/api/run/stop").data) == {"stopping": True}
+            time.sleep(0.2)
+            assert (self._status(client)["name"], stub_ops.ran) == ("dedup", [])
+        finally:
+            release.set()
+        self._wait_for(client, lambda s: s["name"] == "q-second",
+                       "the queued op to start after the sync one")
+        assert ended.is_set()
+
+    @pytest.mark.parametrize("boom", [False, True])
+    def test_a_sync_op_stopped_too_late_reports_its_own_outcome(
+            self, client, monkeypatch, boom):
+        """A stop cannot interrupt a started sync op: it ends completed or
+        failed, as it did, never "stopped"."""
+        started, release, _ = self._gated_dedup(monkeypatch, boom)
+        try:
+            client.post("/api/run/dedup")
+            assert started.wait(10)
+            assert json.loads(client.post("/api/run/stop").data) == {"stopping": True}
+        finally:
+            release.set()
+        s = self._wait_for(client, lambda s: not s["running"], "the op to end")
+        assert (s["stopped"], s["error"]) == (
+            False, "RuntimeError: store op exploded" if boom else None)
+        assert "  [!] operation stopped" not in s["lines"]
+        assert ("  dedup: the stop came too late; a started store op runs to "
+                "its end") in s["lines"]
+
+    def test_a_failed_op_does_not_take_the_queue_down_with_it(self, client,
+                                                              stub_ops):
+        """The worker records the failure and still hands the slot on: one
+        broken crawl must not silently swallow everything behind it."""
+        stub_ops.add("q-boom", boom=True)
+        stub_ops.add("q-second")
+        client.post("/api/run/q-boom")
+        client.post("/api/run/q-second")
+        stub_ops.release("q-boom")
+        self._wait_for(client, lambda s: s["name"] == "q-second",
+                       "the queued op to start after the failure")
+        stub_ops.release("q-second")
+        self._wait_for(client, lambda s: not s["running"],
+                       "the runner to go idle")
+        assert stub_ops.ran == ["q-boom", "q-second"]
+
+    def test_config_save_is_refused_while_the_queue_is_not_empty(self, client,
+                                                                 stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        client.post("/api/run/q-second")
+        # Invalid TOML on purpose: even if the busy guard let this through,
+        # validation refuses it before anything is written to the profile.
+        resp = client.put("/api/config/raw", json={"toml": "not [valid"})
+        assert resp.status_code == 409
+        assert "run queue" in json.loads(resp.data)["error"]
+
+    def test_config_save_is_refused_by_a_waiting_queue_alone(self, client):
+        """An idle runner is not enough. The queue lives in memory and a save
+        restarts the process (server.py schedule_restart), so every waiting
+        entry would vanish with it."""
+        assert self._status(client)["running"] is False
+        ops.QUEUE.append({"id": "test-entry", "name": "q-first", "params": {},
+                          "key": "{}", "enqueued_at": "2026-09-11T00:00:00",
+                          "fn": lambda: None})
+        try:
+            resp = client.put("/api/config/raw", json={"toml": "not [valid"})
+            assert resp.status_code == 409
+            assert "run queue" in json.loads(resp.data)["error"]
+        finally:
+            call(ops.queue_clear())
+
+    # ----------------------------------------------------------------- #
+    #  The paste flow is not an operation and must not wait for one       #
+    # ----------------------------------------------------------------- #
+
+    def test_preview_parses_while_an_op_runs(self, client, wired_db_path,
+                                             monkeypatch, stub_ops):
+        """Preview resolves nothing and writes nothing -- refusing it while
+        an op held the slot only stopped the person preparing the list.
+
+        conftest's `wired_db_path` covers both the track config (what the
+        routes open) and config.STORE_DB_PATH (what preview_names opens for
+        itself)."""
+        monkeypatch.setattr(ls, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health"])
+        stub_ops.add("q-first")
+        client.post("/api/run/q-first")
+        assert self._status(client)["running"] is True
+        resp = client.post("/api/names/preview",
+                           json={"text": "x", "use_llm": False})
+        assert resp.status_code == 200
+        assert [r["name"] for r in json.loads(resp.data)] == ["Alpaca Health"]
+        stub_ops.release("q-first")
+
+    def test_block_records_the_junk_names_while_an_op_runs(self, client,
+                                                           wired_db_path,
+                                                           stub_ops):
+        """The UI blocklists the rejected names and THEN queues add-names,
+        so a 409 here lost the blocklist for a run that went ahead anyway.
+        The write itself is one INSERT on its own connection, which is what
+        the review-queue confirm/reject routes have always done mid-run."""
+        stub_ops.add("q-first")
+        client.post("/api/run/q-first")
+        assert self._status(client)["running"] is True
+        resp = client.post("/api/names/block",
+                           json={"names": ["Who You Are", "Job Location"]})
+        assert resp.status_code == 200
+        body = json.loads(resp.data)
+        assert body["blocked"] == 2
+        assert body["keys"] == ["joblocation", "whoyouare"]
+        assert self._status(client)["running"] is True,             "blocking must not disturb the run holding the slot"
+        conn = store.connect(wired_db_path)
+        try:
+            assert store.blocked_name_keys(conn) == {"whoyouare", "joblocation"}
+        finally:
+            conn.close()
+        stub_ops.release("q-first")
+
+
+def test_the_dismiss_dialog_offers_exactly_the_stores_reasons():
+    # app.js keeps a hand copy of store.DISMISS_REASONS; this is its verifier.
+    from pathlib import Path
+    js = (Path(web.__file__).parent / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    block = re.search(r"const DISMISS_REASONS = \[(.*?)\];", js, re.S).group(1)
+    assert tuple(re.findall(r'\["(\w+)",', block)) == store.DISMISS_REASONS

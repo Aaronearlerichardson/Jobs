@@ -1,0 +1,1123 @@
+"""Harvest triage: weed the harvester's unscored rows down, cheapest gate
+first, before anything expensive is spent on them.
+
+The harvester (src/crawl/harvest.py) pulls every board whole and stores
+every posting unscored. That is the cheap half. This module is what
+happens next: every stored row no crawl has adopted (no track label) and
+triage has not judged (triage_status NULL) is run through the same gates
+the crawl applies, in cost order, and the first gate that drops a row is
+recorded on it. Only rows that survive every free gate pay for a detail
+GET (description hydration), and only hydrated survivors pay for a Claude
+fit score.
+
+Gates, per configured track, in order:
+
+  1. mission   company-level, once per COMPANY: the roster row's cached
+               mission tier (src.claude.is_active_mission) and the
+               track's min_mission. A company never scored gets ONE
+               score_company_mission call, with the harvested titles as
+               context, and the verdict is written back to the roster.
+               Multi-division employers (profile [policy]) fall through:
+               a conglomerate's corporate score says nothing about the
+               division that is hiring.
+  2. title     the track's technical-title regex (src.match.gates), title only.
+  3. anchor    the track's require_core_anchor (filters.core_anchor) -- on
+               the title plus whatever body is stored; a bodiless row
+               whose title does not anchor is deferred, not dropped.
+  4. geo       the track's geo_gate, judged on the location FIELD: local
+               passes; explicitly remote passes at a watched or mission-
+               trusted company (the ranking's remote_admitted rule). Body
+               text is not consulted while the field names a place -- it
+               is too loose both ways ("Nonconformance (NC)", "Garner is
+               on a mission" read local; "fully remote" in a Cambridge MA
+               posting read remote, and 15 such rows then paid for a fit
+               score only to trip the model's own geo gate, 2026-09-10).
+               A listing that names no place ("N Locations", "See
+               posting") defers to after hydration, then passes on a
+               strict "<place>, ST" in the body, or a remote phrase at a
+               trusted company.
+  5. exclude   the track's [exclude.<id>] tables (src.match.gates).
+  6. division  multi-division companies only: src.match.filters.is_relevant on
+               the body (needs one). A WATCHED conglomerate also passes on a
+               [policy] watch_division_titles TITLE (is_relevant's
+               watch_titles tier): watching already says "I want this
+               employer's technical roles", and its aligned division is a
+               plain engineering org whose postings never carry the
+               profile's health/bio vocabulary. The [exclude] gate inside
+               is_relevant still applies, so this widens the division
+               vocabulary rather than lifting the gate.
+  --- hydrate survivors (the harvester's per-host caps and pauses) ---
+  gates 3-6 again, now with a body
+  7. body      a row whose detail fetch failed twice (the RETRY_DAYS retry too)
+               leaves the queue: closed where the closure probe says the
+               posting is gone, else dropped here as "no body after 2 fetches".
+  8. fit      Claude fit score (src.claude.fit); the verdict is 'fit' when the
+               score is under every surfaced track's digest_min_fit, 'ok'
+               otherwise. Either way the row is stamped with its track
+               labels and score, so it enters the ranking like a crawled
+               row and the crawl never re-scores it.
+
+A row is judged against EVERY track that reads it (track_reads: a store
+board's row by the tracks whose store_tag covers its company; a feed's row
+by the tracks whose `sources` switch reads its family, config.FEEDS); it
+surfaces into the union of the tracks it passed (jobs.track is a set). A
+feed's row belongs to its feed's roster row, which carries config.FEED_TIER
+(never scored, never off-mission) and has no detail page to fetch, so it is
+judged on the text the feed gave. The per-
+track record ("local-tech=geo;remote-neural=title") is kept in
+triage_detail so a false drop is debuggable; triage_status carries the
+one row verdict the funnel counts.
+
+Keyword focus (config.keyword_focus) mutates config's shared lists,
+so the gate phases run one company and one track at a time (off the loop,
+asyncio.to_thread), with the lists restored afterwards. Only hydration and
+scoring run concurrently, and neither reads those lists.
+
+Those seven steps are seven functions -- _free_gates, _hydrate,
+_body_gates, _score, _write_verdicts, over _by_company and _judged -- and
+`run` is the order they go in. They were numbered comments inside one
+167-line function; the two gate phases ask the identical question and had
+written the asking out twice.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sqlite3
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Mapping
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import cast
+
+from typing_extensions import TypedDict
+
+from src import config
+from src import store
+from src import tags
+from src.ats import coords
+from src.ats.board import BOARDS
+from src.ats.board.closure import probe_job_open
+from src.ats.board.company import board_origin, needs_detail
+from src.claude.api import is_active_mission, score_company_mission
+from src.claude.fit import MIN_DESC_CHARS, FitResult, score_resume_fit
+from src.config import RuntimeTrack, keyword_focus
+from src.crawl.hydrate import MISS_BACKOFF_S, BoardStats, hydrate_rows
+from src.match import gates
+from src.match.filters import core_anchor, is_relevant
+from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
+                                remote_signal, remote_signal_for, us_eligible)
+from src.net.parallel import fan_out
+from src.net.util import clean_field, worker_count
+from src.ops import maintenance as ops
+from src.rows import CompanyRow, FetchedJob, JobRow, is_watched
+
+_log = logging.getLogger(__name__)
+
+type MissionScorer = Callable[[str, str], Awaitable[tuple[str | None, float | None, str | None]]]
+
+
+class Requeue(TypedDict):
+    """One row `requeue_reasons` flags."""
+    reason: str
+    company_name: str | None
+    title: str | None
+    location: str | None
+
+OK = store.TRIAGE_OK
+# Verdict rank: a row's status is the verdict of the track it got FURTHEST
+# through, so a posting dropped for geography on one track and title on
+# another reads as a geo drop (the more interesting fact).
+_RANK = {g: i for i, g in enumerate(store.TRIAGE_GATES)}
+_RANK[OK] = len(_RANK)
+# Internal "not yet decidable" marker: the row needs a body before this
+# track can rule on it. Never stored.
+DEFER = "defer"
+
+# Claude fit calls per pass. The first pass over a fresh harvest can leave
+# thousands of survivors; the rest wait (their bodies are stored, so the
+# next pass costs no GETs to reach them). A crawl's budget too.
+SCORE_CAP = 300
+# A detail fetch (body, or a location-only lookup) that
+# failed this recently is not retried (the backfill ops' convention); the
+# row stays pending until then. _hydrate stamps desc_checked_at for either
+# kind of failure.
+RETRY_DAYS = 3
+# closure.probe_job_open's shape: (url, job_id) -> (is_open, reason).
+type ProbeFn = Callable[[str | None, str | None], Awaitable[tuple[bool | None, str]]]
+# How many "still waiting on a body" rows _print_waiting names before it
+# collapses the rest into a count -- a whole-board pass can leave hundreds
+# pending and the point is a spot check, not a full dump.
+_WAITING_CAP = 20
+# The harvester's pool size, shared: triage runs as the harvest pass's
+# second half and must not disagree with it about HARVEST_WORKERS.
+# Workers of the pass's second half: triage's scoring and verify
+# (triage's hydration and the closed-URL probe walk hosts, as the pull does).
+DEFAULT_WORKERS = worker_count("harvest_workers")
+
+
+# --------------------------------------------------------------------------- #
+#  Which tracks read the roster                                                #
+# --------------------------------------------------------------------------- #
+
+def roster_tracks(tracks: Iterable[RuntimeTrack] | None = None) -> list[RuntimeTrack]:
+    """The configured tracks that read any harvested source -- the company
+    store or a feed family -- the ones a harvested row can surface into."""
+    return [t for t in (tracks or config.UI_TRACKS.values())
+            if t.sources.store or config.feed_families(t)]
+
+
+def track_reads(t: RuntimeTrack, company: CompanyRow) -> bool:
+    """Whether track `t` reads `company`'s rows -- the one applicability rule
+    (triage's judging, harvest's scoped pull). A row's family is its ats when
+    that is a config.FEEDS key, else "store" (config.row_family). `t` reads
+    "store" rows when its `sources.store` is on, a tag-scoped track
+    (store_tag) only those carrying the tag, and a feed family f when
+    config.feed_families(t) holds f.
+
+    >>> from src.config.profile_schema import TrackSources
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), store_tag="sweep",
+    ...                  sources=TrackSources(aggregators=True))
+    >>> track_reads(t, {"ats": "lever", "tags": "sweep"}), track_reads(t, {"ats": "lever"})
+    (True, False)
+    >>> track_reads(t, {"ats": "remoteok"}) == ("remoteok" in config.feed_families(t))
+    True
+    """
+    family = config.row_family(company.get("ats"))
+    if family != "store":
+        return family in config.feed_families(t)
+    tag = t.store_tag
+    return t.sources.store and (not tag or tags.has(company.get("tags"), tag))
+
+
+def _has_body(row: JobRow, company: CompanyRow) -> bool:
+    """Whether the row's text is all there will be: it has a body, or no
+    detail fetch could add one (a feed's row)."""
+    return bool((row.get("description") or "").strip()) or not _needs_detail(row, company)
+
+
+# --------------------------------------------------------------------------- #
+#  Gate 1: mission, once per company                                          #
+# --------------------------------------------------------------------------- #
+
+def _once_per_pass(scorer: MissionScorer) -> MissionScorer:
+    """`scorer` that answers a company name once and reads as no verdict
+    (None, None, None) after: a failed attempt counts, and both of a pass's
+    gate phases share it. Exercised end to end by tests/test_triage.py::
+    test_an_unanswered_mission_score_is_not_retried_within_a_pass.
+
+    Notes:
+        A name stands for one company: companies.name is UNIQUE.
+
+        NEAR-MISS, DELIBERATE: runstate.per_run(set) scopes this memo to a
+        Run, not to a call. Every entry point starts a Run per op, so the two
+        agree in production, but the test above runs triage.run twice in one
+        Run to pin "the next pass asks afresh", and fails under per_run.
+    """
+    asked: set[str] = set()
+
+    async def once(name: str, context: str) -> tuple[str | None, float | None, str | None]:
+        if name in asked:
+            return None, None, None
+        asked.add(name)
+        return await scorer(name, context)
+    return once
+
+
+async def ensure_mission(db: store.Writer, company: CompanyRow,
+                         titles: Iterable[str | None] = (),
+                         scorer: MissionScorer = score_company_mission
+                         ) -> tuple[str | None, float | None]:
+    """The company's (tier, score), scoring it ONCE via Claude (`scorer`, a
+    coroutine function) when the roster row has neither, with the harvested
+    titles as context, and caching the verdict on the row (`db`, a
+    store.Writer). Never touches `active`: activation
+    policy belongs to src.discovery.local_sourcing.score_missions. Returns
+    (None, None) when scoring is unavailable -- which reads as unknown,
+    not off-mission, everywhere downstream."""
+    tier, score = company.get("mission_tier"), company.get("mission_score")
+    if tier or score is not None:
+        return tier, score
+    if config.is_multi_division(company.get("name")):
+        return None, None                       # the gate ignores it anyway
+    try:
+        context = (" | ".join(t for t in titles if t)
+                   or coords.board_context(company))
+        tier, score, reason = await scorer(company.get("name") or "", context)
+    except Exception as e:                      # noqa: BLE001 - reported
+        print(f"    [!] mission score failed for {company.get('name')}: {e}")
+        return None, None
+    if tier is None and score is None:
+        return None, None
+    await db.run(store.upsert_company, {"name": company["name"], "mission_tier": tier,
+                                        "mission_score": score, "mission_reason": reason})
+    company["mission_tier"], company["mission_score"] = tier, score
+    _log.debug("mission %s -> %s %.2f", company.get("name"), tier, score or 0)
+    return tier, score
+
+
+def mission_verdict(company: CompanyRow, t: RuntimeTrack) -> str:
+    """OK, or 'mission' when the whole company is out for track `t`:
+    an inactive mission tier (multi-division exempt), or a known effective
+    mission under the track's min_mission. Unknown never drops.
+
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), min_mission=0.2)
+    >>> mission_verdict({"name": "A", "mission_tier": "other",
+    ...                  "mission_score": 0.05}, t)
+    'mission'
+    >>> mission_verdict({"name": "A", "mission_tier": None,
+    ...                  "mission_score": None}, t)
+    'ok'
+    """
+    name = company.get("name")
+    tier, score = company.get("mission_tier"), company.get("mission_score")
+    if not is_active_mission(tier, name):
+        return "mission"
+    floor = t.min_mission
+    if floor is None or score is None:
+        return OK
+    if config.is_multi_division(name):
+        score = max(score, config.MULTI_DIVISION_MISSION_FLOOR)
+    return OK if score >= floor else "mission"
+
+
+# --------------------------------------------------------------------------- #
+#  Gates 2-6: per row, per track                                               #
+# --------------------------------------------------------------------------- #
+
+def fit_str(score: float | None) -> str:
+    """A fit score for the log line; '?' when the scorer returned none.
+
+    >>> fit_str(0.5), fit_str(None)
+    ('0.50', '?')
+    """
+    return "?" if score is None else f"{score:.2f}"
+
+
+def _detail_stale(row: JobRow, cutoff: str) -> bool:
+    """True once a detail fetch on this row (a body, or a
+    location-only lookup) already failed at least RETRY_DAYS ago, per its
+    desc_checked_at. No stamp yet reads as fresh, never stale: a row gets
+    one try before the geo gate stops waiting on it (see _geo_verdict)."""
+    checked = row.get("desc_checked_at") or ""
+    return bool(checked) and checked < cutoff
+
+
+def _geo_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, has_body: bool, cutoff: str) -> str:
+    """Geography on the location FIELD (see the module docstring, gate 4):
+    local passes anywhere; remote passes at a watched or mission-trusted
+    company. An UNKNOWN location (location_unknown) defers while a detail
+    fetch could still name the place (company_fetch.needs_detail): always
+    for a bodiless row, and for a bodied one until that fetch has failed
+    RETRY_DAYS ago (_detail_stale). With nothing left to fetch, the strict
+    "<place>, ST" body rule decides.
+
+    Notes:
+        Stricter than the old crawl's whole-board path (which
+        let geo_mode read the body): in the 2026-09-10 dry run the loose
+        body match called 83 of 130 survivors local ("Garner", "apex",
+        "NC" as nonconformance, HQ boilerplate) and 15 non-local rows
+        remote.
+    """
+    loc = job.get("location") or ""
+    desc = job.get("description") or ""
+    floor = t.remote_mission_floor
+    trusted = ops.remote_trusted(company, floor)
+    if is_nc(loc):
+        return OK
+    if trusted and (remote_signal(loc) or job.get("remote_hint")) and us_eligible(loc):
+        return OK
+    if not location_unknown(loc):
+        return "geo"
+    if not has_body or (_needs_detail(job, company)
+                        and not _detail_stale(job, cutoff)):
+        return DEFER                    # a detail fetch may name the place
+    # Nothing left that could name the place: the body is all there is.
+    if NC_HQ_RE.search(desc) or (trusted and remote_signal("", desc)):
+        return OK
+    return "geo"
+
+
+def row_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, cutoff: str) -> str:
+    """Gates 2-6 for one row on one track, on the text the row has NOW.
+    Returns OK, a gate name, or DEFER (undecidable without a body). The
+    caller has already applied the track's keyword focus. `cutoff` is the
+    RETRY_DAYS boundary (an isoformat string) the geo gate uses to tell a
+    fresh unknown-location row from one whose detail fetch has already
+    given up -- see _geo_verdict."""
+    title = job.get("title") or ""
+    desc = job.get("description") or ""
+    has_body = _has_body(job, company)
+    if not gates.is_technical_role(title, t):
+        return "title"
+    deferred = False
+    if t.require_core_anchor and not core_anchor(title, desc):
+        if has_body:
+            return "anchor"
+        deferred = True
+    if t.geo_gate:
+        v = _geo_verdict(company, job, t, has_body, cutoff)
+        if v == "geo":
+            return "geo"
+        deferred = deferred or v == DEFER
+    watched = is_watched(company)
+    if t.exclude_gate and gates.exclude_reason(
+            title, desc, allow_defense=watched, track_id=t.id):
+        return "exclude"
+    if config.is_multi_division(company.get("name")):
+        if not has_body:
+            deferred = True
+        elif not is_relevant(title, desc, watch_titles=watched):
+            return "division"
+    return DEFER if deferred else OK
+
+
+async def judge(db: store.Writer, company: CompanyRow, jobs: list[JobRow], tracks: list[RuntimeTrack],
+                mission_scorer: MissionScorer = score_company_mission,
+                *, cutoff: str) -> dict[str, dict[str, str]]:
+    """Gates 1-6 for one company's rows against every track that reads them.
+    Returns {job_id: {track_label: verdict}} (verdict OK / gate / DEFER).
+    Mission is decided once here (`db`, a store.Writer, keeps it); the
+    per-track keyword focus is applied around each track's pass over the
+    rows, off the loop."""
+    read = {t.track: jobs if track_reads(t, company) else [] for t in tracks}
+    out: dict[str, dict[str, str]] = {j["job_id"]: {} for j in jobs}
+    if not any(read.values()):
+        return out
+    await ensure_mission(db, company, [j.get("title") for j in jobs[:8]],
+                         scorer=mission_scorer)
+
+    def gate() -> dict[str, dict[str, str]]:
+        for t in tracks:
+            rows = read[t.track]
+            if not rows:
+                continue
+            mv = mission_verdict(company, t)
+            if mv != OK:
+                for j in rows:
+                    out[j["job_id"]][t.track] = mv
+                continue
+            with keyword_focus(t):
+                for j in rows:
+                    out[j["job_id"]][t.track] = row_verdict(company, j, t, cutoff)
+        return out
+    return await asyncio.to_thread(gate)
+
+
+def summarize(verdicts: dict[str, str]) -> tuple[str, str, list[str]]:
+    """(row status, detail string, surfaced track labels) from one row's
+    {track: verdict}. A DEFER left means the row is still undecided.
+
+    >>> summarize({"local-tech": "geo", "remote-neural": "title"})
+    ('geo', 'local-tech=geo;remote-neural=title', [])
+    >>> summarize({"local-tech": "ok", "remote-neural": "anchor"})
+    ('ok', 'local-tech=ok;remote-neural=anchor', ['local-tech'])
+    >>> summarize({"local-tech": "defer", "remote-neural": "title"})[0]
+    'defer'
+    >>> summarize({})
+    ('mission', '', [])
+    """
+    if not verdicts:
+        return "mission", "", []          # no track reads this company
+    detail = ";".join(f"{k}={v}" for k, v in verdicts.items())
+    surfaced = [k for k, v in verdicts.items() if v == OK]
+    if surfaced:
+        return OK, detail, surfaced
+    if DEFER in verdicts.values():
+        return DEFER, detail, []
+    status = max(verdicts.values(), key=lambda v: _RANK.get(v, -1))
+    return status, detail, []
+
+
+# --------------------------------------------------------------------------- #
+#  Hydration (survivors only) and scoring                                     #
+# --------------------------------------------------------------------------- #
+
+def _fetcher_shape(row: JobRow, company: CompanyRow) -> FetchedJob:
+    """A stored row as the job dict board.company.hydrate_description
+    expects (`hydrate.hydrate_rows` passes it the roster row, which names the
+    board)."""
+    return {"id": row["job_id"],
+            "title": row.get("title") or "", "url": row.get("url") or "",
+            "location": row.get("location") or "",
+            "description": row.get("description") or "",
+            "ats": company.get("ats")}
+
+
+def _needs_detail(row: JobRow, company: CompanyRow) -> bool:
+    """needs_detail for a stored row."""
+    return needs_detail(_fetcher_shape(row, company))
+
+
+async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: float | None = None,
+                          backoff_s: float = MISS_BACKOFF_S) -> BoardStats:
+    """Fetch bodies for one company's survivors, serially, within the
+    harvester's per-host tolerances. Returns the harvest-style stats, plus
+    `tried`: the ids of the rows a detail fetch was attempted on. Exercised
+    by tests/test_triage.py::
+    test_waiting_reason_tells_a_failed_fetch_from_a_row_over_the_cap."""
+    stats: BoardStats = {"hydrated": 0, "unhydrated": 0}
+    stats["tried"] = await hydrate_rows(jobs, company, stats, delay, backoff_s)
+    return stats
+
+
+# --------------------------------------------------------------------------- #
+#  The pass                                                                    #
+# --------------------------------------------------------------------------- #
+
+def _by_company(conn: sqlite3.Connection, rows: list[JobRow]
+                ) -> tuple[dict[int, list[JobRow]], dict[int, CompanyRow | None]]:
+    """Rows grouped by company, plus the roster row for each.
+
+    Both gate phases work per company, not per row: the mission gate is a
+    company-level verdict and hydration is per host.
+    """
+    groups = ops.group_by_company(rows)
+    return groups, {cid: store.get_company(conn, cid) for cid in groups}
+
+
+async def _judged(db: store.Writer, companies: dict[int, CompanyRow], groups: dict[int, list[JobRow]],
+                  tracks: list[RuntimeTrack], mission_scorer: MissionScorer, cutoff: str
+                  ) -> AsyncIterator[tuple[CompanyRow, JobRow, str, str, list[str]]]:
+    """Yield (company, row, status, detail, surfaced) for every grouped row.
+
+    The two gate phases differ only in what they DO with a verdict -- the
+    asking is identical, and was written out twice.
+    """
+    for cid, rs in groups.items():
+        c = companies[cid]
+        verdicts = await judge(db, c, rs, tracks, mission_scorer=mission_scorer,
+                               cutoff=cutoff)
+        for r in rs:
+            status, detail, surfaced = summarize(verdicts[r["job_id"]])
+            yield c, r, status, detail, surfaced
+
+
+async def _free_gates(db: store.Writer, companies: dict[int, CompanyRow], groups: dict[int, list[JobRow]],
+                      tracks: list[RuntimeTrack], mission_scorer: MissionScorer, cutoff: str
+                      ) -> tuple[dict[str, tuple[str, str, CompanyRow, JobRow]], dict[str, tuple[CompanyRow, JobRow, str]]]:
+    """Phase 1: the free gates, on the text the rows already have.
+
+    Returns (decided, survivors). A survivor is OK on some track, or
+    DEFER -- deferred meaning "cannot be ruled on without a body", which
+    is what phase 2 goes and fetches. `cutoff` is the RETRY_DAYS boundary
+    _geo_verdict uses to give up on an unresolvable location and
+    decide the row right here instead of deferring it into phase 2.
+    """
+    decided: dict[str, tuple[str, str, CompanyRow, JobRow]] = {}
+    survivors: dict[str, tuple[CompanyRow, JobRow, str]] = {}
+    async for c, r, status, detail, _ in _judged(db, companies, groups, tracks,
+                                                 mission_scorer, cutoff):
+        if status in (OK, DEFER):
+            survivors[r["job_id"]] = (c, r, status)
+        else:
+            decided[r["job_id"]] = (status, detail, c, r)
+    print(f"  free gates: {len(decided)} dropped, {len(survivors)} survive")
+    return decided, survivors
+
+
+def _hydrate_order(survivors: dict[str, tuple[CompanyRow, JobRow, str]]) -> Callable[[FetchedJob], tuple[bool, bool]]:
+    """Sort key for one board's hydration batch: rows some track has already
+    decided OK first, then rows whose TITLE alone already reads relevant
+    (match.filters.is_relevant), then the rest.
+
+    >>> key = _hydrate_order({"a": (None, None, OK), "b": (None, None, DEFER)})
+    >>> key({"id": "a", "title": "T"})[0], key({"id": "b", "title": "T"})[0]
+    (False, True)
+
+    Relevance orders WITHIN that rule, it does not replace it:
+
+    >>> [j["id"] for j in sorted([{"id": "b", "title": "Data Engineer"},
+    ...                           {"id": "a", "title": "Mask Design Engineer"}], key=key)]
+    ['a', 'b']
+
+    This only decides who goes FIRST -- an off-lane row is still hydrated if
+    the per-host budget reaches it, and the free exclude gate
+    ([exclude.<track>] title_tokens) is what keeps it from being fetched at
+    all. Relevance is judged on the GLOBAL keyword lists: hydration runs
+    outside keyword_focus, and an ordering need not agree with any one
+    track. Exercised end to end by tests/test_triage.py::
+    test_hydration_spends_the_board_budget_on_relevant_titles_first.
+
+    Notes:
+        The per-host detail budget (hydrate.hydrate_rows' cap and
+        miss-streak breaker) used to be spent in arrival order within the
+        decided/undecided split. At a multi-division employer only the
+        division gate can refuse a chip-design seat, and that gate needs a
+        body, so the budget went on rows guaranteed to drop: NVIDIA's
+        waiting list on 2026-09-18 opened with "Senior ASIC Design
+        Engineer", "Mask Design Engineer", "Memory Controller Verification
+        Engineer".
+    """
+    def key(job: FetchedJob) -> tuple[bool, bool]:
+        return (survivors[job["id"]][2] != OK,
+                not is_relevant(job.get("title") or "", ""))
+    return key
+
+
+async def _hydrate(db: store.Writer, companies: dict[int, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]], summary: dict[str, float],
+                   stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[BoardStats]],
+                   cutoff: str, decided: dict[str, tuple[str, str, CompanyRow, JobRow]],
+                   probe_fn: ProbeFn = probe_job_open) -> dict[str, str]:
+    """Phase 2: resolve every survivor company_fetch.needs_detail still
+    flags -- a missing body, or a body already but a
+    location the listing never named (see needs_detail/hydrate_description).
+
+    One company at a time per host (company_fetch.board_origin, as the
+    harvest pull walks) and every host at once; rows already fully
+    decided on some track first and, within that, rows whose TITLE
+    already reads as relevant (match.filters.is_relevant) -- so a
+    board's per-host cap is spent on the surest material. A row whose
+    detail fetch failed recently is not retried (`cutoff`, the same
+    RETRY_DAYS boundary _geo_verdict uses).
+
+    Returns {job_id: reason} for every survivor this pass leaves still
+    needing detail (skipped, or tried and failed): _body_gates names them.
+
+    A bodiless row whose retry (it already carried a failure stamp) fails
+    again ends the wait (a row with a body but no location goes on to the
+    body-rule geo verdict once stale instead): `probe_fn` (closure.probe_job_open) is asked, a row it finds
+    gone is closed, any other is dropped into `decided` as 'body'. Either
+    way it leaves `survivors`.
+
+    Notes:
+        A row inside the retry window is never batched, so a pass whose
+        only such rows are all inside it prints no "hydrating" line
+        (2026-09-13 18:42: one nav link scraped from a JS-rendered careers
+        page, re-fetched and failing every RETRY_DAYS since 2026-09-10).
+
+        Until 2026-09-26 the companies ran max_workers (n_cpus-1) at a
+        time, which both capped the pass and let two companies on one
+        shared host (a multi-tenant API) hydrate at once.
+    """
+    todo: dict[int, list[FetchedJob]] = {}
+    waiting: dict[str, str] = {}
+    for jid, (c, r, status) in survivors.items():
+        job = _fetcher_shape(r, c)
+        if not _needs_detail(r, c):
+            continue
+        if not (r.get("url") or "").strip():
+            waiting[jid] = "no URL to fetch a body from"
+            continue
+        checked = r.get("desc_checked_at") or ""
+        if checked and not _detail_stale(r, cutoff):
+            retry_at = datetime.fromisoformat(checked) + timedelta(days=RETRY_DAYS)
+            waiting[jid] = (f"fetch failed {checked[:10]}, retries after "
+                            f"{retry_at:%Y-%m-%d %H:%M}")
+            continue
+        todo.setdefault(c["id"], []).append(job)
+    if not todo:
+        return waiting
+    order = _hydrate_order(survivors)
+    for js in todo.values():
+        js.sort(key=order)
+    n_todo = sum(len(js) for js in todo.values())
+    hosts = {cid: board_origin(companies[cid]) for cid in todo}
+    print(f"  hydrating {n_todo} row(s) needing detail across "
+          f"{len(todo)} board(s) on {len(set(hosts.values()))} host(s), "
+          f"one board at a time per host...")
+
+    def _abandoned(cid: int) -> None:
+        # Nothing stored or stamped: the rows wait for the next pass.
+        for j in todo[cid]:
+            waiting[j["id"]] = "hydration abandoned past the pass budget"
+
+    async for cid, st in fan_out(
+            list(todo), lambda cid: hydrate_fn(companies[cid], todo[cid]),
+            lambda cid: f"{companies[cid]['name']}: hydrate",
+            with_item=True, budget_s=config.PASS_BUDGET_S,
+            on_abandon=_abandoned, key=hosts.get):
+        summary["hydrated"] += st.get("hydrated", 0)
+        tried = set(st["tried"])
+        for j in todo[cid]:
+            r = survivors[j["id"]][1]
+            if j.get("description"):
+                # Persist at once: a row that ends this pass still pending
+                # (over the cap, or deferred) must not be fetched again
+                # next pass. Also covers a row that only had its
+                # LOCATION resolved this pass (description is unchanged
+                # but still truthy), so the resolved location is kept too.
+                # A remote hint the detail gave rides along for this pass.
+                r["description"] = j["description"]
+                r["location"] = j.get("location") or r.get("location")
+                if j.get("remote_hint"):
+                    r["remote_hint"] = j["remote_hint"]
+                await db.run(store.store_body, j["id"], r["description"],
+                             r["location"])
+            if not needs_detail(j):
+                continue                 # resolved (body, or just location)
+            if j["id"] in tried:
+                await db.run(store.mark_desc_checked, j["id"], now=stamp)
+                if r.get("desc_checked_at") and not j.get("description"):
+                    await _give_up(db, survivors, decided, j["id"], probe_fn)
+                    continue
+                waiting[j["id"]] = "fetch failed this pass"
+            else:
+                # Never reached hydrate_description at all: the board's
+                # per-host cap or miss-streak breaker (hydrate.hydrate_rows)
+                # cut it from this pass's batch.
+                waiting[j["id"]] = "not reached this pass (board hydrate cap/pause)"
+    print(f"  hydrated {summary['hydrated']} of {n_todo}")
+    return waiting
+
+
+async def _give_up(db: store.Writer, survivors: dict[str, tuple[CompanyRow, JobRow, str]],
+                   decided: dict[str, tuple[str, str, CompanyRow, JobRow]], jid: str,
+                   probe_fn: ProbeFn) -> None:
+    """End a second-failed row's wait: close it where `probe_fn` finds the
+    posting gone, else drop it as 'body' in `decided`; out of `survivors`."""
+    c, r, _ = survivors.pop(jid)
+    is_open, why = await probe_fn(r.get("url"), jid)
+    await asyncio.sleep(config.HYDRATE_DELAY_S)
+    if is_open is False:
+        await db.run(store.set_job_status, jid, "closed")
+        print(f"    closed after a failed retry: {c.get('name')} | {r.get('title') or ''} | {why}")
+    else:
+        decided[jid] = ("body", f"no body after 2 fetches ({why})", c, r)
+
+
+async def _body_gates(db: store.Writer, companies: dict[int, CompanyRow], survivors: dict[str, tuple[CompanyRow, JobRow, str]],
+                      tracks: list[RuntimeTrack], mission_scorer: MissionScorer, decided: dict[str, tuple[str, str, CompanyRow, JobRow]],
+                      summary: dict[str, float], waiting: dict[str, str],
+                      cutoff: str) -> dict[str, tuple[CompanyRow, JobRow, list[str], str]]:
+    """Phase 3: the same gates again, now with bodies.
+
+    Returns the rows to score. A survivor still without a body -- DEFER,
+    or clear on every gate but unfetchable -- stays pending for the next
+    pass rather than entering a track unscorable. `waiting` is _hydrate's
+    {job_id: reason}, printed (capped) against the rows that end up here.
+    """
+    n_free = len(decided)
+    final: dict[str, tuple[CompanyRow, JobRow, list[str], str]] = {}
+    left_rows: list[tuple[CompanyRow, JobRow]] = []
+    # The survivor rows carry company_id themselves, so the same grouping
+    # helper works here without rebuilding the (company, row) pairs.
+    groups = ops.group_by_company([r for _, r, _ in survivors.values()])
+    async for c, r, status, detail, surfaced in _judged(db, companies, groups,
+                                                        tracks, mission_scorer,
+                                                        cutoff):
+        if status == OK and _has_body(r, c):
+            final[r["job_id"]] = (c, r, surfaced, detail)
+        elif status in (OK, DEFER):
+            summary["left"] += 1
+            left_rows.append((c, r))
+        else:
+            decided[r["job_id"]] = (status, detail, c, r)
+    print(f"  body gates: {len(decided) - n_free} more dropped, "
+          f"{len(final)} to score, {summary['left']} still waiting on a body")
+    _print_waiting(left_rows, waiting)
+    return final
+
+
+def _print_waiting(rows: list[tuple[CompanyRow, JobRow]], reasons: dict[str, str]) -> None:
+    """Name every row left "still waiting on a body" and why, capped at
+    _WAITING_CAP so a whole-board pass doesn't flood the log. `reasons`
+    is _hydrate's {job_id: reason}; a row missing from it was never even
+    considered this pass (hydrate=False)."""
+    for c, r in rows[:_WAITING_CAP]:
+        reason = reasons.get(r["job_id"], "hydration skipped this pass")
+        print(f"    waiting: {c.get('name')} | {r.get('title') or ''} | "
+              f"{r.get('location') or ''} | {reason}")
+    extra = len(rows) - _WAITING_CAP
+    if extra > 0:
+        print(f"    ... and {extra} more")
+
+
+def score_order(prefer: Collection[str]) -> Callable[[tuple[CompanyRow, JobRow, list[str], str]], tuple[bool, float, bool]]:
+    """Sort key for the scoring queue: rows that surfaced into a `prefer`red
+    track label first, then best mission, then in-field titles.
+
+    >>> key = score_order({"a"})
+    >>> rows = [({"mission_score": 0.9}, {"title": "Zzz"}, ["b"], ""),
+    ...         ({"mission_score": 0.2}, {"title": "Zzz"}, ["a"], "")]
+    >>> [r[2] for r in sorted(rows, key=key)]
+    [['a'], ['b']]
+    >>> [r[2] for r in sorted(rows, key=score_order(()))]
+    [['b'], ['a']]
+    """
+    return lambda x: (not set(x[2]) & set(prefer),
+                      -(x[0].get("mission_score") or 0.0),
+                      not is_relevant(x[1].get("title") or ""))
+
+
+async def _score(final: dict[str, tuple[CompanyRow, JobRow, list[str], str]], summary: dict[str, float], score_cap: int, fit: bool,
+                 max_workers: int, prefer: Collection[str] = ()) -> tuple[dict[str, FitResult], set[str]]:
+    """Phase 4: the only paid step, under the cap: `prefer`red tracks'
+    rows first (a scoped crawl's), then best companies; within a mission
+    tie, titles that read in-field (`is_relevant`) first.
+
+    Returns (scores, over_cap). Rows over the cap stay pending -- their
+    bodies are stored now, so the next pass reaches them for free. A row
+    with a body under fit.MIN_DESC_CHARS makes no call: it is counted in
+    summary['skip_score'] and kept out of the slice before the cap.
+    `summary['attempted']` is the fit calls made (`scored` counts only the
+    answered): what this step took of the run's one scoring budget.
+
+    Notes:
+        Mission alone left a roster with no mission scores (the 2026-10-12
+        restore) in arrival order: the cap went on A-named companies,
+        twenty-odd BCBA postings among them, while 1357 rows waited.
+    """
+    order = sorted(final.values(), key=score_order(prefer))
+    scorable = [x for x in order
+                if len((x[1].get("description") or "").strip()) >= MIN_DESC_CHARS]
+    if fit:
+        summary["skip_score"] += len(order) - len(scorable)
+    to_score: list[tuple[CompanyRow, JobRow, list[str], str]] = scorable[:score_cap] if fit else []
+    over_cap: set[str] = {x[1]["job_id"] for x in scorable[score_cap:]} if fit else set()
+    scores: dict[str, FitResult] = {}
+    summary["attempted"] = len(to_score)
+    if to_score:
+        print(f"  scoring {len(to_score)} survivor(s) against the profile"
+              + (f" ({len(over_cap)} over the {score_cap}/pass cap wait "
+                 f"for the next pass)" if over_cap else "") + "...")
+        # A row abandoned past the budget waits for the next pass, as a row
+        # over the cap does.
+        async for r, res in fan_out(
+                [x[1] for x in to_score],
+                lambda job: score_resume_fit(job.get("title") or "",
+                                             job.get("description") or "",
+                                             location=job.get("location") or ""),
+                "scoring", max(2, min(max_workers, 6)), with_item=True,
+                budget_s=config.PASS_BUDGET_S,
+                on_abandon=lambda r: over_cap.add(r["job_id"])):
+            if res.score is not None:
+                scores[r["job_id"]] = res
+                summary["scored"] += 1
+    return scores, over_cap
+
+
+def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str, CompanyRow, JobRow]], final: dict[str, tuple[CompanyRow, JobRow, list[str], str]],
+                    scores: dict[str, FitResult], over_cap: set[str], tracks: list[RuntimeTrack],
+                    summary: dict[str, float], stamp: datetime) -> None:
+    """Phase 5: every verdict, inside the caller's one batch.
+
+    A survivor the scorer could not reach (no key, breaker tripped) is
+    still stamped into its tracks unscored: ops.self_heal_unscored scores
+    NULL-score tracked rows that have a body.
+
+    The one place that sees every verdict, so it is also the one that logs
+    every drop (DEBUG "drop <gate> | <company> | <title> | <location> |
+    <triage_detail>") and prints every score ("score <n> <surfaced|fit> |
+    <company> | <title> | <location> | <fit reason>" -- "surfaced" IS the
+    OK status here).
+
+    The drop record's three free-text fields (company, title, location)
+    are run through net.util.clean_field first: it is the one line in the
+    run that packs five fields onto one unquoted "|"-joined line, and a
+    literal newline in any of them splits it into fragments a session-log
+    reader cannot tell from a second record. The fetchers clean these at
+    write time too (board.board_jobs), but a row already dirty in the
+    store reaches this line however it got there.
+
+    Notes:
+        124 open rows carried a newline or tab in a title or location in
+        the 2026-09-18 audit ("Calibration | local-tech=title" printed on a
+        line of its own). The score line used to print "ok" plus a
+        redundant "[SURFACED]" tag, two names for one fact.
+    """
+    for jid, (status, detail, c, r) in decided.items():
+        store.record_triage(conn, jid, status, detail, now=stamp)
+        summary[status] += 1
+        _log.debug("drop %s | %s | %s | %s | %s", status,
+                   clean_field(c.get("name")), clean_field(r.get("title")),
+                   clean_field(r.get("location")), detail)
+    for jid, (c, r, surfaced, detail) in final.items():
+        if jid in over_cap:
+            summary["left"] += 1
+            continue
+        res = scores.get(jid)
+        floors = [t.digest_min_fit for t in tracks
+                  if t.track in surfaced]
+        status = OK
+        if res is not None and res.score is not None and floors and res.score < min(floors):
+            status = "fit"
+        loc, desc = r.get("location") or "", r.get("description") or ""
+        if res is not None:
+            label = "surfaced" if status == OK else status
+            print(f"  score {fit_str(res.score)} {label} | {c.get('name')} | "
+                  f"{r.get('title') or ''} | {loc} | {res.summary()}")
+        store.record_triage(
+            conn, jid, status, detail, tracks=surfaced, description=desc,
+            geo_mode=geo_mode(loc, desc),
+            remote_signal=remote_signal_for(
+                {"location": loc, "description": desc}),
+            scores=res.as_columns() if res is not None else None,
+            now=stamp)
+        summary["surfaced" if status == OK else status] += 1
+
+
+def _print_summary(summary: dict[str, float], bar: str) -> None:
+    """The funnel, as one line per pass, for whoever reads the session log.
+
+    A row the scorer skips for a short body (fit.MIN_DESC_CHARS) is still
+    surfaced (it keeps its track label unscored -- see _score/_write_verdicts),
+    so it is already inside `summary['surfaced']`; skip_score names how many
+    of that total were unscored rather than adding a second, overlapping
+    count next to it ("3 surfaced (1 unscored: short body)", not "3
+    surfaced, 1 skip-score" reading as 4 distinct rows).
+    """
+    gate_bits = ", ".join(f"{summary[g]} {g}" for g in store.TRIAGE_GATES
+                          if summary[g])
+    skipped = summary["skip_score"]
+    surfaced_bit = (f"{summary['surfaced']} surfaced"
+                    + (f" ({skipped} unscored: short body)" if skipped else ""))
+    print(f"\n{bar}\n  TRIAGE SUMMARY")
+    print(f"  pending {summary['pending']}: dropped [{gate_bits or 'none'}]; "
+          f"{summary['hydrated']} hydrated, {summary['scored']} scored, "
+          f"{surfaced_bit}"
+          + (f", {summary['left']} left for next pass" if summary["left"] else ""))
+    print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
+
+
+async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] | None = None,
+              limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
+              score_cap: int = SCORE_CAP, fit: bool = True, hydrate: bool = True,
+              mission_scorer: MissionScorer = score_company_mission,
+              hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[BoardStats]] = hydrate_company,
+              probe_fn: ProbeFn = probe_job_open,
+              now: datetime | None = None, requeue: bool = False,
+              requeue_apply: bool = False,
+              prefer: Collection[str] = (),
+              company_ids: Collection[int] | None = None) -> Mapping[str, object]:
+    """Triage every pending row in the store (only those of `company_ids`
+    when given, a targeted run's). Returns the summary dict
+    (also printed): harvested/pending N, then a count per gate, hydrated,
+    scored, surfaced, and how many rows are left pending.
+
+    Five phases, in cost order, each one working on what the last left:
+
+      1. _free_gates     the gates that cost nothing, on stored text
+      2. _hydrate        one detail GET per surviving row needing detail
+      3. _body_gates     the same gates again, now with bodies
+      4. _score          the only paid step, capped per pass
+      5. _write_verdicts one batch, every verdict
+
+    `limit` caps the rows read this pass; `score_cap` the Claude fit calls
+    (attempts, refused ones included);
+    `fit=False` stamps survivors unscored (a later pass's self-heal scores
+    them); `hydrate=False` leaves undetailed survivors pending.
+    `prefer` (track labels) puts the rows that surfaced into those tracks
+    first in the scoring queue, so the cap goes to a scoped run's own
+    tracks. `mission_scorer` / `hydrate_fn` / `probe_fn` (coroutine
+    functions) exist for tests.
+
+    `requeue=True` skips all five phases and instead runs `requeue_rows`
+    (report-only unless `requeue_apply=True` too) -- see its docstring for
+    the full re-queue contract. A row it resets is picked up by the NEXT
+    plain call to `run` (this one does not re-judge it itself): that is
+    what makes the interface a two-step, reviewable repair rather than a
+    silent rewrite.
+    """
+    if requeue:
+        return await requeue_rows(db_path=db_path, apply=requeue_apply,
+                                  tracks=tracks)
+    db_path = db_path or config.STORE_DB_PATH
+    tracks = roster_tracks(tracks)
+    async with store.Writer(db_path) as db:
+        rows = await db.run(store.triage_pending, company_ids, limit=limit)
+        bar = "=" * 70
+        print(f"\n{bar}\n  [TRIAGE] harvested rows -> gates -> hydrate -> score "
+              f"- {datetime.now():%Y-%m-%d %H:%M}")
+        print(f"  {len(rows)} pending row(s), {len(tracks)} track(s): "
+              f"{', '.join(t.id for t in tracks)}\n{bar}\n")
+        summary: dict[str, float] = {"pending": len(rows), **{g: 0 for g in store.TRIAGE_GATES},
+                                 "hydrated": 0, "scored": 0, "attempted": 0,
+                                 "surfaced": 0, "left": 0, "skip_score": 0, "secs": 0.0}
+        if not rows or not tracks:
+            print("  nothing to do")
+            return summary
+        t0 = time.monotonic()
+        stamp = now or datetime.now()
+        cutoff = (stamp - timedelta(days=RETRY_DAYS)).isoformat()
+
+        groups, companies_or_none = await db.run(_by_company, rows)
+        # A triage row's company_id is expected to resolve; store.get_company
+        # returning None for one is not handled specially anywhere else
+        # either, so this cast matches _by_company's real contract rather
+        # than adding new None-handling behaviour here.
+        companies = cast(dict[int, CompanyRow], companies_or_none)
+        mission_scorer = _once_per_pass(mission_scorer)
+        decided, survivors = await _free_gates(db, companies, groups, tracks,
+                                               mission_scorer, cutoff)
+        waiting: dict[str, str] = {}
+        if hydrate:
+            waiting = await _hydrate(db, companies, survivors, summary, stamp,
+                                     hydrate_fn, cutoff, decided, probe_fn)
+        final = await _body_gates(db, companies, survivors, tracks, mission_scorer,
+                                  decided, summary, waiting, cutoff)
+        scores, over_cap = await _score(final, summary, score_cap, fit, max_workers, prefer)
+        await db.batch(_write_verdicts, decided, final, scores, over_cap, tracks,
+                       summary, stamp)
+
+    summary["secs"] = time.monotonic() - t0
+    _print_summary(summary, bar)
+    return summary
+
+
+# --------------------------------------------------------------------------- #
+#  Re-queue: rows an earlier rule judged before it could resolve them right    #
+# --------------------------------------------------------------------------- #
+#
+# record_triage's own COALESCE columns and triage_pending's WHERE clause
+# both exist so a row triage has already judged is never looked at again --
+# correct for every ordinary pass, and wrong the one time the RULE itself
+# was the bug being fixed. Two such bugs, both still sitting in stored
+# verdicts the day this was written: 2,000 open rows carry a Workday "<N>
+# Locations" placeholder, and 527 of them were dropped at the geo gate
+# anyway by the strict body-regex fallback this module used to reach
+# immediately (NVIDIA 338, J&J 110, IQVIA 61, Merck 57, ICON 44); and 86
+# more rows carry a triage_status of 'ok'/'fit' although their stored
+# location names no configured-local place at all (Stryker "Cary,
+# Illinois", GSK "UK - County Durham - Barnard Castle", ICON "US, Blue
+# Bell (ICON); Canada, Burlington", J&J "Raynham, Massachusetts",
+# QuidelOrtho "US - CA - San Diego") -- locality.is_nc's per-segment
+# tightening (see its own docstring) now catches these, but a row already
+# marked 'ok' never runs through is_nc again on its own.
+#
+# This is the one-time repair for both: report what it would touch, and
+# only touch the store when told to.
+
+
+def _passed_tracks(detail: str | None) -> set[str]:
+    """The track labels a triage_detail string records as passed.
+
+    >>> sorted(_passed_tracks("a=ok;b=geo;c=ok"))
+    ['a', 'c']
+    >>> _passed_tracks(None)
+    set()
+    """
+    pairs = (p.split("=", 1) for p in (detail or "").split(";") if "=" in p)
+    return {k for k, v in pairs if v == OK}
+
+
+def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | None = None
+                    ) -> dict[str, Requeue]:
+    """{job_id: {"reason", "company_name", "title", "location"}} for every
+    open triaged row whose verdict the current geo rules would change.
+    Both reasons select on `triage_status` (ix_jobs_triage), so a row a
+    crawl adopted, which has none, is never selected; a closed row is left
+    as it is, since triage never re-judges one:
+
+      "geo:unknown-location"  a 'geo' drop whose location is still
+                              location_unknown on a board whose detail
+                              can name it (`Board.fills_location`);
+      "geo:non-local"         an 'ok'/'fit' row whose location names a
+                              place that fails is_nc and remote_signal,
+                              and that passed only geo-gated tracks
+                              (`tracks`, default roster_tracks());
+      "geo:remote"            a 'geo' drop whose location reads remote and
+                              US-eligible at a company the geo gate trusts
+                              for remote (the watch list, or a mission at
+                              a gated track's remote_mission_floor): a
+                              rule that now reads such a location as
+                              remote (a bare "United States") frees it.
+
+    >>> conn = store.connect(":memory:")
+    >>> cid = store.upsert_company(conn, {"name": "Acme", "ats": "workday",
+    ...                                   "handle": "acme", "mission_score": 0.9})
+    >>> for jid, loc in [("a", "2 Locations"), ("b", "Ulaanbaatar, Mongolia"),
+    ...                  ("c", "Ulaanbaatar, Mongolia"), ("d", "United States"),
+    ...                  ("e", "Remote - Philippines")]:
+    ...     _ = store.upsert_job(conn, {"job_id": jid, "company_id": cid,
+    ...                                 "company_name": "Acme", "title": "T",
+    ...                                 "location": loc})
+    >>> store.record_triage(conn, "a", "geo", "t=geo")
+    >>> store.record_triage(conn, "b", "ok", "t=ok", tracks=["t"])
+    >>> store.record_triage(conn, "c", "ok", "t=ok;s=ok", tracks=["t", "s"])
+    >>> store.record_triage(conn, "d", "geo", "t=geo")
+    >>> store.record_triage(conn, "e", "geo", "t=geo")
+    >>> tracks = [RuntimeTrack(id="t", db_path=Path("t.db"), track="t", geo_gate=True,
+    ...                        remote_mission_floor=0.85),
+    ...           RuntimeTrack(id="s", db_path=Path("s.db"), track="s", geo_gate=False)]
+    >>> {jid: v["reason"] for jid, v in requeue_reasons(conn, tracks).items()}
+    {'a': 'geo:unknown-location', 'b': 'geo:non-local', 'd': 'geo:remote'}
+
+    Notes:
+        Row "c" keeps its labels: the non-geo track passed it on its own
+        merits, and the geo-gated track's ranking (store.ranked_jobs with
+        NC_RE) already leaves a non-local row out of that list. A row
+        whose location is unknown passed on the body rule, which has not
+        changed, so it is not selected either.
+    """
+    gated = {t.track for t in roster_tracks(tracks) if t.geo_gate}
+    out: dict[str, Requeue] = {}
+
+    def add(r: sqlite3.Row, reason: str) -> None:
+        out[r["job_id"]] = {"reason": reason, "company_name": r["company_name"],
+                            "title": r["title"], "location": r["location"]}
+
+    located = [b.name for b in BOARDS.values() if b.fills_location]
+    for r in conn.execute(
+            "SELECT j.job_id, j.company_name, j.title, j.location "
+            "FROM open_jobs j JOIN companies c ON c.id = j.company_id "
+            f"WHERE j.triage_status='geo' AND c.ats IN ({','.join('?' * len(located))})",
+            located):
+        if location_unknown(r["location"]):
+            add(r, "geo:unknown-location")
+    for r in conn.execute(
+            "SELECT job_id, company_name, title, location, triage_detail "
+            "FROM open_jobs WHERE triage_status IN ('ok','fit')"):
+        loc = r["location"]
+        passed = _passed_tracks(r["triage_detail"])
+        if (location_unknown(loc) or is_nc(loc) or remote_signal(loc)
+                or not passed or not passed <= gated):
+            continue
+        add(r, "geo:non-local")
+    floors = [t.remote_mission_floor for t in roster_tracks(tracks) if t.geo_gate]
+    for r, _ in ops.remote_us_geo_drops(conn, floors, trusted=True):
+        add(r, "geo:remote")
+    return out
+
+
+async def requeue_rows(db_path: str | Path | None = None, apply: bool = False,
+                       sample: int = 10, tracks: Iterable[RuntimeTrack] | None = None
+                       ) -> dict[str, object]:
+    """Report (the default) or apply a re-queue of rows `requeue_reasons`
+    flags -- the CLI/registry surface (run_scraper.py --triage --requeue
+    [--requeue-apply], the registry `triage` op's same two params).
+
+    Contract:
+      * SELECTION -- exactly requeue_reasons(conn, tracks).
+      * RESET (apply=True only) -- store.clear_triage on each row: every
+        column triage wrote goes back to NULL (the body and the detail
+        retry clock stay), which is the blank slate store.triage_pending
+        selects.
+      * A row that loses its geo pass this way therefore carries NO track
+        label afterwards, so it cannot appear in any ranking or digest
+        until a later `run` re-judges it and it earns one back on merit.
+      * This function never re-judges a row itself -- it only clears the
+        old verdict. The NEXT plain `run` (this pass, or the next
+        scheduled one) is what puts a reset row back through the gates.
+      * DRY-RUN BY DEFAULT: apply=False only prints counts per reason and
+        a sample of up to `sample` rows ("company | title | location");
+        apply=True is the only thing that writes, in one batch.
+      * UNDO -- there is none built in: a reset overwrites the old
+        verdict/track/score columns in place. The next `run` almost
+        always leaves the row no worse off (it earns back whatever the
+        gates still agree with), but if a snapshot is wanted first, copy
+        the SQLite file (data/jobs.db) before passing --requeue-apply.
+
+    Returns {"counts": {reason: n}, "requeued": n if applied else 0}.
+    """
+    db_path = db_path or config.STORE_DB_PATH
+    async with store.Writer(db_path) as db:
+        found = await db.run(requeue_reasons, tracks)
+        counts: dict[str, int] = {}
+        for v in found.values():
+            counts[v["reason"]] = counts.get(v["reason"], 0) + 1
+        verb = "requeued" if apply else "would requeue"
+        print(f"  {verb} {len(found)} row(s): "
+              + (", ".join(f"{n} {reason}" for reason, n in sorted(counts.items()))
+                 or "none"))
+        for jid, v in list(found.items())[:sample]:
+            print(f"    {v['company_name']} | {v['title']} | {v['location'] or ''}")
+        if len(found) > sample:
+            print(f"    ... and {len(found) - sample} more")
+        if apply:
+            def _clear_all(conn: sqlite3.Connection) -> None:
+                for jid in found:
+                    store.clear_triage(conn, jid)
+            await db.batch(_clear_all)
+    return {"counts": counts, "requeued": len(found) if apply else 0}

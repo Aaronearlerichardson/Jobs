@@ -1,0 +1,49 @@
+requests>=2.31.0
+# The transport under net.http (requests stays as its model layer). No
+# aiodns: it does not run on Windows' default Proactor event loop.
+aiohttp>=3.11
+# 7.0 declares free-threading support (locks inside), so a 3.14t build keeps
+# its GIL off; 6.x turned it back on at import.
+lxml>=7.0.0b1
+# Board specs' HTML selectors are CSS, compiled to XPath (:has needs 1.2).
+cssselect>=1.2
+# The fallback HTML parser, for a page lxml cannot parse (net.util.parse_markup).
+html5lib>=1.1
+# robots.txt parsing and matching to RFC 9309 (net.robots). Pure Python, no
+# dependencies of its own; >=0.7 because robots._HostRules.parse's doctests pin
+# its word-boundary agent match.
+protego>=0.7
+
+# Local web UI (python webapp.py -> http://127.0.0.1:5533)
+flask>=3.0.0
+# Comment-preserving TOML writer for the Settings tab (profile.toml editing).
+tomlkit>=0.12
+
+# Typed validation: board specs, profile.toml, Claude replies; env settings.
+pydantic>=2.12
+pydantic-settings>=2.11
+# MinLen in src/rows.py (pydantic requires it, so it is already installed).
+annotated-types>=0.6
+# closed TypedDicts and ReadOnly (src/rows.py); typing has them from 3.13/3.15.
+typing_extensions>=4.13
+
+# Free Google alternative for discovery's web search.
+# DDG text search, no API key.
+ddgs>=5.0.0
+
+# Board directory (discover.py --import-boards, the name lookup): reads remote
+# Parquet. bareduckdb, not duckdb: DuckDB's own binding has no free-threaded
+# (3.14t) wheel (duckdb/duckdb-python discussion #40); this one binds the
+# same engine through its C API and ships one. It returns rows through pyarrow.
+bareduckdb>=0.12.155
+pyarrow>=26
+
+# Optional - only needed for `discover.py --capture-session` and friends.
+# After install, also run: `playwright install chromium`
+playwright>=1.44.0
+playwright-stealth>=1.0.6
+
+# Optional, Windows-only, NOT installed by default - desktop toast when a
+# digest is emailed ([tracks.*].notify = true). Absent, the toast is
+# silently skipped. Install by hand if you want it:
+#   winotify>=1.1.0

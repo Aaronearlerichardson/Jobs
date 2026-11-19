@@ -1,0 +1,35 @@
+# Non-US place vocabulary: the built-in names and codes locality.py reads.
+# A profile's [locations] non_us_regions ADD to `regions`; nothing here
+# depends on the profile. The rule for where a code counts (address
+# position) lives in src/match/locality.py, not in this data.
+
+# Names matched on word boundaries anywhere in a location. "victoria" is
+# left out (a Texas city, a Seychelles capital); its code is below.
+regions = [
+    "philippines", "india", "pakistan", "bangladesh", "nigeria", "kenya",
+    "south africa", "europe", "emea", "apac", "asia", "africa", "latam",
+    "latin america", "south america", "canada", "uk", "united kingdom",
+    "ireland", "australia", "new zealand", "germany", "france", "spain",
+    "poland", "portugal", "netherlands", "ukraine", "romania", "czech",
+    "brazil", "argentina", "mexico", "colombia", "vietnam", "indonesia",
+    "china", "japan", "singapore", "gb", "uae", "united arab emirates",
+    "dubai", "israel", "switzerland", "sweden", "denmark", "norway",
+    "finland", "belgium", "austria", "italy", "hungary", "slovakia",
+    "serbia", "korea", "taiwan", "malaysia", "saudi", "qatar",
+    "costa rica", "cape town", "johannesburg",
+    "quebec", "british columbia", "alberta", "manitoba", "saskatchewan",
+    "nova scotia", "newfoundland", "prince edward island", "yukon",
+    "nunavut", "northwest territories", "new south wales", "queensland",
+    "tasmania", "western australia", "northern territory",
+    "australian capital territory",
+]
+
+# Names that are also US cities (Ontario CA, New Brunswick NJ): a hit
+# only where the caller has already ruled out a same-segment US state,
+# so they stay out of the remote-eligibility vocabulary.
+segment_names = ["ontario", "new brunswick"]
+
+# Canadian province and Australian state codes, capitals. "WA" is also a
+# US state, so it is absent.
+codes = ["AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE",
+         "QC", "SK", "YT", "ACT", "NSW", "QLD", "SA", "TAS", "VIC"]
