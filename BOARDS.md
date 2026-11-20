@@ -1,15 +1,15 @@
 # Board health
 
-_5/6 platforms healthy · checked 2026-11-19 15:51 UTC · [how this works](tools/check_boards.py)_
+_5/6 platforms healthy · checked 2026-11-20 15:33 UTC · [how this works](tools/check_boards.py)_
 
 One request per platform against a public sample board, with the keyword filter widened so the number reflects the BOARD rather than any particular search profile.
 
 | | Platform | Sample board | Postings | Detail |
 |---|---|---|---:|---|
-| ✅ | `ashby` | Vanta | 73 | ok |
+| ✅ | `ashby` | Vanta | 69 | ok |
 | ✅ | `bamboohr` | EMS Biomedical | 109 | ok |
-| ✅ | `greenhouse` | Databricks | 908 | ok |
-| ✅ | `lever` | Veeva | 863 | ok |
+| ✅ | `greenhouse` | Databricks | 896 | ok |
+| ✅ | `lever` | Veeva | 860 | ok |
 | ✅ | `rippling` | Blackrock Neurotech | 6 | ok |
 | ⚠️ | `kula` | Precision Neuroscience | 0 | reachable but returned 0 (floor 1) |
 
